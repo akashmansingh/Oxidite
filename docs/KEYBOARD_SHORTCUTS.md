@@ -24,3 +24,8 @@ session, `Ctrl+W` is passed through so shells can use it for word deletion.
 The default theme-cycle binding moved to `Ctrl+Shift+Y` so `Ctrl+Shift+T` can
 create a terminal tab. Additional pane, notification, and workspace management
 bindings are not implemented yet.
+
+Use the sidebar's **Changes** and **Commit History** rows to open the active
+workspace's real Git status and commit log. Selecting a changed file opens a
+diff beside the current terminal; closing the diff returns to that terminal
+without closing its PTY.
