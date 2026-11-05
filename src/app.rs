@@ -2451,18 +2451,31 @@ impl App {
         clippy::cast_precision_loss
     )]
     pub fn split_active_pane(&mut self, direction: crate::pane::SplitDirection) {
+        let Some(active_tab) = self.tabs.get(self.active_tab_index) else {
+            return;
+        };
+        let current_cols = active_tab.terminal.grid.cols;
+        let current_rows = active_tab.terminal.grid.rows;
+        let fits = match direction {
+            crate::pane::SplitDirection::Vertical => {
+                current_cols >= crate::pane::MIN_PANE_COLS.saturating_mul(2)
+            }
+            crate::pane::SplitDirection::Horizontal => {
+                current_rows >= crate::pane::MIN_PANE_ROWS.saturating_mul(2)
+            }
+        };
+        if !fits {
+            return;
+        }
+
         let new_pane_id = self.next_tab_id;
         self.next_tab_id += 1;
-
         let Some(active_tab) = self.tabs.get_mut(self.active_tab_index) else {
             return;
         };
-
-        let current_cols = active_tab.terminal.grid.cols;
-        let current_rows = active_tab.terminal.grid.rows;
         let (new_cols, new_rows) = match direction {
-            crate::pane::SplitDirection::Vertical => ((current_cols / 2).max(10), current_rows),
-            crate::pane::SplitDirection::Horizontal => (current_cols, (current_rows / 2).max(4)),
+            crate::pane::SplitDirection::Vertical => (current_cols / 2, current_rows),
+            crate::pane::SplitDirection::Horizontal => (current_cols, current_rows / 2),
         };
 
         let new_terminal = Terminal::new(new_cols, new_rows);
@@ -5234,6 +5247,14 @@ mod tests {
         // Close pane
         app.close_active_pane();
         assert_eq!(app.tabs[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn split_is_rejected_when_two_minimum_panes_do_not_fit() {
+        let mut app = App::new(None, Terminal::new(40, 24), None);
+        app.split_active_pane(crate::pane::SplitDirection::Vertical);
+        assert_eq!(app.tabs[0].panes.len(), 1);
+        assert_eq!(app.next_tab_id, 1);
     }
 
     #[test]
