@@ -29,3 +29,7 @@ Use the sidebar's **Changes** and **Commit History** rows to open the active
 workspace's real Git status and commit log. Selecting a changed file opens a
 diff beside the current terminal; closing the diff returns to that terminal
 without closing its PTY.
+
+When a narrow window temporarily collapses the sidebar to make room for a Git
+or diff view, `Ctrl+Shift+B` closes that contextual view and restores the
+sidebar so workspace and session navigation stays reachable.
