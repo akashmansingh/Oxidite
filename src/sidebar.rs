@@ -73,6 +73,8 @@ pub enum SidebarAction {
     SelectWorkspace(usize),
     /// Select an agent chat session at index.
     SelectChat(usize),
+    /// Open the requested Git source-control view in the main workspace.
+    SelectSourceControl(crate::changes_panel::ChangesTab),
 }
 
 /// State representation required to layout and render the sidebar.
@@ -92,6 +94,12 @@ pub struct SidebarState {
     pub workspaces: Vec<WorkspaceEntry>,
     /// Agent chat sessions listed in lower section.
     pub chats: Vec<ChatEntry>,
+    /// Active Git view, displayed as a sidebar navigation item.
+    pub source_control_tab: crate::changes_panel::ChangesTab,
+    /// Number of repository changes for the sidebar badge.
+    pub changed_file_count: usize,
+    /// Number of commits available in the current history list.
+    pub commit_count: usize,
 }
 
 impl Default for SidebarState {
@@ -127,6 +135,9 @@ impl Default for SidebarState {
                     model: "Claude 3.7".to_string(),
                 },
             ],
+            source_control_tab: crate::changes_panel::ChangesTab::Changes,
+            changed_file_count: 0,
+            commit_count: 0,
         }
     }
 }
@@ -344,9 +355,60 @@ pub fn build_sidebar_labels(
         });
     }
 
-    // 5. Chats Section (if configured)
+    // 5. Source Control navigation. These rows select the real Git-backed views.
+    let source_y = last_y + 12.0;
+    labels.push(TabLabel {
+        text: "SOURCE CONTROL".to_string(),
+        x: 12.0,
+        y: source_y,
+        color: GlyphonColor::rgb(105, 110, 125),
+        bold: true,
+        max_width: sidebar_width - 24.0,
+    });
+    for (row, (tab, text)) in [
+        (
+            crate::changes_panel::ChangesTab::Changes,
+            format!("Changes ({})", state.changed_file_count),
+        ),
+        (
+            crate::changes_panel::ChangesTab::History,
+            format!("Commit History ({})", state.commit_count),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row_y = source_y + 18.0 + row as f32 * SIDEBAR_ITEM_HEIGHT;
+        labels.push(TabLabel {
+            text: if state.source_control_tab == tab {
+                "•"
+            } else {
+                " "
+            }
+            .to_string(),
+            x: 14.0,
+            y: row_y + 2.0,
+            color: GlyphonColor::rgb(98, 169, 245),
+            bold: true,
+            max_width: 14.0,
+        });
+        labels.push(TabLabel {
+            text,
+            x: 30.0,
+            y: row_y + 2.0,
+            color: if state.source_control_tab == tab {
+                GlyphonColor::rgb(229, 231, 235)
+            } else {
+                GlyphonColor::rgb(146, 149, 161)
+            },
+            bold: state.source_control_tab == tab,
+            max_width: sidebar_width - 42.0,
+        });
+    }
+
+    // 6. Chats Section (if configured)
     if !state.chats.is_empty() {
-        let chats_header_y = last_y + 12.0;
+        let chats_header_y = source_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT + 8.0;
         labels.push(TabLabel {
             text: format!("CHATS ({} active)", state.chats.len()),
             x: 12.0,
@@ -433,8 +495,18 @@ pub fn hit_test_sidebar(
         }
     }
 
+    let source_header_y = list_end_y + 6.0;
+    if y >= source_header_y + 18.0 && y < source_header_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT {
+        let row = ((y - source_header_y - 18.0) / SIDEBAR_ITEM_HEIGHT) as usize;
+        return if row == 0 {
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::Changes)
+        } else {
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::History)
+        };
+    }
+
     // Check if clicked inside chats section below sessions list
-    let chats_start_y = list_end_y + 30.0;
+    let chats_start_y = source_header_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT + 8.0 + 18.0;
     if y >= chats_start_y {
         let relative_y = y - chats_start_y;
         let chat_idx = (relative_y / CHAT_ROW_HEIGHT) as usize;
@@ -525,13 +597,38 @@ mod tests {
             active_tab_index: 0,
             workspaces: Vec::new(),
             chats: Vec::new(),
+            source_control_tab: crate::changes_panel::ChangesTab::Changes,
+            changed_file_count: 3,
+            commit_count: 5,
         };
         let labels = build_sidebar_labels(&state, 36.0, 240.0);
-        assert_eq!(labels.len(), 8);
         assert_eq!(labels[0].text, "WORKSPACES");
         assert_eq!(labels[1].text, "+");
         assert!(labels[2].text.contains("Oxidite"));
         assert!(labels[2].text.contains("main"));
         assert!(labels[3].text.contains("SESSIONS"));
+        assert!(labels.iter().any(|label| label.text == "Changes (3)"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == "Commit History (5)")
+        );
+    }
+
+    #[test]
+    fn hit_test_sidebar_routes_source_control_navigation() {
+        let sidebar_y = 36.0;
+        let workspace_end = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + WORKSPACE_ROW_HEIGHT;
+        let sessions_end = workspace_end + 4.0 + 24.0 + 2.0 * SIDEBAR_ITEM_HEIGHT;
+        let changes_y = sessions_end + 24.0 + 5.0;
+        let history_y = changes_y + SIDEBAR_ITEM_HEIGHT;
+        assert_eq!(
+            hit_test_sidebar(60.0, changes_y, sidebar_y, 500.0, 240.0, 2, 1),
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::Changes)
+        );
+        assert_eq!(
+            hit_test_sidebar(60.0, history_y, sidebar_y, 500.0, 240.0, 2, 1),
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::History)
+        );
     }
 }

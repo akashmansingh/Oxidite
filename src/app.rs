@@ -331,6 +331,11 @@ impl App {
         };
         let total_adds: usize = changed_files.iter().map(|f| f.additions).sum();
         let total_dels: usize = changed_files.iter().map(|f| f.deletions).sum();
+        let history = if is_git {
+            crate::git::query_git_history(&cwd, 30)
+        } else {
+            Vec::new()
+        };
 
         let sidebar_open = true;
         let sidebar_state = crate::sidebar::SidebarState {
@@ -367,17 +372,15 @@ impl App {
                     model: "Antigravity".to_string(),
                 },
             ],
+            source_control_tab: crate::changes_panel::ChangesTab::Changes,
+            changed_file_count: changed_files.len(),
+            commit_count: history.len(),
         };
 
         let selected_file_index = if changed_files.is_empty() {
             None
         } else {
             Some(0)
-        };
-        let history = if is_git {
-            crate::git::query_git_history(&cwd, 30)
-        } else {
-            Vec::new()
         };
         let changes_panel_state = crate::changes_panel::ChangesPanelState {
             active_tab: crate::changes_panel::ChangesTab::Changes,
@@ -519,7 +522,8 @@ impl App {
         let after_sidebar = (win_w - sidebar_w).max(0.0);
         // Context panels are optional. Keep the primary terminal at least 280px wide and
         // only allocate the Git panel when it fits alongside a readable terminal/diff pair.
-        let changes_panel_visible = self.changes_panel_open && after_sidebar >= 840.0 * scale;
+        let changes_min_space = (if self.diff_view_open { 840.0 } else { 520.0 }) * scale;
+        let changes_panel_visible = self.changes_panel_open && after_sidebar >= changes_min_space;
         let changes_panel_w = if changes_panel_visible {
             (self.changes_panel_width * scale)
                 .clamp(240.0 * scale, 340.0 * scale)
@@ -3215,6 +3219,9 @@ impl App {
                 workspaces: self.workspace_sidebar_entries(),
                 chats: self.sidebar_state.chats.clone(),
                 git_status: self.sidebar_state.git_status.clone(),
+                source_control_tab: self.changes_panel_state.active_tab,
+                changed_file_count: self.changes_panel_state.changed_files.len(),
+                commit_count: self.changes_panel_state.history.len(),
             };
             tab_labels.extend(crate::sidebar::build_sidebar_labels(
                 &sidebar_state,
@@ -4180,6 +4187,16 @@ impl ApplicationHandler<AppEvent> for App {
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::SelectChat(_idx) => {
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectSourceControl(tab) => {
+                                self.changes_panel_state.active_tab = tab;
+                                self.changes_panel_state.commit_input_focused = false;
+                                self.changes_panel_open = true;
+                                self.diff_view_open = false;
+                                self.refresh_git_status();
+                                self.handle_resize(win.inner_size());
+                                self.terminal.mark_all_dirty();
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::None => {}
