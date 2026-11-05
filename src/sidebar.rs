@@ -485,7 +485,7 @@ pub fn hit_test_sidebar(
     }
 
     // Check if clicked inside sessions list
-    let list_start_y = workspace_end_y + 4.0 + 24.0;
+    let list_start_y = workspace_end_y + 4.0 + 18.0;
     let list_end_y = list_start_y + (tab_count as f32 * SIDEBAR_ITEM_HEIGHT);
     if y >= list_start_y && y < list_end_y {
         let relative_y = y - list_start_y;
@@ -495,7 +495,7 @@ pub fn hit_test_sidebar(
         }
     }
 
-    let source_header_y = list_end_y + 6.0;
+    let source_header_y = list_end_y + 12.0;
     if y >= source_header_y + 18.0 && y < source_header_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT {
         let row = ((y - source_header_y - 18.0) / SIDEBAR_ITEM_HEIGHT) as usize;
         return if row == 0 {
@@ -547,7 +547,7 @@ mod tests {
         );
 
         // Click item 0
-        let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + 24.0 + 5.0;
+        let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + 18.0 + 5.0;
         assert_eq!(
             hit_test_sidebar(
                 50.0,
@@ -619,8 +619,8 @@ mod tests {
     fn hit_test_sidebar_routes_source_control_navigation() {
         let sidebar_y = 36.0;
         let workspace_end = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + WORKSPACE_ROW_HEIGHT;
-        let sessions_end = workspace_end + 4.0 + 24.0 + 2.0 * SIDEBAR_ITEM_HEIGHT;
-        let changes_y = sessions_end + 24.0 + 5.0;
+        let sessions_end = workspace_end + 4.0 + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT;
+        let changes_y = sessions_end + 12.0 + 18.0 + 5.0;
         let history_y = changes_y + SIDEBAR_ITEM_HEIGHT;
         assert_eq!(
             hit_test_sidebar(60.0, changes_y, sidebar_y, 500.0, 240.0, 2, 1),
