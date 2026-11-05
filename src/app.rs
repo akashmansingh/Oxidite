@@ -4206,14 +4206,12 @@ impl ApplicationHandler<AppEvent> for App {
                 }
 
                 // Check changes panel click if changes panel is open
-                let changes_panel_px = if self.changes_panel_open {
-                    f64::from((self.changes_panel_width * self.scale_factor as f32).round())
-                } else {
-                    0.0
-                };
                 let win_w_f64 = f64::from(win.inner_size().width);
-                let panel_x = win_w_f64 - changes_panel_px;
-                if self.changes_panel_open && self.cursor_pixel_pos.0 >= panel_x {
+                let panel_geometry =
+                    self.compute_pane_geometry(win_w_f64 as f32, win.inner_size().height as f32);
+                let changes_panel_px = f64::from(panel_geometry.changes_panel_w);
+                let panel_x = f64::from(panel_geometry.panel_x);
+                if panel_geometry.changes_panel_visible && self.cursor_pixel_pos.0 >= panel_x {
                     if state == winit::event::ElementState::Pressed {
                         let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
                         let status_bar_px = if self.config.status_bar {
@@ -4262,6 +4260,7 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.diff_view_state.staged = file.staged;
                                     self.diff_view_state.scroll_offset = 0;
                                     self.diff_view_open = true;
+                                    self.changes_panel_open = false;
                                     self.handle_resize(win.inner_size());
                                     self.terminal.mark_all_dirty();
                                 }
@@ -4415,7 +4414,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // Check diff view click if diff view is open
                 let geo =
                     self.compute_pane_geometry(win_w_f64 as f32, win.inner_size().height as f32);
-                if self.diff_view_open
+                if geo.diff_view_visible
                     && (self.cursor_pixel_pos.0 as f32) >= geo.diff_x
                     && (self.cursor_pixel_pos.0 as f32) < geo.diff_x + geo.diff_w
                 {

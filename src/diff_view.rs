@@ -1047,52 +1047,6 @@ impl DiffHeaderLayout {
         };
         let open_x = (close_x - open_w - 4.0).max(left_boundary);
 
-        let stage_w = if is_tight {
-            24.0
-        } else if is_compact {
-            48.0
-        } else {
-            72.0
-        };
-        let stage_x = (open_x - stage_w - 4.0).max(left_boundary);
-
-        let (export_btn_rect, changes_btn_rect, approve_btn_rect) = if state.review_mode {
-            let exp_w = if is_tight {
-                24.0
-            } else if is_compact {
-                46.0
-            } else {
-                68.0
-            };
-            let exp_x = (stage_x - exp_w - 4.0).max(left_boundary);
-
-            let chg_w = if is_tight {
-                24.0
-            } else if is_compact {
-                52.0
-            } else {
-                76.0
-            };
-            let chg_x = (exp_x - chg_w - 4.0).max(left_boundary);
-
-            let app_w = if is_tight {
-                24.0
-            } else if is_compact {
-                52.0
-            } else {
-                76.0
-            };
-            let app_x = (chg_x - app_w - 4.0).max(left_boundary);
-
-            (
-                Some((exp_x, btn_y, exp_w, btn_h)),
-                Some((chg_x, btn_y, chg_w, btn_h)),
-                Some((app_x, btn_y, app_w, btn_h)),
-            )
-        } else {
-            (None, None, None)
-        };
-
         Self {
             is_compact,
             is_tight,
@@ -1104,10 +1058,10 @@ impl DiffHeaderLayout {
             review_tab_rect,
             verdict_badge_rect,
             ai_review_btn_rect,
-            approve_btn_rect,
-            changes_btn_rect,
-            export_btn_rect,
-            stage_btn_rect: (stage_x, btn_y, stage_w, btn_h),
+            approve_btn_rect: None,
+            changes_btn_rect: None,
+            export_btn_rect: None,
+            stage_btn_rect: (diff_x, btn_y, 0.0, btn_h),
             open_btn_rect: (open_x, btn_y, open_w, btn_h),
             close_btn_rect: (close_x, btn_y, close_w, btn_h),
         }
@@ -1134,28 +1088,10 @@ impl DiffHeaderLayout {
         {
             return DiffAction::NextFile;
         }
-        if let Some(r) = self.approve_btn_rect
-            && in_box(r)
-        {
-            return DiffAction::SetVerdict(ReviewVerdict::Approved);
-        }
-        if let Some(r) = self.changes_btn_rect
-            && in_box(r)
-        {
-            return DiffAction::SetVerdict(ReviewVerdict::ChangesRequested);
-        }
-        if let Some(r) = self.export_btn_rect
-            && in_box(r)
-        {
-            return DiffAction::CopyReviewSummary;
-        }
         if let Some(r) = self.ai_review_btn_rect
             && in_box(r)
         {
             return DiffAction::RunAiReview;
-        }
-        if in_box(self.stage_btn_rect) {
-            return DiffAction::ToggleStage;
         }
         if in_box(self.open_btn_rect) {
             return DiffAction::OpenFile;
@@ -1367,40 +1303,6 @@ pub fn assemble_diff_view_quads(
         ));
     }
 
-    if let Some(app) = layout.approve_btn_rect {
-        push_button_quads(
-            &mut quads,
-            app,
-            [0.08, 0.20, 0.12, 0.95],
-            [0.20, 0.65, 0.35, 0.9],
-        );
-    }
-
-    if let Some(chg) = layout.changes_btn_rect {
-        push_button_quads(
-            &mut quads,
-            chg,
-            [0.24, 0.10, 0.12, 0.95],
-            [0.70, 0.25, 0.28, 0.9],
-        );
-    }
-
-    if let Some(exp) = layout.export_btn_rect {
-        push_button_quads(
-            &mut quads,
-            exp,
-            [0.08, 0.10, 0.15, 0.95],
-            [0.25, 0.38, 0.55, 0.9],
-        );
-    }
-
-    // Stage button
-    push_button_quads(
-        &mut quads,
-        layout.stage_btn_rect,
-        [0.07, 0.09, 0.13, 0.95],
-        [0.22, 0.28, 0.38, 0.9],
-    );
     // Open File button
     push_button_quads(
         &mut quads,
@@ -1894,25 +1796,27 @@ pub fn build_diff_view_labels(
         });
     }
 
-    // Stage button
-    let stage_text = if layout.is_tight {
-        if state.staged { "-" } else { "+" }
-    } else if layout.is_compact {
-        if state.staged { "Unstage" } else { "Stage" }
-    } else if state.staged {
-        "Unstage"
-    } else {
-        "Stage"
-    };
-    let stage_offset = if layout.is_tight { 6.0 } else { 8.0 };
-    labels.push(TabLabel {
-        text: stage_text.to_string(),
-        x: layout.stage_btn_rect.0 + stage_offset,
-        y: btn_text_y,
-        color: GlyphonColor::rgb(220, 225, 240),
-        bold: false,
-        max_width: (layout.stage_btn_rect.2 - 4.0).max(10.0),
-    });
+    // Staging is handled in the Source Control view; keep no duplicate header control.
+    if layout.stage_btn_rect.2 > 0.0 {
+        let stage_text = if layout.is_tight {
+            if state.staged { "-" } else { "+" }
+        } else if layout.is_compact {
+            if state.staged { "Unstage" } else { "Stage" }
+        } else if state.staged {
+            "Unstage"
+        } else {
+            "Stage"
+        };
+        let stage_offset = if layout.is_tight { 6.0 } else { 8.0 };
+        labels.push(TabLabel {
+            text: stage_text.to_string(),
+            x: layout.stage_btn_rect.0 + stage_offset,
+            y: btn_text_y,
+            color: GlyphonColor::rgb(220, 225, 240),
+            bold: false,
+            max_width: (layout.stage_btn_rect.2 - 4.0).max(10.0),
+        });
+    }
 
     // Open File button
     let open_text = if layout.is_tight {
@@ -2634,7 +2538,10 @@ mod tests {
         assert_ne!(labels.len(), 0);
         assert!(labels.iter().any(|l| l.text.contains("sw.js")));
         assert!(labels.iter().any(|l| l.text.contains("CACHE_NAME")));
-        assert!(labels.iter().any(|l| l.text.contains("Appr")));
+        assert!(!labels.iter().any(|l| l.text.contains("Approve")));
+        assert!(!labels.iter().any(|l| l.text.contains("Changes")));
+        assert!(!labels.iter().any(|l| l.text.contains("Export")));
+        assert!(!labels.iter().any(|l| l.text.contains("Stage")));
         assert!(labels.iter().any(|l| l.text.contains("Review")));
         assert!(labels.iter().any(|l| l.text.contains("AI")));
     }
@@ -2673,34 +2580,10 @@ mod tests {
             ),
             DiffAction::ToggleReviewMode
         );
-        assert_eq!(
-            hit_test_diff_view(
-                layout.approve_btn_rect.unwrap().0 + 10.0,
-                y + 10.0,
-                x,
-                y,
-                w,
-                h,
-                &state
-            ),
-            DiffAction::SetVerdict(ReviewVerdict::Approved)
-        );
-        assert_eq!(
-            hit_test_diff_view(
-                layout.changes_btn_rect.unwrap().0 + 10.0,
-                y + 10.0,
-                x,
-                y,
-                w,
-                h,
-                &state
-            ),
-            DiffAction::SetVerdict(ReviewVerdict::ChangesRequested)
-        );
-        assert_eq!(
-            hit_test_diff_view(layout.stage_btn_rect.0 + 10.0, y + 10.0, x, y, w, h, &state),
-            DiffAction::ToggleStage
-        );
+        assert!(layout.approve_btn_rect.is_none());
+        assert!(layout.changes_btn_rect.is_none());
+        assert!(layout.export_btn_rect.is_none());
+        assert_eq!(layout.stage_btn_rect.2, 0.0);
         assert_eq!(
             hit_test_diff_view(layout.open_btn_rect.0 + 10.0, y + 10.0, x, y, w, h, &state),
             DiffAction::OpenFile
