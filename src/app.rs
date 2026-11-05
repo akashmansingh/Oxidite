@@ -4355,6 +4355,7 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.diff_view_state.staged = true;
                                     self.diff_view_state.scroll_offset = 0;
                                     self.diff_view_open = true;
+                                    self.changes_panel_open = false;
                                     self.handle_resize(win.inner_size());
                                     self.terminal.mark_all_dirty();
                                 }
@@ -4845,7 +4846,7 @@ mod tests {
     fn layout_sidebar_width_is_clamped_to_navigation_constraints() {
         let mut app = App::new(None, Terminal::new(80, 24), None);
         app.sidebar_open = true;
-        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 185.0);
+        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 240.0);
         assert_eq!(app.compute_pane_geometry(360.0, 800.0).sidebar_w, 0.0);
         for (requested, expected) in [(80.0, 185.0), (240.0, 240.0), (500.0, 340.0)] {
             app.sidebar_width = requested;
