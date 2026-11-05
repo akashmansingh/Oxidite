@@ -466,9 +466,9 @@ impl App {
             workspace_tab_indices: vec![0],
             persistence_enabled: false,
             last_window_size: None,
-            changes_panel_open: true,
+            changes_panel_open: false,
             changes_panel_state,
-            diff_view_open: true,
+            diff_view_open: false,
             diff_view_state,
             settings_open: false,
             sidebar_width: crate::sidebar::SIDEBAR_WIDTH,
@@ -4755,6 +4755,8 @@ mod tests {
         assert!(app.pty_exit_code.is_none());
         assert_eq!(app.terminal.grid.cols, 80);
         assert_eq!(app.terminal.grid.rows, 24);
+        assert!(!app.changes_panel_open);
+        assert!(!app.diff_view_open);
         assert!((app.base_font_size - 14.0).abs() < f32::EPSILON);
         assert!((app.scale_factor - 1.0).abs() < f64::EPSILON);
     }
