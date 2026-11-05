@@ -255,10 +255,14 @@ pub struct PaneGeometry {
     pub content_h: f32,
     pub sidebar_w: f32,
     pub changes_panel_w: f32,
+    /// Whether the changes panel fits without stealing the terminal's minimum width.
+    pub changes_panel_visible: bool,
     pub term_w: f32,
     pub diff_w: f32,
     pub diff_x: f32,
     pub panel_x: f32,
+    /// Whether the diff editor fits beside the terminal at its minimum readable width.
+    pub diff_view_visible: bool,
 }
 
 /// Active draggable pane splitter dividing GUI columns.
@@ -493,6 +497,7 @@ impl App {
     #[must_use]
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub fn compute_pane_geometry(&self, win_w: f32, win_h: f32) -> PaneGeometry {
+        let scale = (self.scale_factor as f32).max(0.5);
         let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
         let status_bar_px = if self.config.status_bar {
             (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32).round()
@@ -503,25 +508,37 @@ impl App {
         let content_bottom = (win_h - status_bar_px).max(content_top);
         let content_h = (content_bottom - content_top).max(0.0);
 
-        let sidebar_w = if self.sidebar_open {
-            (self.sidebar_width * self.scale_factor as f32).round()
+        let sidebar_w = if self.sidebar_open && win_w >= 500.0 * scale {
+            (self.sidebar_width * scale)
+                .clamp(185.0 * scale, 340.0 * scale)
+                .min(win_w * 0.38)
+                .round()
         } else {
             0.0
         };
-        let changes_panel_w = if self.changes_panel_open {
-            (self.changes_panel_width * self.scale_factor as f32).round()
+        let after_sidebar = (win_w - sidebar_w).max(0.0);
+        // Context panels are optional. Keep the primary terminal at least 280px wide and
+        // only allocate the Git panel when it fits alongside a readable terminal/diff pair.
+        let changes_panel_visible = self.changes_panel_open && after_sidebar >= 840.0 * scale;
+        let changes_panel_w = if changes_panel_visible {
+            (self.changes_panel_width * scale)
+                .clamp(240.0 * scale, 340.0 * scale)
+                .min(after_sidebar - 560.0 * scale)
+                .round()
         } else {
             0.0
         };
 
         let avail_middle = (win_w - sidebar_w - changes_panel_w).max(0.0);
-        let term_w = if self.diff_view_open {
-            (avail_middle * self.term_split_ratio).clamp(160.0, (avail_middle - 160.0).max(160.0))
+        let diff_view_visible = self.diff_view_open && avail_middle >= 560.0 * scale;
+        let term_w = if diff_view_visible {
+            (avail_middle * self.term_split_ratio)
+                .clamp(280.0 * scale, avail_middle - 280.0 * scale)
         } else {
             avail_middle
         };
-        let diff_w = if self.diff_view_open {
-            (avail_middle - term_w).max(0.0)
+        let diff_w = if diff_view_visible {
+            avail_middle - term_w
         } else {
             0.0
         };
@@ -538,10 +555,12 @@ impl App {
             content_h,
             sidebar_w,
             changes_panel_w,
+            changes_panel_visible,
             term_w,
             diff_w,
             diff_x,
             panel_x,
+            diff_view_visible,
         }
     }
 
@@ -1321,41 +1340,11 @@ impl App {
         // 2. Terminal grid (content area between tab bar and status bar, with padding)
         let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
         let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
-        let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round() as u32;
-        let status_bar_px = if self.config.status_bar {
-            (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32).round() as u32
-        } else {
-            0
-        };
-        let sidebar_px = if self.sidebar_open {
-            (self.sidebar_width * self.scale_factor as f32).round() as u32
-        } else {
-            0
-        };
-        let changes_panel_px = if self.changes_panel_open {
-            (self.changes_panel_width * self.scale_factor as f32).round() as u32
-        } else {
-            0
-        };
-
-        let avail_middle = size
-            .width
-            .saturating_sub(sidebar_px)
-            .saturating_sub(changes_panel_px);
-        let term_width = if self.diff_view_open {
-            ((avail_middle as f32 * self.term_split_ratio).round() as u32)
-                .clamp(160, avail_middle.saturating_sub(160).max(160))
-        } else {
-            avail_middle
-        };
-
-        let content_width = term_width
+        let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+        let content_width = (geometry.term_w.round() as u32)
             .saturating_sub((effective_pad_x * 2.0) as u32)
             .max(1);
-        let content_height = size
-            .height
-            .saturating_sub(tab_bar_px)
-            .saturating_sub(status_bar_px)
+        let content_height = (geometry.content_h.round() as u32)
             .saturating_sub((effective_pad_y * 2.0) as u32)
             .max(1);
         let content_size = PhysicalSize::new(content_width, content_height);
@@ -2811,6 +2800,7 @@ impl App {
             quad_vertices.extend_from_slice(&crate::sidebar::assemble_sidebar_quads(
                 geo.tab_bar_px,
                 geo.content_h,
+                geo.sidebar_w,
                 accent_color,
                 self.active_tab_index,
                 self.tabs.len(),
@@ -3007,7 +2997,7 @@ impl App {
         }
 
         // 5.5. Central Side-by-side Diff View workspace quads (if open)
-        if self.diff_view_open && geo.diff_w > 10.0 {
+        if geo.diff_view_visible && geo.diff_w > 10.0 {
             quad_vertices.extend_from_slice(&crate::diff_view::assemble_diff_view_quads(
                 geo.diff_x,
                 geo.tab_bar_px,
@@ -3019,7 +3009,7 @@ impl App {
         }
 
         // 5.6. Right Changes & Git Panel quads (if open)
-        if self.changes_panel_open && geo.changes_panel_w > 10.0 {
+        if geo.changes_panel_visible && geo.changes_panel_w > 10.0 {
             quad_vertices.extend_from_slice(&crate::changes_panel::assemble_changes_panel_quads(
                 geo.panel_x,
                 geo.tab_bar_px,
@@ -3229,10 +3219,11 @@ impl App {
             tab_labels.extend(crate::sidebar::build_sidebar_labels(
                 &sidebar_state,
                 geo.tab_bar_px,
+                geo.sidebar_w,
             ));
         }
 
-        if self.diff_view_open && geo.diff_w > 10.0 {
+        if geo.diff_view_visible && geo.diff_w > 10.0 {
             tab_labels.extend(crate::diff_view::build_diff_view_labels(
                 geo.diff_x,
                 geo.tab_bar_px,
@@ -3242,7 +3233,7 @@ impl App {
             ));
         }
 
-        if self.changes_panel_open && geo.changes_panel_w > 10.0 {
+        if geo.changes_panel_visible && geo.changes_panel_w > 10.0 {
             tab_labels.extend(crate::changes_panel::build_changes_panel_labels(
                 geo.panel_x,
                 geo.tab_bar_px,
@@ -4132,11 +4123,13 @@ impl ApplicationHandler<AppEvent> for App {
                 }
 
                 // Check sidebar click if sidebar is open
-                let sidebar_px = if self.sidebar_open {
-                    f64::from((self.sidebar_width * self.scale_factor as f32).round())
-                } else {
-                    0.0
-                };
+                let sidebar_px = f64::from(
+                    self.compute_pane_geometry(
+                        win.inner_size().width as f32,
+                        win.inner_size().height as f32,
+                    )
+                    .sidebar_w,
+                );
                 if self.sidebar_open && self.cursor_pixel_pos.0 <= sidebar_px {
                     if state == winit::event::ElementState::Pressed {
                         let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
@@ -4153,6 +4146,7 @@ impl ApplicationHandler<AppEvent> for App {
                             self.cursor_pixel_pos.1 as f32,
                             tab_bar_px,
                             sidebar_h,
+                            sidebar_px as f32,
                             self.tabs.len(),
                             self.workspace_manager.workspaces().len(),
                         );
@@ -4759,6 +4753,58 @@ mod tests {
         assert!(!app.diff_view_open);
         assert!((app.base_font_size - 14.0).abs() < f32::EPSILON);
         assert!((app.scale_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn layout_geometry_never_overlaps_or_exceeds_the_window() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.sidebar_open = true;
+        app.changes_panel_open = true;
+        app.diff_view_open = true;
+        app.sidebar_width = 240.0;
+
+        for width in [1920.0, 1600.0, 1366.0, 1280.0, 1024.0, 800.0, 640.0, 420.0] {
+            let geo = app.compute_pane_geometry(width, 800.0);
+            assert!(
+                geo.sidebar_w >= 0.0 && geo.sidebar_w <= width,
+                "width={width}"
+            );
+            assert!(geo.term_w >= 0.0 && geo.diff_w >= 0.0 && geo.changes_panel_w >= 0.0);
+            assert!(
+                geo.sidebar_w + geo.term_w <= geo.diff_x + 0.01,
+                "width={width}"
+            );
+            assert!(
+                geo.diff_x + geo.diff_w <= geo.panel_x + 0.01,
+                "width={width}"
+            );
+            assert!(
+                geo.panel_x + geo.changes_panel_w <= width + 0.01,
+                "width={width}"
+            );
+            assert!(
+                geo.term_w + geo.diff_w + geo.changes_panel_w + geo.sidebar_w <= width + 0.01,
+                "width={width}"
+            );
+            if geo.diff_view_visible {
+                assert!(
+                    geo.term_w >= 280.0 && geo.diff_w >= 280.0,
+                    "width={width}: {geo:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_sidebar_width_is_clamped_to_navigation_constraints() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.sidebar_open = true;
+        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 0.0);
+        for (requested, expected) in [(80.0, 185.0), (240.0, 240.0), (500.0, 340.0)] {
+            app.sidebar_width = requested;
+            let geo = app.compute_pane_geometry(1200.0, 800.0);
+            assert_eq!(geo.sidebar_w, expected);
+        }
     }
 
     #[test]

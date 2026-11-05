@@ -153,6 +153,7 @@ pub fn detect_git_branch(cwd: &Path) -> Option<String> {
 pub fn assemble_sidebar_quads(
     sidebar_y: f32,
     sidebar_height: f32,
+    sidebar_width: f32,
     accent_color: [f32; 4],
     active_tab_index: usize,
     tab_count: usize,
@@ -163,14 +164,14 @@ pub fn assemble_sidebar_quads(
     quads.extend_from_slice(&build_quad_vertices(
         0.0,
         sidebar_y,
-        SIDEBAR_WIDTH,
+        sidebar_width,
         sidebar_height,
         [0.0, 0.0, 0.0, 1.0],
     ));
 
     // 2. Right vertical border dividing sidebar from terminal grid / agent pane (#181a20)
     quads.extend_from_slice(&build_quad_vertices(
-        SIDEBAR_WIDTH - 1.0,
+        sidebar_width - 1.0,
         sidebar_y,
         1.0,
         sidebar_height,
@@ -181,7 +182,7 @@ pub fn assemble_sidebar_quads(
     quads.extend_from_slice(&build_quad_vertices(
         0.0,
         sidebar_y + SIDEBAR_HEADER_HEIGHT - 1.0,
-        SIDEBAR_WIDTH,
+        sidebar_width,
         1.0,
         [0.095, 0.105, 0.13, 1.0],
     ));
@@ -197,7 +198,7 @@ pub fn assemble_sidebar_quads(
             quads.extend_from_slice(&build_quad_vertices(
                 6.0,
                 item_y,
-                SIDEBAR_WIDTH - 12.0,
+                sidebar_width - 12.0,
                 SIDEBAR_ITEM_HEIGHT - 4.0,
                 [0.045, 0.048, 0.065, 0.95],
             ));
@@ -219,7 +220,11 @@ pub fn assemble_sidebar_quads(
 /// Builds formatted text labels for the sidebar workspace header, branch, sessions, and chats.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
-pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabel> {
+pub fn build_sidebar_labels(
+    state: &SidebarState,
+    sidebar_y: f32,
+    sidebar_width: f32,
+) -> Vec<TabLabel> {
     let mut labels = Vec::new();
 
     // 1. Workspace Section Header
@@ -229,11 +234,11 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         y: sidebar_y + 6.0,
         color: GlyphonColor::rgb(105, 110, 125),
         bold: true,
-        max_width: SIDEBAR_WIDTH - 24.0,
+        max_width: sidebar_width - 24.0,
     });
     labels.push(TabLabel {
         text: "+".to_string(),
-        x: SIDEBAR_WIDTH - 24.0,
+        x: sidebar_width - 24.0,
         y: sidebar_y + 5.0,
         color: GlyphonColor::rgb(53, 201, 138),
         bold: true,
@@ -252,7 +257,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         y: sidebar_y + 20.0,
         color: GlyphonColor::rgb(220, 225, 240),
         bold: true,
-        max_width: SIDEBAR_WIDTH - 24.0,
+        max_width: sidebar_width - 24.0,
     });
 
     // 3. Workspace rows
@@ -284,7 +289,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
                 GlyphonColor::rgb(146, 149, 161)
             },
             bold: workspace.is_active,
-            max_width: SIDEBAR_WIDTH - 42.0,
+            max_width: sidebar_width - 42.0,
         });
     }
 
@@ -298,7 +303,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         y: sessions_y,
         color: GlyphonColor::rgb(105, 110, 125),
         bold: true,
-        max_width: SIDEBAR_WIDTH - 24.0,
+        max_width: sidebar_width - 24.0,
     });
 
     // 4. Session Items
@@ -335,7 +340,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
             y: item_y + 2.0,
             color: text_color,
             bold: is_active,
-            max_width: SIDEBAR_WIDTH - 40.0,
+            max_width: sidebar_width - 40.0,
         });
     }
 
@@ -348,7 +353,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
             y: chats_header_y,
             color: GlyphonColor::rgb(105, 110, 125),
             bold: true,
-            max_width: SIDEBAR_WIDTH - 24.0,
+            max_width: sidebar_width - 24.0,
         });
 
         for (c_idx, chat) in state.chats.iter().enumerate() {
@@ -376,7 +381,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
                 y: row_y + 2.0,
                 color: GlyphonColor::rgb(210, 215, 230),
                 bold: chat.status == ChatStatus::Working,
-                max_width: SIDEBAR_WIDTH - 42.0,
+                max_width: sidebar_width - 42.0,
             });
         }
     }
@@ -396,13 +401,14 @@ pub fn hit_test_sidebar(
     y: f32,
     sidebar_y: f32,
     sidebar_height: f32,
+    sidebar_width: f32,
     tab_count: usize,
     workspace_count: usize,
 ) -> SidebarAction {
-    if x < 0.0 || x > SIDEBAR_WIDTH || y < sidebar_y || y > sidebar_y + sidebar_height {
+    if x < 0.0 || x > sidebar_width || y < sidebar_y || y > sidebar_y + sidebar_height {
         return SidebarAction::None;
     }
-    if y < sidebar_y + SIDEBAR_HEADER_HEIGHT && x >= SIDEBAR_WIDTH - 32.0 {
+    if y < sidebar_y + SIDEBAR_HEADER_HEIGHT && x >= sidebar_width - 32.0 {
         return SidebarAction::NewWorkspace;
     }
 
@@ -451,7 +457,7 @@ mod tests {
 
     #[test]
     fn assemble_sidebar_quads_generates_quads() {
-        let quads = assemble_sidebar_quads(36.0, 500.0, [0.0, 1.0, 0.5, 1.0], 0, 2);
+        let quads = assemble_sidebar_quads(36.0, 500.0, 240.0, [0.0, 1.0, 0.5, 1.0], 0, 2);
         // 3 base quads (bg, right border, header divider) + 2 quads for active tab = 5 quads * 6 = 30 vertices
         assert_eq!(quads.len(), 30);
     }
@@ -464,21 +470,37 @@ mod tests {
 
         // Click outside width
         assert_eq!(
-            hit_test_sidebar(300.0, 100.0, sidebar_y, sidebar_height, tab_count, 0),
+            hit_test_sidebar(300.0, 100.0, sidebar_y, sidebar_height, 240.0, tab_count, 0),
             SidebarAction::None
         );
 
         // Click item 0
         let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + 24.0 + 5.0;
         assert_eq!(
-            hit_test_sidebar(50.0, item0_y, sidebar_y, sidebar_height, tab_count, 0),
+            hit_test_sidebar(
+                50.0,
+                item0_y,
+                sidebar_y,
+                sidebar_height,
+                240.0,
+                tab_count,
+                0
+            ),
             SidebarAction::SelectTab(0)
         );
 
         // Click item 1
         let item1_y = item0_y + SIDEBAR_ITEM_HEIGHT;
         assert_eq!(
-            hit_test_sidebar(50.0, item1_y, sidebar_y, sidebar_height, tab_count, 0),
+            hit_test_sidebar(
+                50.0,
+                item1_y,
+                sidebar_y,
+                sidebar_height,
+                240.0,
+                tab_count,
+                0
+            ),
             SidebarAction::SelectTab(1)
         );
     }
@@ -488,7 +510,7 @@ mod tests {
         let sidebar_y = 36.0;
         let workspace_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 5.0;
         assert_eq!(
-            hit_test_sidebar(50.0, workspace_y, sidebar_y, 500.0, 1, 2),
+            hit_test_sidebar(50.0, workspace_y, sidebar_y, 500.0, 240.0, 1, 2),
             SidebarAction::SelectWorkspace(0)
         );
     }
@@ -504,7 +526,7 @@ mod tests {
             workspaces: Vec::new(),
             chats: Vec::new(),
         };
-        let labels = build_sidebar_labels(&state, 36.0);
+        let labels = build_sidebar_labels(&state, 36.0, 240.0);
         assert_eq!(labels.len(), 8);
         assert_eq!(labels[0].text, "WORKSPACES");
         assert_eq!(labels[1].text, "+");
