@@ -31,6 +31,8 @@ pub enum ChatStatus {
 pub struct WorkspaceEntry {
     /// Name of repository or workspace folder (e.g. "Oxidite").
     pub name: String,
+    /// Workspace root directory shown below the name.
+    pub root_directory: String,
     /// Current git branch (e.g. "main").
     pub branch: String,
     /// Number of active terminal sessions or agents.
@@ -112,6 +114,7 @@ impl Default for SidebarState {
             active_tab_index: 0,
             workspaces: vec![WorkspaceEntry {
                 name: "Oxidite (Rust)".to_string(),
+                root_directory: "C:/work/Oxidite".to_string(),
                 branch: "main".to_string(),
                 sessions_count: 1,
                 modified_count: 2,
@@ -300,6 +303,14 @@ pub fn build_sidebar_labels(
                 GlyphonColor::rgb(146, 149, 161)
             },
             bold: workspace.is_active,
+            max_width: sidebar_width - 42.0,
+        });
+        labels.push(TabLabel {
+            text: format!("{} · {}", workspace.branch, workspace.root_directory),
+            x: 30.0,
+            y: row_y + 17.0,
+            color: GlyphonColor::rgb(104, 109, 121),
+            bold: false,
             max_width: sidebar_width - 42.0,
         });
     }
@@ -612,6 +623,21 @@ mod tests {
             labels
                 .iter()
                 .any(|label| label.text == "Commit History (5)")
+        );
+    }
+
+    #[test]
+    fn workspace_rows_show_real_branch_and_root_path() {
+        let mut state = SidebarState::default();
+        state.workspaces[0].name = "Oxidite".to_string();
+        state.workspaces[0].branch = "feat/layout".to_string();
+        state.workspaces[0].root_directory = "C:/work/Oxidite".to_string();
+        let labels = build_sidebar_labels(&state, 36.0, 240.0);
+        assert!(labels.iter().any(|label| label.text == "Oxidite"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == "feat/layout · C:/work/Oxidite")
         );
     }
 

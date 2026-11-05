@@ -360,6 +360,7 @@ impl App {
             active_tab_index: 0,
             workspaces: vec![crate::sidebar::WorkspaceEntry {
                 name: format!("{} ({})", proj_info.name, proj_info.kind),
+                root_directory: cwd.display().to_string(),
                 branch: git_branch.clone().unwrap_or_else(|| "--".to_string()),
                 sessions_count: 1,
                 modified_count: changed_files.len(),
@@ -1951,6 +1952,7 @@ impl App {
                 };
                 crate::sidebar::WorkspaceEntry {
                     name: workspace.name.clone(),
+                    root_directory: workspace.root_directory.display().to_string(),
                     branch,
                     sessions_count,
                     modified_count: 0,
