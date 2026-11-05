@@ -254,6 +254,8 @@ pub struct PaneGeometry {
     pub content_bottom: f32,
     pub content_h: f32,
     pub sidebar_w: f32,
+    /// Sidebar was hidden for this frame to preserve the active content minimums.
+    pub sidebar_auto_collapsed: bool,
     /// Minimum terminal width used by responsive split allocation.
     pub min_term_w: f32,
     /// Minimum diff width used by responsive split allocation.
@@ -518,7 +520,7 @@ impl App {
         let min_term_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
         let min_diff_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
         let sidebar_min = 185.0 * scale;
-        let sidebar_w = if self.sidebar_open && win_w >= sidebar_min + min_term_w {
+        let mut sidebar_w = if self.sidebar_open && win_w >= sidebar_min + min_term_w {
             (self.sidebar_width * scale)
                 .clamp(sidebar_min, 340.0 * scale)
                 .min(win_w - min_term_w)
@@ -531,6 +533,17 @@ impl App {
         } else {
             min_term_w
         };
+        let required_context_width = if self.changes_panel_open {
+            240.0 * scale
+        } else {
+            0.0
+        };
+        let sidebar_auto_collapsed = sidebar_w > 0.0
+            && (self.diff_view_open || self.changes_panel_open)
+            && win_w - sidebar_w < minimum_main_width + required_context_width;
+        if sidebar_auto_collapsed {
+            sidebar_w = 0.0;
+        }
         let after_sidebar = (win_w - sidebar_w).max(0.0);
         // Context panels collapse before the terminal and diff can overlap.
         let changes_min_space = (240.0 * scale) + minimum_main_width;
@@ -568,6 +581,7 @@ impl App {
             content_bottom,
             content_h,
             sidebar_w,
+            sidebar_auto_collapsed,
             min_term_w,
             min_diff_w,
             changes_panel_w,
@@ -1021,9 +1035,7 @@ impl App {
                     return;
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("b") => {
-                    self.sidebar_open = !self.sidebar_open;
-                    self.handle_resize(win.inner_size());
-                    self.terminal.mark_all_dirty();
+                    self.toggle_sidebar_or_restore_content(win.inner_size());
                     win.request_redraw();
                     return;
                 }
@@ -1425,6 +1437,22 @@ impl App {
                 let _ = guard.resize(target_pty_size);
             }
         }
+    }
+
+    /// Toggles navigation, restoring it over a contextual view when space is constrained.
+    #[allow(clippy::cast_precision_loss)]
+    fn toggle_sidebar_or_restore_content(&mut self, size: PhysicalSize<u32>) {
+        let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+        if geometry.sidebar_w == 0.0 && (self.changes_panel_open || self.diff_view_open) {
+            self.sidebar_open = true;
+            self.changes_panel_open = false;
+            self.diff_view_open = false;
+            self.changes_panel_state.commit_input_focused = false;
+        } else {
+            self.sidebar_open = !self.sidebar_open;
+        }
+        self.handle_resize(size);
+        self.terminal.mark_all_dirty();
     }
 
     /// Recalculates cell metrics based on the base font size and scale factor,
@@ -4083,9 +4111,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.create_tab(None);
                             }
                             TabBarAction::ToggleSidebar => {
-                                self.sidebar_open = !self.sidebar_open;
-                                self.handle_resize(win.inner_size());
-                                self.terminal.mark_all_dirty();
+                                self.toggle_sidebar_or_restore_content(win.inner_size());
                             }
                             TabBarAction::ToggleSplit => {
                                 self.diff_view_open = !self.diff_view_open;
@@ -4196,9 +4222,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::ToggleSidebar => {
-                                self.sidebar_open = !self.sidebar_open;
-                                self.handle_resize(win.inner_size());
-                                self.terminal.mark_all_dirty();
+                                self.toggle_sidebar_or_restore_content(win.inner_size());
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::SelectWorkspace(idx) => {
@@ -4853,6 +4877,25 @@ mod tests {
             let geo = app.compute_pane_geometry(1200.0, 800.0);
             assert_eq!(geo.sidebar_w, expected);
         }
+    }
+
+    #[test]
+    fn narrow_context_view_collapses_sidebar_and_navigation_restores_it() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.sidebar_open = true;
+        app.changes_panel_open = true;
+
+        let geo = app.compute_pane_geometry(420.0, 800.0);
+        assert_eq!(geo.sidebar_w, 0.0);
+        assert!(geo.sidebar_auto_collapsed);
+        assert!(geo.changes_panel_visible);
+        assert!(geo.term_w >= geo.min_term_w);
+
+        app.toggle_sidebar_or_restore_content(PhysicalSize::new(420, 800));
+        let restored = app.compute_pane_geometry(420.0, 800.0);
+        assert!(app.sidebar_open);
+        assert!(!app.changes_panel_open);
+        assert!(restored.sidebar_w > 0.0);
     }
 
     #[test]
