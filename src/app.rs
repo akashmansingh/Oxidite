@@ -254,6 +254,10 @@ pub struct PaneGeometry {
     pub content_bottom: f32,
     pub content_h: f32,
     pub sidebar_w: f32,
+    /// Minimum terminal width used by responsive split allocation.
+    pub min_term_w: f32,
+    /// Minimum diff width used by responsive split allocation.
+    pub min_diff_w: f32,
     pub changes_panel_w: f32,
     /// Whether the changes panel fits without stealing the terminal's minimum width.
     pub changes_panel_visible: bool,
@@ -511,33 +515,39 @@ impl App {
         let content_bottom = (win_h - status_bar_px).max(content_top);
         let content_h = (content_bottom - content_top).max(0.0);
 
-        let sidebar_w = if self.sidebar_open && win_w >= 500.0 * scale {
+        let min_term_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
+        let min_diff_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
+        let sidebar_min = 185.0 * scale;
+        let sidebar_w = if self.sidebar_open && win_w >= sidebar_min + min_term_w {
             (self.sidebar_width * scale)
-                .clamp(185.0 * scale, 340.0 * scale)
-                .min(win_w * 0.38)
+                .clamp(sidebar_min, 340.0 * scale)
+                .min(win_w - min_term_w)
                 .round()
         } else {
             0.0
         };
+        let minimum_main_width = if self.diff_view_open {
+            min_term_w + min_diff_w
+        } else {
+            min_term_w
+        };
         let after_sidebar = (win_w - sidebar_w).max(0.0);
-        // Context panels are optional. Keep the primary terminal at least 280px wide and
-        // only allocate the Git panel when it fits alongside a readable terminal/diff pair.
-        let changes_min_space = (if self.diff_view_open { 840.0 } else { 520.0 }) * scale;
+        // Context panels collapse before the terminal and diff can overlap.
+        let changes_min_space = (240.0 * scale) + minimum_main_width;
         let changes_panel_visible = self.changes_panel_open && after_sidebar >= changes_min_space;
         let changes_panel_w = if changes_panel_visible {
             (self.changes_panel_width * scale)
                 .clamp(240.0 * scale, 340.0 * scale)
-                .min(after_sidebar - 560.0 * scale)
+                .min(after_sidebar - minimum_main_width)
                 .round()
         } else {
             0.0
         };
 
         let avail_middle = (win_w - sidebar_w - changes_panel_w).max(0.0);
-        let diff_view_visible = self.diff_view_open && avail_middle >= 560.0 * scale;
+        let diff_view_visible = self.diff_view_open && avail_middle >= min_term_w + min_diff_w;
         let term_w = if diff_view_visible {
-            (avail_middle * self.term_split_ratio)
-                .clamp(280.0 * scale, avail_middle - 280.0 * scale)
+            (avail_middle * self.term_split_ratio).clamp(min_term_w, avail_middle - min_diff_w)
         } else {
             avail_middle
         };
@@ -558,6 +568,8 @@ impl App {
             content_bottom,
             content_h,
             sidebar_w,
+            min_term_w,
+            min_diff_w,
             changes_panel_w,
             changes_panel_visible,
             term_w,
@@ -2118,7 +2130,7 @@ impl App {
             .min(self.tabs.len().saturating_sub(1));
         self.workspace_manager = manager;
         self.sidebar_open = state.sidebar_open;
-        self.sidebar_width = state.sidebar_width.clamp(180.0, 340.0);
+        self.sidebar_width = state.sidebar_width.clamp(185.0, 340.0);
         self.last_window_size = state.window_size.filter(|(width, height)| {
             (640..=7680).contains(width) && (480..=4320).contains(height)
         });
@@ -2813,7 +2825,7 @@ impl App {
         ));
 
         // 1.5. Sidebar quads (if expanded)
-        if self.sidebar_open {
+        if geo.sidebar_w > 0.0 {
             quad_vertices.extend_from_slice(&crate::sidebar::assemble_sidebar_quads(
                 geo.tab_bar_px,
                 geo.content_h,
@@ -3171,7 +3183,9 @@ impl App {
         let track_top = y_offset;
         let track_height = (screen_size[1] - track_top - status_bar_px - effective_pad_y).max(10.0);
         let scrollbar_width = 4.0;
-        let track_x = screen_size[0] - scrollbar_width - 2.0;
+        let geometry = self.compute_pane_geometry(screen_size[0], screen_size[1]);
+        let track_x =
+            (geometry.sidebar_w + geometry.term_w - scrollbar_width - 2.0).max(geometry.sidebar_w);
 
         let mut quads = Vec::with_capacity(12);
 
@@ -3223,7 +3237,7 @@ impl App {
         let quad_vertices = self.assemble_quad_vertices(is_bell_active, screen_size);
         let mut tab_labels = self.build_tab_labels(screen_size[0]);
 
-        if self.sidebar_open {
+        if geo.sidebar_w > 0.0 {
             let sidebar_state = crate::sidebar::SidebarState {
                 workspace_name: self.workspace_name.clone(),
                 git_branch: self.git_branch.clone(),
@@ -3601,7 +3615,6 @@ impl ApplicationHandler<AppEvent> for App {
                             }
                         };
                         tab.pane_tree.root.adjust_split_ratio(div.split_id, ratio);
-                        self.handle_resize(win.inner_size());
                         win.request_redraw();
                     }
                     return;
@@ -3613,11 +3626,12 @@ impl ApplicationHandler<AppEvent> for App {
                     let cursor_x = position.x as f32;
 
                     if cursor_y >= geo.tab_bar_px && cursor_y <= (win_h - geo.status_bar_px) {
-                        if self.sidebar_open && (cursor_x - geo.sidebar_w).abs() <= 8.0 {
+                        if geo.sidebar_w > 0.0 && (cursor_x - geo.sidebar_w).abs() <= 8.0 {
                             detected = DraggingSplitter::Sidebar;
-                        } else if self.changes_panel_open && (cursor_x - geo.panel_x).abs() <= 8.0 {
+                        } else if geo.changes_panel_visible && (cursor_x - geo.panel_x).abs() <= 8.0
+                        {
                             detected = DraggingSplitter::ChangesPanel;
-                        } else if self.diff_view_open && (cursor_x - geo.diff_x).abs() <= 8.0 {
+                        } else if geo.diff_view_visible && (cursor_x - geo.diff_x).abs() <= 8.0 {
                             detected = DraggingSplitter::TerminalDiff;
                         }
                     }
@@ -3725,7 +3739,7 @@ impl ApplicationHandler<AppEvent> for App {
                     match self.dragging_splitter {
                         DraggingSplitter::Sidebar => {
                             let new_w =
-                                (position.x as f32 / self.scale_factor as f32).clamp(140.0, 480.0);
+                                (position.x as f32 / self.scale_factor as f32).clamp(185.0, 340.0);
                             self.sidebar_width = new_w;
                         }
                         DraggingSplitter::ChangesPanel => {
@@ -3734,20 +3748,12 @@ impl ApplicationHandler<AppEvent> for App {
                             self.changes_panel_width = new_w;
                         }
                         DraggingSplitter::TerminalDiff => {
-                            let sidebar_px = if self.sidebar_open {
-                                (self.sidebar_width * self.scale_factor as f32).round()
-                            } else {
-                                0.0
-                            };
-                            let changes_px = if self.changes_panel_open {
-                                (self.changes_panel_width * self.scale_factor as f32).round()
-                            } else {
-                                0.0
-                            };
-                            let avail = (win_w - sidebar_px - changes_px).max(1.0);
-                            let rel_x = (position.x as f32 - sidebar_px)
-                                .clamp(160.0, (avail - 160.0).max(160.0));
-                            self.term_split_ratio = (rel_x / avail).clamp(0.15, 0.85);
+                            let avail = (win_w - geo.sidebar_w - geo.changes_panel_w).max(1.0);
+                            let min_ratio = (geo.min_term_w / avail).min(0.5);
+                            let max_ratio = 1.0 - (geo.min_diff_w / avail).min(0.5);
+                            let rel_x = (position.x as f32 - geo.sidebar_w)
+                                .clamp(avail * min_ratio, avail * max_ratio);
+                            self.term_split_ratio = rel_x / avail;
                         }
                         DraggingSplitter::None => {}
                     }
@@ -4150,7 +4156,7 @@ impl ApplicationHandler<AppEvent> for App {
                     )
                     .sidebar_w,
                 );
-                if self.sidebar_open && self.cursor_pixel_pos.0 <= sidebar_px {
+                if sidebar_px > 0.0 && self.cursor_pixel_pos.0 <= sidebar_px {
                     if state == winit::event::ElementState::Pressed {
                         let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
                         let status_bar_px = if self.config.status_bar {
@@ -4799,6 +4805,17 @@ mod tests {
                 "width={width}"
             );
             assert!(geo.term_w >= 0.0 && geo.diff_w >= 0.0 && geo.changes_panel_w >= 0.0);
+            if geo.changes_panel_visible {
+                assert!(geo.changes_panel_w >= 240.0, "width={width}: {geo:?}");
+                if geo.diff_view_visible {
+                    assert!(
+                        geo.term_w >= geo.min_term_w && geo.diff_w >= geo.min_diff_w,
+                        "width={width}: {geo:?}"
+                    );
+                } else {
+                    assert!(geo.term_w >= geo.min_term_w, "width={width}: {geo:?}");
+                }
+            }
             assert!(
                 geo.sidebar_w + geo.term_w <= geo.diff_x + 0.01,
                 "width={width}"
@@ -4817,7 +4834,7 @@ mod tests {
             );
             if geo.diff_view_visible {
                 assert!(
-                    geo.term_w >= 280.0 && geo.diff_w >= 280.0,
+                    geo.term_w >= geo.min_term_w && geo.diff_w >= geo.min_diff_w,
                     "width={width}: {geo:?}"
                 );
             }
@@ -4828,7 +4845,8 @@ mod tests {
     fn layout_sidebar_width_is_clamped_to_navigation_constraints() {
         let mut app = App::new(None, Terminal::new(80, 24), None);
         app.sidebar_open = true;
-        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 0.0);
+        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 185.0);
+        assert_eq!(app.compute_pane_geometry(360.0, 800.0).sidebar_w, 0.0);
         for (requested, expected) in [(80.0, 185.0), (240.0, 240.0), (500.0, 340.0)] {
             app.sidebar_width = requested;
             let geo = app.compute_pane_geometry(1200.0, 800.0);
