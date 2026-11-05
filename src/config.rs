@@ -128,7 +128,7 @@ impl Default for KeybindingsConfig {
             scroll_down: "Shift+PageDown".to_string(),
             scroll_to_top: "Shift+Home".to_string(),
             scroll_to_bottom: "Shift+End".to_string(),
-            cycle_theme: "Ctrl+Shift+T".to_string(),
+            cycle_theme: "Ctrl+Shift+Y".to_string(),
             toggle_status_bar: "Ctrl+Shift+B".to_string(),
             search: "Ctrl+Shift+F".to_string(),
             split_vertical: "Ctrl+Shift+\\".to_string(),

@@ -193,6 +193,14 @@ pub struct App {
     pub git_branch: Option<String>,
     /// Sidebar persistent multi-workspace and chat state.
     pub sidebar_state: crate::sidebar::SidebarState,
+    /// Live workspace sessions; inactive workspaces retain their PTYs and terminal state.
+    pub workspace_manager: crate::workspace::WorkspaceManager<Vec<Tab>>,
+    /// Active tab index remembered independently for every workspace.
+    pub workspace_tab_indices: Vec<usize>,
+    /// Enables user-profile session persistence in the interactive application.
+    pub persistence_enabled: bool,
+    /// Most recently observed inner window dimensions in physical pixels.
+    pub last_window_size: Option<(u32, u32)>,
     /// Whether the right changes / git review panel is open.
     pub changes_panel_open: bool,
     /// State representation for the right git panel.
@@ -305,6 +313,8 @@ impl App {
         let is_git = crate::git::is_git_repository(&cwd);
         let proj_info = crate::git::detect_project_type(&cwd);
         let workspace_name = proj_info.name.clone();
+        let workspace_manager =
+            crate::workspace::WorkspaceManager::new(workspace_name.clone(), cwd.clone());
         let git_branch = if is_git {
             crate::git::detect_git_branch(&cwd)
         } else {
@@ -452,6 +462,10 @@ impl App {
             workspace_name,
             git_branch,
             sidebar_state,
+            workspace_manager,
+            workspace_tab_indices: vec![0],
+            persistence_enabled: false,
+            last_window_size: None,
             changes_panel_open: true,
             changes_panel_state,
             diff_view_open: true,
@@ -949,17 +963,20 @@ impl App {
                     win.request_redraw();
                     return;
                 }
+                Key::Character(c) if c.eq_ignore_ascii_case("e") && self.modifiers.shift_key() => {
+                    let index = self.workspace_manager.workspaces().len() + 1;
+                    let root = self.active_cwd();
+                    self.create_workspace(format!("Workspace {index}"), root);
+                    win.request_redraw();
+                    return;
+                }
                 Key::Character(c) if c.eq_ignore_ascii_case("t") && self.modifiers.shift_key() => {
                     self.create_tab(None);
                     win.request_redraw();
                     return;
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("d") && self.modifiers.shift_key() => {
-                    let dup_title = self
-                        .tabs
-                        .get(self.active_tab_index)
-                        .map(|t| format!("{} (copy)", t.title));
-                    self.create_tab(dup_title);
+                    self.split_active_pane(crate::pane::SplitDirection::Horizontal);
                     win.request_redraw();
                     return;
                 }
@@ -986,11 +1003,24 @@ impl App {
                     return;
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("d") && !self.modifiers.shift_key() => {
-                    self.diff_view_open = !self.diff_view_open;
-                    self.handle_resize(win.inner_size());
-                    self.terminal.mark_all_dirty();
+                    self.split_active_pane(crate::pane::SplitDirection::Vertical);
                     win.request_redraw();
                     return;
+                }
+                Key::Character(c) if c.eq_ignore_ascii_case("w") && !self.modifiers.shift_key() => {
+                    let pane_count = self
+                        .tabs
+                        .get(self.active_tab_index)
+                        .map_or(1, |tab| tab.panes.len());
+                    if pane_count > 1 {
+                        self.close_active_pane();
+                        win.request_redraw();
+                        return;
+                    } else if self.tabs.len() > 1 {
+                        self.request_close_tab(self.active_tab_index);
+                        win.request_redraw();
+                        return;
+                    }
                 }
                 Key::Named(NamedKey::Tab) => {
                     if self.modifiers.shift_key() {
@@ -1281,6 +1311,7 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        self.last_window_size = Some((size.width, size.height));
 
         // 1. Window / GPU surface
         if let Some(ref mut gpu) = self.gpu {
@@ -1708,6 +1739,506 @@ impl App {
         self.select_tab(self.tabs.len() - 1);
     }
 
+    /// Creates a new workspace with an independent shell and terminal tab.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    pub fn create_workspace(&mut self, name: String, root_directory: std::path::PathBuf) {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        let cols = self.terminal.grid.cols.max(1);
+        let rows = self.terminal.grid.rows.max(1);
+        let terminal = Terminal::new(cols, rows);
+        let mut writer = None;
+        if let Some(proxy) = &self.proxy {
+            let command = self.config.shell.as_ref().map_or_else(
+                crate::pty::ShellCommand::default_shell,
+                |program| {
+                    crate::pty::ShellCommand::with_args(
+                        program.clone(),
+                        self.config.shell_args.clone(),
+                    )
+                },
+            );
+            let size = crate::pty::PtySize {
+                rows: u16::try_from(rows).unwrap_or(24),
+                cols: u16::try_from(cols).unwrap_or(80),
+                px_w: (cols as f32 * self.cell_metrics.cell_width) as u16,
+                px_h: (rows as f32 * self.cell_metrics.cell_height) as u16,
+            };
+            if let Ok((pty_writer, reader)) =
+                crate::pty::spawn_in_directory(command, size, Some(&root_directory))
+            {
+                let pty_writer = Arc::new(Mutex::new(pty_writer));
+                spawn_tab_pty_forwarder(tab_id, reader, Arc::clone(&pty_writer), proxy.clone());
+                writer = Some(pty_writer);
+            }
+        }
+        let tab = Tab::new(tab_id, format!("{name} · Shell"), terminal, writer);
+        let index = self
+            .workspace_manager
+            .create(name, root_directory, vec![tab]);
+        self.workspace_tab_indices.push(0);
+        self.select_workspace(index);
+    }
+
+    /// Selects a workspace while retaining every inactive tab and PTY process.
+    pub fn select_workspace(&mut self, index: usize) -> bool {
+        if index == self.workspace_manager.active_index() {
+            return false;
+        }
+        if let Some(saved_index) = self
+            .workspace_tab_indices
+            .get_mut(self.workspace_manager.active_index())
+        {
+            *saved_index = self.active_tab_index;
+        }
+        if !self.workspace_manager.switch(index, &mut self.tabs) {
+            return false;
+        }
+        self.active_tab_index = self
+            .workspace_tab_indices
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+        if let Some(active) = self.tabs.get(self.active_tab_index) {
+            self.terminal = active.terminal.clone();
+            self.pty_writer = active.pty_writer.clone();
+            self.selection = active.selection;
+            self.mouse_down_pos = active.mouse_down_pos;
+            self.pty_exited = active.pty_exited;
+            self.pty_exit_code = active.pty_exit_code;
+            self.title = active.display_title().to_owned();
+            self.workspace_name = self.workspace_manager.workspaces()[index].name.clone();
+            self.hovered_url = None;
+            self.terminal.mark_all_dirty();
+        }
+        self.refresh_git_status();
+        if let Some(window) = self.window.clone() {
+            let size = window.inner_size();
+            self.handle_resize(size);
+            window.set_title(&self.title);
+            window.request_redraw();
+        }
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Renames the selected workspace, rejecting empty names.
+    pub fn rename_active_workspace(&mut self, name: &str) -> bool {
+        let renamed = self
+            .workspace_manager
+            .rename(self.workspace_manager.active_index(), name);
+        if renamed {
+            self.workspace_name = self.workspace_manager.workspaces()
+                [self.workspace_manager.active_index()]
+            .name
+            .clone();
+            self.persist_workspace_state();
+        }
+        renamed
+    }
+
+    /// Renames a workspace by sidebar index.
+    pub fn rename_workspace(&mut self, index: usize, name: &str) -> bool {
+        if !self.workspace_manager.rename(index, name) {
+            return false;
+        }
+        if index == self.workspace_manager.active_index() {
+            self.workspace_name = self.workspace_manager.workspaces()[index].name.clone();
+        }
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Reorders workspaces while retaining their selected session collections.
+    pub fn reorder_workspace(&mut self, from: usize, to: usize) -> bool {
+        if !self.workspace_manager.reorder(from, to) {
+            return false;
+        }
+        let tab_index = self.workspace_tab_indices.remove(from);
+        self.workspace_tab_indices.insert(to, tab_index);
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Closes a workspace other than the last remaining workspace and stops its PTYs.
+    pub fn close_workspace(&mut self, index: usize) -> bool {
+        if index >= self.workspace_manager.workspaces().len()
+            || self.workspace_manager.workspaces().len() <= 1
+        {
+            return false;
+        }
+        if index == self.workspace_manager.active_index() {
+            let replacement = if index + 1 < self.workspace_manager.workspaces().len() {
+                index + 1
+            } else {
+                index - 1
+            };
+            if !self.select_workspace(replacement) {
+                return false;
+            }
+        }
+        let Some(tabs) = self.workspace_manager.remove_inactive(index) else {
+            return false;
+        };
+        for tab in tabs {
+            for pane in tab.panes {
+                if let Some(writer) = pane.pty_writer
+                    && let Ok(mut writer) = writer.lock()
+                {
+                    let _ = writer.kill();
+                }
+            }
+        }
+        self.workspace_tab_indices.remove(index);
+        self.persist_workspace_state();
+        true
+    }
+
+    fn workspace_sidebar_entries(&self) -> Vec<crate::sidebar::WorkspaceEntry> {
+        self.workspace_manager
+            .workspaces()
+            .iter()
+            .enumerate()
+            .map(|(index, workspace)| {
+                let active = index == self.workspace_manager.active_index();
+                let branch = if active {
+                    self.git_branch.clone().unwrap_or_else(|| "--".to_string())
+                } else {
+                    "--".to_string()
+                };
+                let sessions_count = if active {
+                    self.tabs.len()
+                } else {
+                    workspace.sessions.as_ref().map_or(0, Vec::len)
+                };
+                crate::sidebar::WorkspaceEntry {
+                    name: workspace.name.clone(),
+                    branch,
+                    sessions_count,
+                    modified_count: 0,
+                    diff_stat: None,
+                    is_active: active,
+                }
+            })
+            .collect()
+    }
+
+    /// Saves workspace and split-layout metadata without serializing live processes.
+    pub fn persist_workspace_state(&self) {
+        if !self.persistence_enabled {
+            return;
+        }
+        let state = self.workspace_state_snapshot();
+        let Some(path) = crate::session_state::state_path() else {
+            return;
+        };
+        if let Err(error) = crate::session_state::save(&path, &state) {
+            log::warn!(
+                "Failed to save workspace state '{}': {error}",
+                path.display()
+            );
+        }
+    }
+
+    /// Builds a serializable snapshot of active and inactive workspace layouts.
+    #[must_use]
+    pub fn workspace_state_snapshot(&self) -> crate::session_state::PersistedAppState {
+        let active_index = self.workspace_manager.active_index();
+        let workspaces = self
+            .workspace_manager
+            .workspaces()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, workspace)| {
+                let tabs = if index == active_index {
+                    Some(&self.tabs)
+                } else {
+                    workspace.sessions.as_ref()
+                }?;
+                Some(crate::session_state::PersistedWorkspace {
+                    id: workspace.id,
+                    name: workspace.name.clone(),
+                    root_directory: workspace.root_directory.clone(),
+                    active_tab_index: if index == active_index {
+                        self.active_tab_index
+                    } else {
+                        self.workspace_tab_indices.get(index).copied().unwrap_or(0)
+                    },
+                    tabs: tabs
+                        .iter()
+                        .map(|tab| crate::session_state::PersistedTab {
+                            id: tab.id,
+                            title: tab.title.clone(),
+                            custom_title: tab.custom_title.clone(),
+                            cwd: tab.detect_cwd(),
+                            active_pane_id: tab.active_pane_id,
+                            pane_tree: tab.pane_tree.root.clone(),
+                            panes: tab
+                                .panes
+                                .iter()
+                                .map(|pane| crate::session_state::PersistedPane {
+                                    id: pane.id,
+                                    title: pane.title.clone(),
+                                    cwd: pane.cwd.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        crate::session_state::PersistedAppState {
+            version: crate::session_state::STATE_VERSION,
+            active_workspace_index: active_index,
+            sidebar_open: self.sidebar_open,
+            sidebar_width: self.sidebar_width,
+            window_size: self.last_window_size,
+            workspaces,
+        }
+    }
+
+    fn all_workspace_ids(&self) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for (index, workspace) in self.workspace_manager.workspaces().iter().enumerate() {
+            let tabs = if index == self.workspace_manager.active_index() {
+                Some(&self.tabs)
+            } else {
+                workspace.sessions.as_ref()
+            };
+            if let Some(tabs) = tabs {
+                for tab in tabs {
+                    ids.push(tab.id);
+                    ids.extend(tab.panes.iter().map(|pane| pane.id));
+                }
+            }
+        }
+        ids
+    }
+
+    /// Restores workspace layouts and starts fresh PTY processes for each saved pane.
+    pub fn restore_persisted_workspace_state(&mut self) -> bool {
+        let Some(path) = crate::session_state::state_path() else {
+            return false;
+        };
+        self.restore_workspace_state_from_path(&path)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn restore_workspace_state_from_path(&mut self, path: &std::path::Path) -> bool {
+        let state = match crate::session_state::load(path) {
+            Ok(Some(state)) => state,
+            Ok(None) => return false,
+            Err(error) => {
+                log::warn!(
+                    "Ignoring invalid workspace state '{}': {error}",
+                    path.display()
+                );
+                return false;
+            }
+        };
+        if state.workspaces.is_empty() {
+            return false;
+        }
+
+        let last_stored_id = state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace.tabs.iter().flat_map(|tab| {
+                    std::iter::once(tab.id).chain(tab.panes.iter().map(|pane| pane.id))
+                })
+            })
+            .max()
+            .unwrap_or(0);
+        self.next_tab_id = self.next_tab_id.max(last_stored_id.saturating_add(1));
+
+        let mut restored: Vec<Vec<Tab>> = state
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| self.restore_tab(tab, &workspace.root_directory))
+                    .collect()
+            })
+            .collect();
+        for tabs in &mut restored {
+            if tabs.is_empty() {
+                let id = self.next_tab_id;
+                self.next_tab_id = self.next_tab_id.saturating_add(1);
+                tabs.push(Tab::new(
+                    id,
+                    "Shell".to_string(),
+                    Terminal::new(self.terminal.grid.cols, self.terminal.grid.rows),
+                    None,
+                ));
+            }
+        }
+
+        if let Some(writer) = &self.pty_writer
+            && let Ok(mut writer) = writer.lock()
+        {
+            let _ = writer.kill();
+        }
+        let active_index = state
+            .active_workspace_index
+            .min(state.workspaces.len().saturating_sub(1));
+        let first = &state.workspaces[0];
+        let mut manager = crate::workspace::WorkspaceManager::new_with_id(
+            first.id,
+            first.name.clone(),
+            first.root_directory.clone(),
+        );
+        for (index, workspace) in state.workspaces.iter().enumerate().skip(1) {
+            manager.insert_with_id(
+                workspace.id,
+                workspace.name.clone(),
+                workspace.root_directory.clone(),
+                std::mem::take(&mut restored[index]),
+            );
+        }
+        self.tabs = std::mem::take(&mut restored[0]);
+        self.active_tab_index = state.workspaces[0]
+            .active_tab_index
+            .min(self.tabs.len().saturating_sub(1));
+        if active_index != 0 {
+            let _ = manager.switch(active_index, &mut self.tabs);
+        }
+        self.workspace_tab_indices = state
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .active_tab_index
+                    .min(workspace.tabs.len().max(1).saturating_sub(1))
+            })
+            .collect();
+        // `restored[0]` was moved into the manager; use the persisted index for the visible workspace.
+        self.active_tab_index = state.workspaces[active_index]
+            .active_tab_index
+            .min(self.tabs.len().saturating_sub(1));
+        self.workspace_manager = manager;
+        self.sidebar_open = state.sidebar_open;
+        self.sidebar_width = state.sidebar_width.clamp(180.0, 340.0);
+        self.last_window_size = state.window_size.filter(|(width, height)| {
+            (640..=7680).contains(width) && (480..=4320).contains(height)
+        });
+        self.workspace_name
+            .clone_from(&state.workspaces[active_index].name);
+        if let Some(tab) = self.tabs.get(self.active_tab_index) {
+            self.terminal = tab.terminal.clone();
+            self.pty_writer = tab.pty_writer.clone();
+            self.title = tab.display_title().to_owned();
+            self.pty_exited = tab.pty_exited;
+            self.pty_exit_code = tab.pty_exit_code;
+        }
+        self.next_tab_id = self
+            .all_workspace_ids()
+            .into_iter()
+            .max()
+            .unwrap_or(self.next_tab_id)
+            .saturating_add(1);
+        self.refresh_git_status();
+        true
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn restore_tab(
+        &mut self,
+        stored: &crate::session_state::PersistedTab,
+        workspace_root: &std::path::Path,
+    ) -> Tab {
+        let cols = self.terminal.grid.cols.max(1);
+        let rows = self.terminal.grid.rows.max(1);
+        let fallback = crate::session_state::PersistedPane {
+            id: stored.id,
+            title: stored.title.clone(),
+            cwd: stored.cwd.clone(),
+        };
+        let descriptors = if stored.panes.is_empty() {
+            vec![fallback]
+        } else {
+            stored.panes.clone()
+        };
+        let mut panes = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            let terminal = Terminal::new(cols, rows);
+            let cwd = descriptor
+                .cwd
+                .as_deref()
+                .filter(|directory| directory.is_dir())
+                .or_else(|| workspace_root.is_dir().then_some(workspace_root));
+            let size = crate::pty::PtySize {
+                rows: u16::try_from(rows).unwrap_or(24),
+                cols: u16::try_from(cols).unwrap_or(80),
+                px_w: (cols as f32 * self.cell_metrics.cell_width) as u16,
+                px_h: (rows as f32 * self.cell_metrics.cell_height) as u16,
+            };
+            let writer = self.spawn_workspace_pane(descriptor.id, size, cwd);
+            let mut pane =
+                crate::pane::Pane::new(descriptor.id, descriptor.title, terminal, writer);
+            pane.cwd = cwd.map(std::path::Path::to_path_buf);
+            panes.push(pane);
+        }
+        let first_pane_id = panes[0].id;
+        let first_terminal = panes[0].terminal.clone();
+        let first_writer = panes[0].pty_writer.clone();
+        let mut tab = Tab::new(
+            stored.id,
+            stored.title.clone(),
+            first_terminal,
+            first_writer,
+        );
+        let mut leaves = stored.pane_tree.all_leaf_ids();
+        let mut pane_ids: Vec<usize> = panes.iter().map(|pane| pane.id).collect();
+        leaves.sort_unstable();
+        pane_ids.sort_unstable();
+        tab.pane_tree.root = if leaves == pane_ids {
+            stored.pane_tree.clone()
+        } else {
+            crate::pane::PaneNode::Leaf(first_pane_id)
+        };
+        tab.pane_tree.next_split_id = tab.pane_tree.root.max_split_id().saturating_add(1);
+        tab.panes = panes;
+        tab.active_pane_id = if tab.pane(stored.active_pane_id).is_some() {
+            stored.active_pane_id
+        } else {
+            first_pane_id
+        };
+        tab.custom_title.clone_from(&stored.custom_title);
+        tab.sync_from_active_pane();
+        tab
+    }
+
+    fn spawn_workspace_pane(
+        &self,
+        pane_id: usize,
+        size: crate::pty::PtySize,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<Arc<Mutex<crate::pty::PtyWriter>>> {
+        let proxy = self.proxy.as_ref()?;
+        let command = self.config.shell.as_ref().map_or_else(
+            crate::pty::ShellCommand::default_shell,
+            |program| {
+                crate::pty::ShellCommand::with_args(program.clone(), self.config.shell_args.clone())
+            },
+        );
+        let (writer, reader) = crate::pty::spawn_in_directory(command, size, cwd).ok()?;
+        let writer = Arc::new(Mutex::new(writer));
+        spawn_tab_pty_forwarder(pane_id, reader, Arc::clone(&writer), proxy.clone());
+        Some(writer)
+    }
+
     /// Switches the active view to the tab at `index`.
     pub fn select_tab(&mut self, index: usize) {
         if index >= self.tabs.len() || index == self.active_tab_index {
@@ -1744,6 +2275,7 @@ impl App {
             win.set_title(&self.title);
             win.request_redraw();
         }
+        self.persist_workspace_state();
         self.terminal.mark_all_dirty();
     }
 
@@ -1916,6 +2448,7 @@ impl App {
             win.request_redraw();
         }
         self.terminal.mark_all_dirty();
+        self.persist_workspace_state();
     }
 
     /// Splits the currently active pane in the active tab either vertically or horizontally.
@@ -1982,6 +2515,7 @@ impl App {
             self.handle_resize(win.inner_size());
             win.request_redraw();
         }
+        self.persist_workspace_state();
     }
 
     /// Closes the currently active pane. If it is the last pane in the tab, closes the tab.
@@ -2005,6 +2539,7 @@ impl App {
             self.handle_resize(win.inner_size());
             win.request_redraw();
         }
+        self.persist_workspace_state();
     }
 
     /// Cycles keyboard focus to the next split pane in the active tab.
@@ -2046,7 +2581,50 @@ impl App {
     }
 
     /// Feeds PTY output bytes to a specific tab's parser and terminal state.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_tab_pty_output(&mut self, tab_id: usize, bytes: &[u8]) {
+        let belongs_to_active_workspace = self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id));
+        if !belongs_to_active_workspace {
+            for workspace in self.workspace_manager.workspaces_mut() {
+                let Some(tabs) = workspace.sessions.as_mut() else {
+                    continue;
+                };
+                let Some(tab) = tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id))
+                else {
+                    continue;
+                };
+                let pane_id = if tab.panes.iter().any(|pane| pane.id == tab_id) {
+                    tab_id
+                } else {
+                    tab.active_pane_id
+                };
+                let mut remaining = bytes;
+                while let Some(pos) = remaining.windows(4).position(|window| window == b"\x1b[6n") {
+                    if pos > 0 {
+                        tab.advance_pane_parser(pane_id, &remaining[..pos]);
+                    }
+                    if let Some(pane) = tab.pane(pane_id)
+                        && let Some(writer) = &pane.pty_writer
+                        && let Ok(mut writer) = writer.lock()
+                    {
+                        let row = pane.terminal.grid.cursor.row + 1;
+                        let col = pane.terminal.grid.cursor.col + 1;
+                        let _ = writer.write(format!("\x1b[{row};{col}R").as_bytes());
+                    }
+                    remaining = &remaining[pos + 4..];
+                }
+                if !remaining.is_empty() {
+                    tab.advance_pane_parser(pane_id, remaining);
+                }
+                return;
+            }
+        }
+
         let is_active_tab = self
             .tabs
             .get(self.active_tab_index)
@@ -2129,6 +2707,36 @@ impl App {
 
     /// Handles child process exit notification for a specific tab.
     pub fn handle_tab_pty_exited(&mut self, tab_id: usize, code: Option<i32>) {
+        let in_active_workspace = self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id));
+        if !in_active_workspace {
+            for workspace in self.workspace_manager.workspaces_mut() {
+                let Some(tab) = workspace.sessions.as_mut().and_then(|tabs| {
+                    tabs.iter_mut().find(|tab| {
+                        tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id)
+                    })
+                }) else {
+                    continue;
+                };
+                let pane_id = if tab.panes.iter().any(|pane| pane.id == tab_id) {
+                    tab_id
+                } else {
+                    tab.active_pane_id
+                };
+                if let Some(pane) = tab.pane_mut(pane_id) {
+                    pane.pty_exited = true;
+                    pane.pty_exit_code = code;
+                }
+                if pane_id == tab.active_pane_id {
+                    tab.pty_exited = true;
+                    tab.pty_exit_code = code;
+                }
+                return;
+            }
+            return;
+        }
         if let Some(tab) = self
             .tabs
             .iter_mut()
@@ -2614,7 +3222,7 @@ impl App {
                 git_branch: self.git_branch.clone(),
                 tab_titles: self.tabs.iter().map(|t| t.title.clone()).collect(),
                 active_tab_index: self.active_tab_index,
-                workspaces: self.sidebar_state.workspaces.clone(),
+                workspaces: self.workspace_sidebar_entries(),
                 chats: self.sidebar_state.chats.clone(),
                 git_status: self.sidebar_state.git_status.clone(),
             };
@@ -2834,6 +3442,9 @@ impl ApplicationHandler<AppEvent> for App {
             match create_window(event_loop, &self.title) {
                 Ok(win) => {
                     self.scale_factor = win.scale_factor();
+                    if let Some((width, height)) = self.last_window_size {
+                        let _ = win.request_inner_size(PhysicalSize::new(width, height));
+                    }
                     match GpuContext::new(Arc::clone(&win)) {
                         Ok(gpu) => {
                             let quad_pipeline = QuadPipeline::new(&gpu.device, gpu.config.format);
@@ -2921,6 +3532,7 @@ impl ApplicationHandler<AppEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.persist_workspace_state();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -3542,6 +4154,7 @@ impl ApplicationHandler<AppEvent> for App {
                             tab_bar_px,
                             sidebar_h,
                             self.tabs.len(),
+                            self.workspace_manager.workspaces().len(),
                         );
                         match action {
                             crate::sidebar::SidebarAction::SelectTab(idx) => {
@@ -3556,6 +4169,12 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.create_tab(None);
                                 win.request_redraw();
                             }
+                            crate::sidebar::SidebarAction::NewWorkspace => {
+                                let index = self.workspace_manager.workspaces().len() + 1;
+                                let root = self.active_cwd();
+                                self.create_workspace(format!("Workspace {index}"), root);
+                                win.request_redraw();
+                            }
                             crate::sidebar::SidebarAction::ToggleSidebar => {
                                 self.sidebar_open = !self.sidebar_open;
                                 self.handle_resize(win.inner_size());
@@ -3563,10 +4182,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::SelectWorkspace(idx) => {
-                                if let Some(ws) = self.sidebar_state.workspaces.get(idx) {
-                                    self.workspace_name = ws.name.clone();
-                                    self.git_branch = Some(ws.branch.clone());
-                                }
+                                self.select_workspace(idx);
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::SelectChat(_idx) => {
@@ -4360,6 +4976,63 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         app.close_tab(0);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn workspace_switch_restores_terminal_state_and_routes_inactive_output() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.handle_pty_output(b"primary-output");
+        let primary_tab_id = app.tabs[0].id;
+
+        app.create_workspace(
+            "Second workspace".to_string(),
+            std::env::current_dir().expect("current directory exists"),
+        );
+        assert_eq!(app.workspace_manager.active_index(), 1);
+        assert_eq!(app.workspace_manager.workspaces().len(), 2);
+        let second_tab_id = app.tabs[0].id;
+        assert_ne!(primary_tab_id, second_tab_id);
+        app.handle_pty_output(b"second-output");
+
+        assert!(app.select_workspace(0));
+        assert_eq!(app.terminal.grid[0][0].ch, 'p');
+        assert_eq!(app.active_tab_index, 0);
+
+        app.handle_tab_pty_output(second_tab_id, b"-continued");
+        let inactive_tabs = app.workspace_manager.workspaces()[1]
+            .sessions
+            .as_ref()
+            .expect("inactive workspace retains its tabs");
+        assert_eq!(inactive_tabs[0].terminal.grid[0][13].ch, '-');
+
+        assert!(app.select_workspace(1));
+        assert_eq!(app.terminal.grid[0][0].ch, 's');
+        assert_eq!(app.terminal.grid[0][13].ch, '-');
+    }
+
+    #[test]
+    fn workspace_state_snapshot_restores_nested_layout_with_fresh_terminals() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace(
+            "Second workspace".to_string(),
+            std::env::current_dir().expect("current directory exists"),
+        );
+        app.split_active_pane(crate::pane::SplitDirection::Vertical);
+        let snapshot = app.workspace_state_snapshot();
+        assert_eq!(snapshot.workspaces.len(), 2);
+        crate::session_state::validate(&snapshot).expect("valid workspace snapshot");
+
+        let path =
+            std::env::temp_dir().join(format!("oxidite-app-state-{}.toml", std::process::id()));
+        crate::session_state::save(&path, &snapshot).expect("save app state");
+        let mut restored = App::new(None, Terminal::new(80, 24), None);
+        assert!(restored.restore_workspace_state_from_path(&path));
+        assert_eq!(restored.workspace_manager.active_index(), 1);
+        assert_eq!(restored.workspace_name, "Second workspace");
+        assert_eq!(restored.tabs[0].panes.len(), 2);
+        assert_eq!(restored.tabs[0].pane_tree.panes_count(), 2);
+        assert!(restored.tabs[0].pty_writer.is_none());
+        std::fs::remove_file(path).expect("remove app state file");
     }
 
     #[test]

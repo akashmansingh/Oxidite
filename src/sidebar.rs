@@ -65,6 +65,8 @@ pub enum SidebarAction {
     CloseTab(usize),
     /// Create a new session.
     NewSession,
+    /// Create a new workspace.
+    NewWorkspace,
     /// Toggle the sidebar collapsed/expanded.
     ToggleSidebar,
     /// Select a workspace at index.
@@ -229,6 +231,14 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         bold: true,
         max_width: SIDEBAR_WIDTH - 24.0,
     });
+    labels.push(TabLabel {
+        text: "+".to_string(),
+        x: SIDEBAR_WIDTH - 24.0,
+        y: sidebar_y + 5.0,
+        color: GlyphonColor::rgb(53, 201, 138),
+        bold: true,
+        max_width: 14.0,
+    });
 
     // 2. Active Workspace Name & Branch
     let ws_text = if let Some(ref branch) = state.git_branch {
@@ -245,8 +255,42 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         max_width: SIDEBAR_WIDTH - 24.0,
     });
 
-    // 3. Sessions Section Header
-    let sessions_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 6.0;
+    // 3. Workspace rows
+    let workspace_start_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0;
+    for (idx, workspace) in state.workspaces.iter().enumerate() {
+        let row_y = workspace_start_y + idx as f32 * WORKSPACE_ROW_HEIGHT;
+        if row_y + WORKSPACE_ROW_HEIGHT > sidebar_y + 220.0 {
+            break;
+        }
+        labels.push(TabLabel {
+            text: if workspace.is_active { "●" } else { "○" }.to_string(),
+            x: 12.0,
+            y: row_y + 3.0,
+            color: if workspace.is_active {
+                GlyphonColor::rgb(53, 201, 138)
+            } else {
+                GlyphonColor::rgb(104, 109, 121)
+            },
+            bold: workspace.is_active,
+            max_width: 16.0,
+        });
+        labels.push(TabLabel {
+            text: workspace.name.clone(),
+            x: 30.0,
+            y: row_y + 3.0,
+            color: if workspace.is_active {
+                GlyphonColor::rgb(229, 231, 235)
+            } else {
+                GlyphonColor::rgb(146, 149, 161)
+            },
+            bold: workspace.is_active,
+            max_width: SIDEBAR_WIDTH - 42.0,
+        });
+    }
+
+    // 4. Sessions Section Header
+    let sessions_y =
+        workspace_start_y + state.workspaces.len().min(5) as f32 * WORKSPACE_ROW_HEIGHT + 4.0;
     let sessions_header = format!("SESSIONS ({} active)", state.tab_titles.len());
     labels.push(TabLabel {
         text: sessions_header,
@@ -353,13 +397,27 @@ pub fn hit_test_sidebar(
     sidebar_y: f32,
     sidebar_height: f32,
     tab_count: usize,
+    workspace_count: usize,
 ) -> SidebarAction {
     if x < 0.0 || x > SIDEBAR_WIDTH || y < sidebar_y || y > sidebar_y + sidebar_height {
         return SidebarAction::None;
     }
+    if y < sidebar_y + SIDEBAR_HEADER_HEIGHT && x >= SIDEBAR_WIDTH - 32.0 {
+        return SidebarAction::NewWorkspace;
+    }
+
+    let workspace_start_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0;
+    let workspace_end_y =
+        workspace_start_y + (workspace_count.min(5) as f32 * WORKSPACE_ROW_HEIGHT);
+    if y >= workspace_start_y && y < workspace_end_y {
+        let index = ((y - workspace_start_y) / WORKSPACE_ROW_HEIGHT) as usize;
+        if index < workspace_count.min(5) {
+            return SidebarAction::SelectWorkspace(index);
+        }
+    }
 
     // Check if clicked inside sessions list
-    let list_start_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 24.0;
+    let list_start_y = workspace_end_y + 4.0 + 24.0;
     let list_end_y = list_start_y + (tab_count as f32 * SIDEBAR_ITEM_HEIGHT);
     if y >= list_start_y && y < list_end_y {
         let relative_y = y - list_start_y;
@@ -406,22 +464,32 @@ mod tests {
 
         // Click outside width
         assert_eq!(
-            hit_test_sidebar(300.0, 100.0, sidebar_y, sidebar_height, tab_count),
+            hit_test_sidebar(300.0, 100.0, sidebar_y, sidebar_height, tab_count, 0),
             SidebarAction::None
         );
 
         // Click item 0
-        let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 24.0 + 5.0;
+        let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + 24.0 + 5.0;
         assert_eq!(
-            hit_test_sidebar(50.0, item0_y, sidebar_y, sidebar_height, tab_count),
+            hit_test_sidebar(50.0, item0_y, sidebar_y, sidebar_height, tab_count, 0),
             SidebarAction::SelectTab(0)
         );
 
         // Click item 1
         let item1_y = item0_y + SIDEBAR_ITEM_HEIGHT;
         assert_eq!(
-            hit_test_sidebar(50.0, item1_y, sidebar_y, sidebar_height, tab_count),
+            hit_test_sidebar(50.0, item1_y, sidebar_y, sidebar_height, tab_count, 0),
             SidebarAction::SelectTab(1)
+        );
+    }
+
+    #[test]
+    fn hit_test_sidebar_detects_workspace_selection() {
+        let sidebar_y = 36.0;
+        let workspace_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 5.0;
+        assert_eq!(
+            hit_test_sidebar(50.0, workspace_y, sidebar_y, 500.0, 1, 2),
+            SidebarAction::SelectWorkspace(0)
         );
     }
 
@@ -437,10 +505,11 @@ mod tests {
             chats: Vec::new(),
         };
         let labels = build_sidebar_labels(&state, 36.0);
-        assert_eq!(labels.len(), 7);
+        assert_eq!(labels.len(), 8);
         assert_eq!(labels[0].text, "WORKSPACES");
-        assert!(labels[1].text.contains("Oxidite"));
-        assert!(labels[1].text.contains("main"));
-        assert!(labels[2].text.contains("SESSIONS"));
+        assert_eq!(labels[1].text, "+");
+        assert!(labels[2].text.contains("Oxidite"));
+        assert!(labels[2].text.contains("main"));
+        assert!(labels[3].text.contains("SESSIONS"));
     }
 }

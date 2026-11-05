@@ -4,9 +4,15 @@ Track merge status, blockers, and cross-module contract issues here.
 
 ## Current phase
 
-**Phase 0 — Scaffold, docs, contracts** (complete on `chore/phase-0-scaffold`)
+The original terminal roadmap is complete through **Phase 8 — Hardening and
+release** (`phase-8-release`). Follow-up workspace product work is active on
+`feat/workspace-session-engine`.
 
-Next: **Phase 1 — PTY** on a new `feat/pty-*` branch after this branch merges to `main`.
+Current slice: true in-process workspace switching and versioned layout
+persistence. Each workspace retains its live tab/pane objects and PTYs while
+inactive; restart restoration recreates the saved layout with fresh shells.
+Workspace management controls, notifications, and Git worktrees remain open
+work.
 
 ## Blockers
 

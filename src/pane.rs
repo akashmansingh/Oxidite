@@ -15,7 +15,7 @@ pub const MAX_SPLIT_RATIO: f32 = 0.90;
 pub const PANE_DIVIDER_SIZE: f32 = 2.0;
 
 /// Direction to split a terminal pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitDirection {
     /// Horizontal split divider (splits top and bottom).
     Horizontal,
@@ -116,7 +116,7 @@ impl SplitDivider {
 }
 
 /// A node within the binary split pane tree.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PaneNode {
     /// A single terminal pane leaf.
     Leaf(usize),
@@ -136,6 +136,17 @@ pub enum PaneNode {
 }
 
 impl PaneNode {
+    /// Returns the highest split-node ID, or zero when this subtree has no splits.
+    #[must_use]
+    pub fn max_split_id(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 0,
+            Self::Split {
+                id, first, second, ..
+            } => (*id).max(first.max_split_id()).max(second.max_split_id()),
+        }
+    }
+
     /// Returns a list of all pane IDs contained in this subtree in depth-first order.
     #[must_use]
     pub fn all_leaf_ids(&self) -> Vec<usize> {
