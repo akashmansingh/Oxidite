@@ -3130,6 +3130,17 @@ impl App {
         let accent_color = theme_tokens.accent_primary.to_rgba_array(1.0);
 
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
+        let hovered_activity = if self.cursor_pixel_pos.0 >= 0.0
+            && self.cursor_pixel_pos.0 < f64::from(geo.activity_rail_w)
+        {
+            crate::shell::hit_test_activity(
+                self.cursor_pixel_pos.1 as f32,
+                geo.titlebar_px,
+                self.scale_factor as f32,
+            )
+        } else {
+            None
+        };
         let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
         let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
         let x_offset = geo.workspace_x + effective_pad_x;
@@ -3155,6 +3166,7 @@ impl App {
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
             self.sidebar_mode,
+            hovered_activity,
             theme_tokens,
         );
         quad_vertices.extend_from_slice(&shell_quads);
@@ -3627,6 +3639,17 @@ impl App {
         };
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
         let theme_tokens = self.config.theme.tokens();
+        let hovered_activity = if self.cursor_pixel_pos.0 >= 0.0
+            && self.cursor_pixel_pos.0 < f64::from(geo.activity_rail_w)
+        {
+            crate::shell::hit_test_activity(
+                self.cursor_pixel_pos.1 as f32,
+                geo.titlebar_px,
+                self.scale_factor as f32,
+            )
+        } else {
+            None
+        };
         let quad_vertices = self.assemble_quad_vertices(is_bell_active, screen_size);
         let shell_layout = crate::shell::ShellLayout::calculate(
             geo.win_w,
@@ -3646,6 +3669,7 @@ impl App {
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
             self.sidebar_mode,
+            hovered_activity,
             theme_tokens,
         );
         let mut tab_labels = shell_labels;

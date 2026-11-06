@@ -117,6 +117,21 @@ pub fn hit_test_activity(y: f32, body_top: f32, scale: f32) -> Option<SidebarMod
     }
 }
 
+/// Returns the activity title and accessible tooltip string for a sidebar view.
+#[must_use]
+pub const fn activity_tooltip(mode: SidebarMode) -> (&'static str, &'static str) {
+    match mode {
+        SidebarMode::Workspaces => ("Explorer", "Explorer — Workspaces and project folders"),
+        SidebarMode::Terminals => ("Terminal", "Terminal — Manage terminal sessions"),
+        SidebarMode::SourceControl => (
+            "Source Control",
+            "Source Control — Changes and commit history",
+        ),
+        SidebarMode::Conversations => ("AI Agents", "AI Agents — Conversations and agent sessions"),
+        SidebarMode::Notifications => ("Notifications", "Notifications — Recent activity"),
+    }
+}
+
 /// Builds the new titlebar, activity rail, and workspace header surfaces.
 #[must_use]
 #[allow(
@@ -131,6 +146,7 @@ pub fn build_shell_chrome(
     root_name: &str,
     branch: Option<&str>,
     active_mode: SidebarMode,
+    hovered_mode: Option<SidebarMode>,
     theme: crate::theme::ThemeTokens,
 ) -> (
     Vec<crate::renderer::draw::QuadVertex>,
@@ -161,6 +177,34 @@ pub fn build_shell_chrome(
         scale,
         border,
     ));
+
+    if let Some(mode) = hovered_mode {
+        let row = match mode {
+            SidebarMode::Workspaces => 0.0,
+            SidebarMode::Terminals => 1.0,
+            SidebarMode::SourceControl => 2.0,
+            SidebarMode::Conversations => 3.0,
+            SidebarMode::Notifications => 4.0,
+        };
+        let tooltip_x = layout.activity_rail.x + layout.activity_rail.width + 4.0 * scale;
+        let tooltip_y = layout.activity_rail.y + row * 44.0 * scale + 4.0 * scale;
+        let tooltip_w = (layout.window.width - tooltip_x - 8.0 * scale).clamp(0.0, 252.0 * scale);
+        let tooltip_h = 36.0 * scale;
+        quads.extend_from_slice(&build_quad_vertices(
+            tooltip_x,
+            tooltip_y,
+            tooltip_w,
+            tooltip_h,
+            theme.background_elevated.to_rgba_array(1.0),
+        ));
+        quads.extend_from_slice(&build_quad_vertices(
+            tooltip_x,
+            tooltip_y,
+            tooltip_w,
+            scale,
+            theme.border_default.to_rgba_array(1.0),
+        ));
+    }
     quads.extend_from_slice(&build_quad_vertices(
         layout.activity_rail.x,
         layout.activity_rail.y,
@@ -255,11 +299,11 @@ pub fn build_shell_chrome(
     ));
 
     let modes = [
-        (SidebarMode::Workspaces, "◈"),
-        (SidebarMode::Terminals, "▣"),
-        (SidebarMode::SourceControl, "⎇"),
-        (SidebarMode::Conversations, "✳"),
-        (SidebarMode::Notifications, "◌"),
+        (SidebarMode::Workspaces, "⌂"),
+        (SidebarMode::Terminals, "›_"),
+        (SidebarMode::SourceControl, "⑂"),
+        (SidebarMode::Conversations, "✣"),
+        (SidebarMode::Notifications, "◉"),
     ];
     for (index, (mode, icon)) in modes.into_iter().enumerate() {
         let y = layout.activity_rail.y + index as f32 * 44.0 * scale;
@@ -272,17 +316,47 @@ pub fn build_shell_chrome(
                 accent,
             ));
         }
+        if hovered_mode == Some(mode) {
+            quads.extend_from_slice(&build_quad_vertices(
+                layout.activity_rail.x + 5.0 * scale,
+                y + 4.0 * scale,
+                (layout.activity_rail.width - 10.0 * scale).max(0.0),
+                36.0 * scale,
+                theme.hover_background.to_rgba_array(1.0),
+            ));
+        }
         labels.push(label(
             icon.into(),
-            layout.activity_rail.x + 15.0 * scale,
-            y + 12.0 * scale,
+            layout.activity_rail.x + 13.0 * scale,
+            y + 9.0 * scale,
             if mode == active_mode {
                 theme.glyphon(theme.foreground_primary)
             } else {
                 theme.glyphon(theme.foreground_muted)
             },
             mode == active_mode,
-            24.0 * scale,
+            26.0 * scale,
+        ));
+    }
+
+    if let Some(mode) = hovered_mode {
+        let row = match mode {
+            SidebarMode::Workspaces => 0.0,
+            SidebarMode::Terminals => 1.0,
+            SidebarMode::SourceControl => 2.0,
+            SidebarMode::Conversations => 3.0,
+            SidebarMode::Notifications => 4.0,
+        };
+        let x = layout.activity_rail.x + layout.activity_rail.width + 12.0 * scale;
+        let y = layout.activity_rail.y + row * 44.0 * scale + 14.0 * scale;
+        let (_, description) = activity_tooltip(mode);
+        labels.push(label(
+            description.into(),
+            x,
+            y,
+            theme.glyphon(theme.foreground_primary),
+            false,
+            (layout.window.width - x - 16.0 * scale).clamp(0.0, 236.0 * scale),
         ));
     }
 
@@ -472,6 +546,33 @@ impl ShellLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_rail_exposes_descriptive_tooltips_for_every_view() {
+        assert_eq!(
+            activity_tooltip(SidebarMode::Workspaces),
+            ("Explorer", "Explorer — Workspaces and project folders")
+        );
+        assert_eq!(
+            activity_tooltip(SidebarMode::Terminals),
+            ("Terminal", "Terminal — Manage terminal sessions")
+        );
+        assert_eq!(
+            activity_tooltip(SidebarMode::SourceControl),
+            (
+                "Source Control",
+                "Source Control — Changes and commit history"
+            )
+        );
+        assert_eq!(
+            activity_tooltip(SidebarMode::Conversations),
+            ("AI Agents", "AI Agents — Conversations and agent sessions")
+        );
+        assert_eq!(
+            activity_tooltip(SidebarMode::Notifications),
+            ("Notifications", "Notifications — Recent activity")
+        );
+    }
 
     #[test]
     fn shell_columns_are_siblings_and_canvas_uses_remaining_space() {
