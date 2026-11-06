@@ -248,6 +248,8 @@ pub struct App {
     pub tab_rename_state: Option<crate::tab::TabRenameState>,
     /// Active close tab confirmation modal dialog state if closing an active tab.
     pub tab_close_confirm: Option<crate::tab::CloseConfirmState>,
+    /// Workspace/session navigation context menu, if one is open.
+    pub context_menu: Option<crate::context_menu::ContextMenuState>,
     /// Last applied PTY size to debounce redundant resize notifications.
     pub last_pty_size: Option<crate::pty::PtySize>,
 }
@@ -511,6 +513,7 @@ impl App {
             last_tab_click: None,
             tab_rename_state: None,
             tab_close_confirm: None,
+            context_menu: None,
             last_pty_size: None,
         }
     }
@@ -689,6 +692,30 @@ impl App {
     fn handle_keyboard_input(&mut self, key_ev: &winit::event::KeyEvent, win: &Window) {
         self.cursor_blink_visible = true;
         self.last_blink = std::time::Instant::now();
+
+        if let Some(menu) = self.context_menu
+            && key_ev.state == winit::event::ElementState::Pressed
+        {
+            use winit::keyboard::{Key, NamedKey};
+            match key_ev.logical_key {
+                Key::Named(NamedKey::Escape) => self.context_menu = None,
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.context_menu = Some(menu.move_selection(1));
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.context_menu = Some(menu.move_selection(-1));
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(action) = menu.selected_action() {
+                        self.activate_context_action(menu.target, action, win);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            win.request_redraw();
+            return;
+        }
 
         if self.global_search_state.is_open {
             if key_ev.state == winit::event::ElementState::Pressed {
@@ -2607,6 +2634,72 @@ impl App {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     }
 
+    fn activate_context_action(
+        &mut self,
+        target: crate::context_menu::ContextTarget,
+        action: crate::context_menu::ContextAction,
+        win: &Window,
+    ) {
+        use crate::context_menu::{ContextAction as Action, ContextTarget};
+        let reveal_path = match (target, action) {
+            (ContextTarget::Workspace(index), Action::Open) => {
+                self.select_workspace(index);
+                None
+            }
+            (ContextTarget::Workspace(index), Action::NewTerminal) => {
+                if self.select_workspace(index) {
+                    self.create_tab(None);
+                }
+                None
+            }
+            (ContextTarget::Workspace(index), Action::RevealDirectory) => self
+                .workspace_manager
+                .workspaces()
+                .get(index)
+                .map(|workspace| workspace.root_directory.clone()),
+            (ContextTarget::Session(index), Action::Open) => {
+                self.select_tab(index);
+                None
+            }
+            (ContextTarget::Session(index), Action::SplitRight | Action::SplitDown) => {
+                self.select_tab(index);
+                let direction = if action == Action::SplitRight {
+                    crate::pane::SplitDirection::Vertical
+                } else {
+                    crate::pane::SplitDirection::Horizontal
+                };
+                self.split_active_pane(direction);
+                None
+            }
+            (ContextTarget::Session(index), Action::RevealDirectory) => {
+                self.select_tab(index);
+                Some(self.active_cwd())
+            }
+            (ContextTarget::Session(index), Action::CloseSession) => {
+                self.request_close_tab(index);
+                None
+            }
+            _ => None,
+        };
+        if let Some(path) = reveal_path {
+            Self::reveal_directory(&path);
+        }
+        self.context_menu = None;
+        win.request_redraw();
+    }
+
+    fn reveal_directory(path: &std::path::Path) {
+        #[cfg(target_os = "windows")]
+        let result = std::process::Command::new("explorer.exe").arg(path).spawn();
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("open").arg(path).spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let result = std::process::Command::new("xdg-open").arg(path).spawn();
+        if let Err(error) = result {
+            log::warn!("could not reveal directory {}: {error}", path.display());
+        }
+    }
+
     /// Refreshes git status, changes panel list, and diff view from repository.
     pub fn refresh_git_status(&mut self) {
         let cwd = self.active_cwd();
@@ -3610,6 +3703,22 @@ impl App {
             ));
         }
 
+        if let Some(menu) = self.context_menu {
+            let layout = menu.layout(screen_size[0], screen_size[1], self.scale_factor as f32);
+            let hovered = layout
+                .hit_test(
+                    menu.target,
+                    self.cursor_pixel_pos.0 as f32,
+                    self.cursor_pixel_pos.1 as f32,
+                )
+                .or_else(|| menu.selected_action());
+            quad_vertices.extend_from_slice(&layout.quads(
+                menu.target,
+                hovered,
+                self.config.theme.tokens(),
+            ));
+        }
+
         quad_vertices
     }
 
@@ -3853,6 +3962,11 @@ impl App {
                 layout,
                 self.config.theme.tokens(),
             ));
+        }
+
+        if let Some(menu) = self.context_menu {
+            let layout = menu.layout(screen_size[0], screen_size[1], self.scale_factor as f32);
+            tab_labels.extend(layout.labels(menu.target, self.config.theme.tokens()));
         }
 
         let palette = self.config.theme.to_f32_palette();
@@ -4349,6 +4463,42 @@ impl ApplicationHandler<AppEvent> for App {
                     // Only request redraw during drag for high-fps responsiveness; resize PTY on release
                     win.request_redraw();
                 }
+            }
+            WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                button: winit::event::MouseButton::Right,
+                ..
+            } if !self.terminal.modes.mouse_reporting => {
+                let size = win.inner_size();
+                let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+                let x = self.cursor_pixel_pos.0 as f32;
+                let y = self.cursor_pixel_pos.1 as f32;
+                let target = if x >= geometry.activity_rail_w
+                    && x < geometry.workspace_x
+                    && y >= geometry.titlebar_px
+                {
+                    match crate::sidebar::hit_test_navigation(
+                        self.sidebar_mode,
+                        y,
+                        geometry.titlebar_px,
+                        self.workspace_manager.workspaces().len(),
+                        self.tabs.len(),
+                        &self.changes_panel_state,
+                    ) {
+                        crate::sidebar::SidebarAction::SelectWorkspace(index) => {
+                            Some(crate::context_menu::ContextTarget::Workspace(index))
+                        }
+                        crate::sidebar::SidebarAction::SelectTab(index) => {
+                            Some(crate::context_menu::ContextTarget::Session(index))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                self.context_menu =
+                    target.map(|target| crate::context_menu::ContextMenuState::new(target, x, y));
+                win.request_redraw();
             }
             WindowEvent::MouseInput {
                 state,
@@ -4876,6 +5026,27 @@ impl ApplicationHandler<AppEvent> for App {
                         }
                         return;
                     }
+                }
+
+                if let Some(menu) = self.context_menu
+                    && state == winit::event::ElementState::Pressed
+                {
+                    let size = win.inner_size();
+                    let layout = menu.layout(
+                        size.width as f32,
+                        size.height as f32,
+                        self.scale_factor as f32,
+                    );
+                    if let Some(action) = layout.hit_test(
+                        menu.target,
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                    ) {
+                        self.activate_context_action(menu.target, action, &win);
+                        return;
+                    }
+                    self.context_menu = None;
+                    win.request_redraw();
                 }
 
                 // The compact branch chip in the workspace header opens the real

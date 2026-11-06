@@ -5,6 +5,7 @@
 pub mod app;
 pub mod changes_panel;
 pub mod config;
+pub mod context_menu;
 pub mod diff_view;
 pub mod git;
 pub mod global_search;

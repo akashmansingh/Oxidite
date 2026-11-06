@@ -1,0 +1,246 @@
+//! Small, application-owned context menus for workspace and session navigation.
+
+use crate::renderer::draw::{QuadVertex, TabLabel, build_quad_vertices};
+use crate::theme::ThemeTokens;
+
+/// Object under the pointer when a navigation context menu is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextTarget {
+    /// A registered workspace.
+    Workspace(usize),
+    /// A terminal session in the active workspace.
+    Session(usize),
+}
+
+/// Real application operation selected from a navigation context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextAction {
+    /// Select the workspace or terminal session.
+    Open,
+    /// Create a terminal in the selected workspace.
+    NewTerminal,
+    /// Open a new right-side terminal pane in the selected session.
+    SplitRight,
+    /// Open a new lower terminal pane in the selected session.
+    SplitDown,
+    /// Reveal the selected root or working directory in the platform file manager.
+    RevealDirectory,
+    /// Request closing the selected terminal session.
+    CloseSession,
+}
+
+/// Popup placement and target for a navigation context menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextMenuState {
+    /// Contextual object.
+    pub target: ContextTarget,
+    /// Pointer x position in physical window pixels.
+    pub x: f32,
+    /// Pointer y position in physical window pixels.
+    pub y: f32,
+    /// Keyboard-selected action row.
+    pub selected: usize,
+}
+
+/// Geometry for a viewport-clamped context menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextMenuLayout {
+    /// Menu left edge.
+    pub x: f32,
+    /// Menu top edge.
+    pub y: f32,
+    /// Menu width.
+    pub width: f32,
+    /// Menu height.
+    pub height: f32,
+    /// Height of each action row.
+    pub row_height: f32,
+}
+
+impl ContextMenuState {
+    /// Creates a popup anchored at the pointer.
+    #[must_use]
+    pub const fn new(target: ContextTarget, x: f32, y: f32) -> Self {
+        Self {
+            target,
+            x,
+            y,
+            selected: 0,
+        }
+    }
+
+    /// Moves keyboard focus through the available actions.
+    #[must_use]
+    pub fn move_selection(mut self, delta: isize) -> Self {
+        let count = items(self.target).len();
+        if count > 0 {
+            let current = isize::try_from(self.selected).unwrap_or(0);
+            let count = isize::try_from(count).unwrap_or(isize::MAX);
+            self.selected = usize::try_from((current + delta).rem_euclid(count)).unwrap_or(0);
+        }
+        self
+    }
+
+    /// Returns the currently selected keyboard action.
+    #[must_use]
+    pub fn selected_action(self) -> Option<ContextAction> {
+        items(self.target)
+            .get(self.selected)
+            .map(|(action, _)| *action)
+    }
+
+    /// Calculates the menu rectangle and keeps every action inside the viewport.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn layout(self, width: f32, height: f32, scale: f32) -> ContextMenuLayout {
+        let scale = scale.max(0.5);
+        let row_height = 28.0 * scale;
+        let menu_width = 212.0 * scale;
+        let item_count = items(self.target).len();
+        let menu_height = item_count as f32 * row_height + 8.0 * scale;
+        ContextMenuLayout {
+            x: self.x.clamp(
+                4.0 * scale,
+                (width - menu_width - 4.0 * scale).max(4.0 * scale),
+            ),
+            y: self.y.clamp(
+                4.0 * scale,
+                (height - menu_height - 4.0 * scale).max(4.0 * scale),
+            ),
+            width: menu_width,
+            height: menu_height,
+            row_height,
+        }
+    }
+}
+
+impl ContextMenuLayout {
+    /// Returns the clicked action row, if the pointer is inside the popup.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn hit_test(self, target: ContextTarget, x: f32, y: f32) -> Option<ContextAction> {
+        if x < self.x || x >= self.x + self.width || y < self.y + 4.0 {
+            return None;
+        }
+        let index = ((y - self.y - 4.0) / self.row_height).floor() as usize;
+        items(target).get(index).map(|(action, _)| *action)
+    }
+
+    /// Builds themed popup surfaces with an optional hovered action row.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn quads(
+        self,
+        target: ContextTarget,
+        hovered: Option<ContextAction>,
+        theme: ThemeTokens,
+    ) -> Vec<QuadVertex> {
+        let mut quads = build_quad_vertices(
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            theme.rgba(theme.background_elevated),
+        )
+        .to_vec();
+        for (index, (action, _)) in items(target).iter().enumerate() {
+            if hovered == Some(*action) {
+                quads.extend_from_slice(&build_quad_vertices(
+                    self.x + 4.0,
+                    self.y + 4.0 + index as f32 * self.row_height,
+                    self.width - 8.0,
+                    self.row_height,
+                    theme.rgba(theme.hover_background),
+                ));
+            }
+        }
+        quads.extend_from_slice(&build_quad_vertices(
+            self.x,
+            self.y,
+            self.width,
+            1.0,
+            theme.rgba(theme.border_default),
+        ));
+        quads
+    }
+
+    /// Builds action names for the popup.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn labels(self, target: ContextTarget, theme: ThemeTokens) -> Vec<TabLabel> {
+        items(target)
+            .iter()
+            .enumerate()
+            .map(|(index, (_, title))| TabLabel {
+                text: (*title).into(),
+                x: self.x + 14.0,
+                y: self.y + 8.0 + index as f32 * self.row_height,
+                color: theme.glyphon(theme.foreground_primary),
+                bold: false,
+                max_width: self.width - 28.0,
+            })
+            .collect()
+    }
+}
+
+fn items(target: ContextTarget) -> &'static [(ContextAction, &'static str)] {
+    match target {
+        ContextTarget::Workspace(_) => &[
+            (ContextAction::Open, "Open Workspace"),
+            (ContextAction::NewTerminal, "New Terminal"),
+            (ContextAction::RevealDirectory, "Reveal Folder"),
+        ],
+        ContextTarget::Session(_) => &[
+            (ContextAction::Open, "Open Session"),
+            (ContextAction::SplitRight, "Split Right"),
+            (ContextAction::SplitDown, "Split Down"),
+            (ContextAction::RevealDirectory, "Reveal Working Directory"),
+            (ContextAction::CloseSession, "Close Session"),
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_clamps_to_viewport_and_routes_real_action_rows() {
+        let target = ContextTarget::Session(2);
+        let menu = ContextMenuState::new(target, 990.0, 690.0).layout(1000.0, 700.0, 1.0);
+        assert!(menu.x + menu.width <= 1000.0);
+        assert!(menu.y + menu.height <= 700.0);
+        assert_eq!(
+            menu.hit_test(target, menu.x + 8.0, menu.y + 8.0),
+            Some(ContextAction::Open)
+        );
+        assert_eq!(
+            menu.hit_test(
+                target,
+                menu.x + 8.0,
+                menu.y + 4.0 + 4.0 * menu.row_height + 1.0
+            ),
+            Some(ContextAction::CloseSession)
+        );
+    }
+
+    #[test]
+    fn workspace_menu_only_advertises_supported_workspace_actions() {
+        let target = ContextTarget::Workspace(1);
+        let menu = ContextMenuState::new(target, 10.0, 10.0).layout(800.0, 600.0, 1.0);
+        let labels = menu.labels(target, ThemeTokens::default());
+        assert_eq!(labels.len(), 3);
+        assert!(labels.iter().any(|label| label.text == "Reveal Folder"));
+        assert!(
+            menu.quads(target, Some(ContextAction::Open), ThemeTokens::default())
+                .len()
+                > 6
+        );
+        assert_eq!(
+            ContextMenuState::new(target, 10.0, 10.0)
+                .move_selection(-1)
+                .selected_action(),
+            Some(ContextAction::RevealDirectory)
+        );
+    }
+}
