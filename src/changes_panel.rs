@@ -251,8 +251,8 @@ pub fn assemble_changes_panel_quads(
             let stage_all_btn_x = panel_x + panel_width - 146.0;
             let unstage_btn_x = panel_x + panel_width - 74.0;
             let sub_btn_y = panel_y + CHANGES_HEADER_HEIGHT + 6.0;
-            let btn_border = [0.22, 0.28, 0.38, 0.9];
-            let btn_bg = [0.08, 0.10, 0.14, 0.95];
+            let btn_border = theme.rgba(theme.border_default);
+            let btn_bg = theme.rgba(theme.background_elevated);
 
             push_bordered_rect(
                 &mut quads,
@@ -289,7 +289,7 @@ pub fn assemble_changes_panel_quads(
                         row_y,
                         panel_width - 12.0,
                         FILE_ROW_HEIGHT - 2.0,
-                        [0.05, 0.055, 0.075, 0.95],
+                        theme.rgba(theme.selection_background),
                     ));
                     // 2px neon leading marker
                     quads.extend_from_slice(&build_quad_vertices(
@@ -307,7 +307,7 @@ pub fn assemble_changes_panel_quads(
                 let cb_color = if file.staged {
                     [accent_color[0], accent_color[1], accent_color[2], 0.9]
                 } else {
-                    [0.18, 0.20, 0.26, 0.8]
+                    theme.rgba(theme.border_subtle)
                 };
                 quads.extend_from_slice(&build_quad_vertices(cb_x, cb_y, 14.0, 14.0, cb_color));
             }
@@ -319,7 +319,7 @@ pub fn assemble_changes_panel_quads(
                 commit_y,
                 panel_width,
                 1.0,
-                [0.095, 0.105, 0.13, 1.0],
+                theme.rgba(theme.border_subtle),
             ));
 
             // Branch selector button
@@ -333,8 +333,8 @@ pub fn assemble_changes_panel_quads(
                 branch_btn_y,
                 branch_btn_w,
                 branch_btn_h,
-                [0.06, 0.08, 0.12, 0.95],
-                [0.18, 0.24, 0.36, 0.8],
+                theme.rgba(theme.background_elevated),
+                theme.rgba(theme.border_default),
             );
 
             // Fetch & Pull action buttons - comfortably sized so "Fetch" is never clipped
@@ -350,8 +350,8 @@ pub fn assemble_changes_panel_quads(
                 git_act_y,
                 fetch_btn_w,
                 git_act_h,
-                [0.07, 0.09, 0.13, 0.95],
-                [0.20, 0.26, 0.38, 0.8],
+                theme.rgba(theme.background_elevated),
+                theme.rgba(theme.border_default),
             );
             push_bordered_rect(
                 &mut quads,
@@ -359,8 +359,8 @@ pub fn assemble_changes_panel_quads(
                 git_act_y,
                 pull_btn_w,
                 git_act_h,
-                [0.07, 0.09, 0.13, 0.95],
-                [0.20, 0.26, 0.38, 0.8],
+                theme.rgba(theme.background_elevated),
+                theme.rgba(theme.border_default),
             );
 
             // Commit message input field quad (#08090C) with 1px border
@@ -370,14 +370,14 @@ pub fn assemble_changes_panel_quads(
             let input_h = 28.0;
 
             let input_bg = if state.commit_input_focused {
-                [0.06, 0.07, 0.10, 0.98]
+                theme.rgba(theme.focus_background)
             } else {
-                [0.04, 0.045, 0.06, 0.95]
+                theme.rgba(theme.background_primary)
             };
             let input_border = if state.commit_input_focused {
                 accent_color
             } else {
-                [0.18, 0.20, 0.26, 0.8]
+                theme.rgba(theme.border_default)
             };
 
             push_bordered_rect(
@@ -413,8 +413,8 @@ pub fn assemble_changes_panel_quads(
                 commit_btn_y,
                 110.0,
                 24.0,
-                [0.08, 0.12, 0.18, 0.95],
-                [0.24, 0.35, 0.50, 0.9],
+                theme.rgba(theme.accent_secondary),
+                theme.rgba(theme.border_active),
             );
         }
         ChangesTab::History => {
@@ -443,7 +443,7 @@ pub fn assemble_changes_panel_quads(
                         row_y,
                         panel_width - 16.0,
                         COMMIT_ROW_HEIGHT - 2.0,
-                        [0.07, 0.09, 0.13, 0.95],
+                        theme.rgba(theme.selection_background),
                     ));
                     // 2px neon leading marker
                     quads.extend_from_slice(&build_quad_vertices(
@@ -461,7 +461,7 @@ pub fn assemble_changes_panel_quads(
                     row_y + COMMIT_ROW_HEIGHT - 1.0,
                     panel_width - 24.0,
                     1.0,
-                    [0.06, 0.07, 0.09, 0.6],
+                    theme.rgba(theme.border_subtle),
                 ));
             }
 
@@ -478,7 +478,7 @@ pub fn assemble_changes_panel_quads(
                     track_y,
                     track_w,
                     track_h,
-                    [0.05, 0.06, 0.08, 0.8],
+                    theme.rgba(theme.background_tertiary),
                 ));
 
                 // Thumb height proportional to visible ratio
@@ -525,8 +525,8 @@ pub fn assemble_changes_panel_quads(
             pop_y,
             pop_w,
             pop_h,
-            [0.05, 0.06, 0.09, 0.98],
-            [0.25, 0.32, 0.45, 0.95],
+            theme.rgba(theme.background_elevated),
+            theme.rgba(theme.border_active),
         );
 
         for (i, branch) in state.branch_list.iter().take(count).enumerate() {
@@ -538,7 +538,7 @@ pub fn assemble_changes_panel_quads(
                     row_y,
                     pop_w - 4.0,
                     item_h - 1.0,
-                    [0.10, 0.15, 0.24, 0.9],
+                    theme.rgba(theme.focus_background),
                 ));
                 quads.extend_from_slice(&build_quad_vertices(
                     pop_x + 2.0,
