@@ -2134,6 +2134,23 @@ impl App {
         true
     }
 
+    /// Selects a workspace and starts a terminal when its session list is empty.
+    pub fn new_terminal_in_workspace(&mut self, index: usize) -> bool {
+        let Some(workspace) = self.workspace_manager.workspaces().get(index) else {
+            return false;
+        };
+        let starts_empty = workspace.sessions.as_ref().is_some_and(Vec::is_empty)
+            || (index == self.workspace_manager.active_index() && self.tabs.is_empty());
+
+        if index != self.workspace_manager.active_index() && !self.select_workspace(index) {
+            return false;
+        }
+        if !starts_empty || self.tabs.is_empty() {
+            self.create_tab(None);
+        }
+        true
+    }
+
     /// Renames the selected workspace, rejecting empty names.
     pub fn rename_active_workspace(&mut self, name: &str) -> bool {
         let renamed = self
@@ -2715,9 +2732,7 @@ impl App {
                 None
             }
             (ContextTarget::Workspace(index), Action::NewTerminal) => {
-                if index == self.workspace_manager.active_index() || self.select_workspace(index) {
-                    self.create_tab(None);
-                }
+                self.new_terminal_in_workspace(index);
                 None
             }
             (ContextTarget::Workspace(index), Action::Rename) => {
@@ -5921,6 +5936,27 @@ mod tests {
             1,
             "opening a closed workspace starts a fresh terminal"
         );
+    }
+
+    #[test]
+    fn new_terminal_action_reuses_fresh_session_created_when_reopening_closed_workspace() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace("Second".into(), std::env::temp_dir());
+        assert!(app.close_workspace(1));
+        assert!(app.new_terminal_in_workspace(1));
+
+        assert_eq!(app.workspace_manager.active_index(), 1);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn new_terminal_action_adds_a_tab_to_an_existing_workspace_session_list() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace("Second".into(), std::env::temp_dir());
+        assert!(app.new_terminal_in_workspace(0));
+
+        assert_eq!(app.workspace_manager.active_index(), 0);
+        assert_eq!(app.tabs.len(), 2);
     }
 
     #[test]
