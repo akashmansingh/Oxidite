@@ -4395,7 +4395,9 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.changes_panel_state.active_tab = tab;
                                 self.changes_panel_state.commit_input_focused = false;
                                 self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
-                                self.changes_panel_open = true;
+                                // Git navigation belongs in the sidebar; do not open the
+                                // legacy right-hand Changes panel alongside it.
+                                self.changes_panel_open = false;
                                 self.diff_view_open = false;
                                 self.refresh_git_status();
                                 self.handle_resize(win.inner_size());
