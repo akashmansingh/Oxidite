@@ -1709,6 +1709,7 @@ impl App {
             window_width,
             window_height,
             status_bar_px,
+            self.config.theme.tokens(),
         )
     }
 
@@ -3152,6 +3153,7 @@ impl App {
                 status_bar_px,
                 accent_color,
                 &sb_state,
+                self.config.theme.tokens(),
             ));
         }
 
