@@ -232,6 +232,8 @@ pub struct App {
     pub last_active_cwd: Option<std::path::PathBuf>,
     /// In-terminal search state for scrollback and visible grid search.
     pub search_state: crate::search::SearchState,
+    /// Application-wide workspace, session, and command search state.
+    pub global_search_state: crate::global_search::SearchState,
     /// Currently hovered URL span `(viewport_row, start_col, end_col, url)` if any.
     pub hovered_url: Option<(usize, usize, usize, String)>,
     /// Active tab drag-and-drop state for reordering tabs.
@@ -497,6 +499,7 @@ impl App {
             hovered_pane_divider: None,
             last_active_cwd: Some(cwd),
             search_state: crate::search::SearchState::default(),
+            global_search_state: crate::global_search::SearchState::default(),
             hovered_url: None,
             dragging_tab: None,
             last_tab_click: None,
@@ -679,6 +682,52 @@ impl App {
     fn handle_keyboard_input(&mut self, key_ev: &winit::event::KeyEvent, win: &Window) {
         self.cursor_blink_visible = true;
         self.last_blink = std::time::Instant::now();
+
+        if self.global_search_state.is_open {
+            if key_ev.state == winit::event::ElementState::Pressed {
+                use winit::keyboard::{Key, NamedKey};
+                match &key_ev.logical_key {
+                    Key::Named(NamedKey::Escape) => self.global_search_state.close(),
+                    Key::Named(NamedKey::ArrowUp) => {
+                        let results = self.global_search_results();
+                        let count = self.global_search_state.filtered(&results).len();
+                        self.global_search_state.move_selection(-1, count);
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        let results = self.global_search_results();
+                        let count = self.global_search_state.filtered(&results).len();
+                        self.global_search_state.move_selection(1, count);
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        let results = self.global_search_results();
+                        let target = self
+                            .global_search_state
+                            .filtered(&results)
+                            .get(self.global_search_state.selected)
+                            .map(|result| result.target.clone());
+                        if let Some(target) = target {
+                            self.activate_global_search_result(&target, win);
+                        }
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        self.global_search_state.query.pop();
+                        self.global_search_state.selected = 0;
+                    }
+                    _ => {
+                        if !self.modifiers.control_key()
+                            && !self.modifiers.alt_key()
+                            && !self.modifiers.super_key()
+                            && let Some(text) = &key_ev.text
+                        {
+                            self.global_search_state.query.push_str(text);
+                            self.global_search_state.selected = 0;
+                        }
+                    }
+                }
+                win.request_redraw();
+            }
+            return;
+        }
 
         if key_ev.state == winit::event::ElementState::Pressed {
             use winit::keyboard::{Key, NamedKey};
@@ -1193,6 +1242,10 @@ impl App {
                             .scroll_to_current_match(&mut self.terminal.grid);
                     }
                     self.terminal.mark_all_dirty();
+                    win.request_redraw();
+                }
+                InputAction::TogglePalette => {
+                    self.global_search_state.open();
                     win.request_redraw();
                 }
                 InputAction::SearchNext => {
@@ -1711,6 +1764,123 @@ impl App {
             status_bar_px,
             self.config.theme.tokens(),
         )
+    }
+
+    /// Builds search entries from registered workspaces, their actual sessions, and supported commands.
+    #[must_use]
+    pub fn global_search_results(&self) -> Vec<crate::global_search::SearchResult> {
+        use crate::global_search::{PaletteCommand as Command, SearchResult, SearchTarget};
+        let mut results = Vec::new();
+        for (workspace_index, workspace) in self.workspace_manager.workspaces().iter().enumerate() {
+            results.push(SearchResult {
+                category: "Workspace".into(),
+                title: workspace.name.clone(),
+                detail: workspace.root_directory.display().to_string(),
+                target: SearchTarget::Workspace(workspace_index),
+            });
+            let sessions = if workspace_index == self.workspace_manager.active_index() {
+                Some(self.tabs.as_slice())
+            } else {
+                workspace.sessions.as_deref()
+            };
+            if let Some(sessions) = sessions {
+                for (tab_index, tab) in sessions.iter().enumerate() {
+                    results.push(SearchResult {
+                        category: "Session".into(),
+                        title: tab.display_title().to_owned(),
+                        detail: format!(
+                            "{} · {}",
+                            workspace.name,
+                            workspace.root_directory.display()
+                        ),
+                        target: SearchTarget::Session {
+                            workspace: workspace_index,
+                            tab: tab_index,
+                        },
+                    });
+                }
+            }
+        }
+        for (title, detail, command) in [
+            (
+                "New Terminal",
+                "Create a terminal session",
+                Command::NewTerminal,
+            ),
+            ("New Workspace", "Create a workspace", Command::NewWorkspace),
+            (
+                "Toggle Sidebar",
+                "Show or hide navigation",
+                Command::ToggleSidebar,
+            ),
+            (
+                "Source Control: Changes",
+                "Open repository changes",
+                Command::SourceChanges,
+            ),
+            (
+                "Source Control: Commit History",
+                "Open repository history",
+                Command::CommitHistory,
+            ),
+            (
+                "Settings",
+                "Open appearance and preferences",
+                Command::Settings,
+            ),
+        ] {
+            results.push(SearchResult {
+                category: "Command".into(),
+                title: title.into(),
+                detail: detail.into(),
+                target: SearchTarget::Command(command),
+            });
+        }
+        results
+    }
+
+    fn activate_global_search_result(
+        &mut self,
+        target: &crate::global_search::SearchTarget,
+        win: &Window,
+    ) {
+        use crate::global_search::{PaletteCommand as Command, SearchTarget};
+        match target {
+            SearchTarget::Workspace(index) => {
+                self.select_workspace(*index);
+            }
+            SearchTarget::Session { workspace, tab } => {
+                if *workspace != self.workspace_manager.active_index() {
+                    self.select_workspace(*workspace);
+                }
+                self.select_tab(*tab);
+            }
+            SearchTarget::Command(command) => match command {
+                Command::NewTerminal => self.create_tab(None),
+                Command::NewWorkspace => {
+                    let index = self.workspace_manager.workspaces().len() + 1;
+                    self.create_workspace(format!("Workspace {index}"), self.active_cwd());
+                }
+                Command::ToggleSidebar => self.toggle_sidebar_or_restore_content(win.inner_size()),
+                Command::SourceChanges => {
+                    self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                    self.sidebar_open = true;
+                    self.changes_panel_state.active_tab = crate::changes_panel::ChangesTab::Changes;
+                    self.refresh_git_status();
+                    self.handle_resize(win.inner_size());
+                }
+                Command::CommitHistory => {
+                    self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                    self.sidebar_open = true;
+                    self.changes_panel_state.active_tab = crate::changes_panel::ChangesTab::History;
+                    self.refresh_git_status();
+                    self.handle_resize(win.inner_size());
+                }
+                Command::Settings => self.settings_open = true,
+            },
+        }
+        self.global_search_state.close();
+        win.request_redraw();
     }
 
     /// Creates and switches to a new tab, spawning a shell PTY if proxy is available.
@@ -3237,6 +3407,25 @@ impl App {
             ));
         }
 
+        if self.global_search_state.is_open {
+            let results = self.global_search_results();
+            let mut state = self.global_search_state.clone();
+            let filtered = state.filtered(&results);
+            let layout = crate::global_search::SearchLayout::calculate(
+                screen_size[0],
+                screen_size[1],
+                filtered.len(),
+            );
+            quad_vertices.extend_from_slice(&crate::global_search::assemble_quads(
+                screen_size[0],
+                screen_size[1],
+                layout,
+                &filtered,
+                state.selected,
+                self.config.theme.tokens(),
+            ));
+        }
+
         quad_vertices
     }
 
@@ -3425,6 +3614,23 @@ impl App {
                 confirm_state,
                 screen_size[0],
                 screen_size[1],
+            ));
+        }
+
+        if self.global_search_state.is_open {
+            let results = self.global_search_results();
+            let filtered = self.global_search_state.filtered(&results);
+            let layout = crate::global_search::SearchLayout::calculate(
+                screen_size[0],
+                screen_size[1],
+                filtered.len(),
+            );
+            tab_labels.extend(crate::global_search::build_labels(
+                layout,
+                &self.global_search_state.query,
+                &filtered,
+                self.global_search_state.selected,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -4126,7 +4332,7 @@ impl ApplicationHandler<AppEvent> for App {
                                 let _ = win.drag_window();
                             }
                             crate::shell::TitlebarAction::Search => {
-                                self.search_state.is_open = true;
+                                self.global_search_state.open();
                             }
                             crate::shell::TitlebarAction::Settings => {
                                 self.settings_open = true;
@@ -4140,6 +4346,29 @@ impl ApplicationHandler<AppEvent> for App {
                                 event_loop.exit();
                             }
                         }
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
+                if self.global_search_state.is_open && state == winit::event::ElementState::Pressed
+                {
+                    let results = self.global_search_results();
+                    let filtered = self.global_search_state.filtered(&results);
+                    let layout = crate::global_search::SearchLayout::calculate(
+                        win.inner_size().width as f32,
+                        win.inner_size().height as f32,
+                        filtered.len(),
+                    );
+                    if let Some(index) = layout.hit_result(
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                        filtered.len(),
+                    ) {
+                        let target = filtered[index].target.clone();
+                        self.activate_global_search_result(&target, &win);
+                    } else {
+                        self.global_search_state.close();
                         win.request_redraw();
                     }
                     return;
@@ -5020,6 +5249,27 @@ impl ApplicationHandler<AppEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_search_indexes_actual_workspace_session_and_commands() {
+        let app = App::new(None, Terminal::new(80, 24), None);
+        let results = app.global_search_results();
+        assert!(results.iter().any(|result| {
+            result.category == "Workspace" && result.title == app.workspace_name
+        }));
+        assert!(results.iter().any(|result| {
+            result.category == "Session"
+                && matches!(
+                    result.target,
+                    crate::global_search::SearchTarget::Session { tab: 0, .. }
+                )
+        }));
+        assert!(
+            results
+                .iter()
+                .any(|result| result.title == "Source Control: Changes")
+        );
+    }
     use crate::pty::{PtySize, ShellCommand};
 
     #[test]

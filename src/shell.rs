@@ -214,7 +214,7 @@ pub fn build_shell_chrome(
         90.0 * scale,
     ));
     labels.push(label(
-        "Search workspace, sessions, files, commands…".into(),
+        "Search workspaces, sessions, commands…   Ctrl+Shift+P".into(),
         layout.window.width * 0.36,
         11.0 * scale,
         theme.glyphon(theme.foreground_muted),

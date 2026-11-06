@@ -232,6 +232,8 @@ pub enum InputAction {
     ToggleStatusBar,
     /// Toggle visibility of the in-terminal search bar.
     ToggleSearch,
+    /// Open the application-wide search and command palette.
+    TogglePalette,
     /// Jump to the next search match.
     SearchNext,
     /// Jump to the previous search match.
@@ -256,6 +258,7 @@ pub enum InputAction {
 
 /// Checks if a key event corresponds to a terminal internal action (e.g. scrollback or zoom).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn check_input_action(event: &KeyEvent) -> Option<InputAction> {
     if event.state != ElementState::Pressed {
         return None;
@@ -280,6 +283,9 @@ pub fn check_input_action(event: &KeyEvent) -> Option<InputAction> {
     if (is_ctrl_shift || is_super)
         && let Key::Character(ref ch) = event.logical_key
     {
+        if is_ctrl_shift && ch.eq_ignore_ascii_case("p") {
+            return Some(InputAction::TogglePalette);
+        }
         if ch.eq_ignore_ascii_case("c") {
             return Some(InputAction::Copy);
         }
@@ -291,9 +297,6 @@ pub fn check_input_action(event: &KeyEvent) -> Option<InputAction> {
         }
         if ch.eq_ignore_ascii_case("b") {
             return Some(InputAction::ToggleStatusBar);
-        }
-        if ch.eq_ignore_ascii_case("f") {
-            return Some(InputAction::ToggleSearch);
         }
         if ch == "\\" || ch.eq_ignore_ascii_case("d") {
             return Some(InputAction::SplitVertical);
@@ -313,6 +316,15 @@ pub fn check_input_action(event: &KeyEvent) -> Option<InputAction> {
         if ch.eq_ignore_ascii_case("r") {
             return Some(InputAction::RenameTab);
         }
+    }
+
+    if ctrl
+        && !shift
+        && !alt
+        && let Key::Character(ref ch) = event.logical_key
+        && ch.eq_ignore_ascii_case("f")
+    {
+        return Some(InputAction::ToggleSearch);
     }
 
     let is_ctrl_alt = ctrl && alt && !shift;
@@ -1114,16 +1126,24 @@ mod tests {
 
     #[test]
     fn check_search_keybindings() {
-        // Ctrl+Shift+F -> ToggleSearch
-        let ctrl_shift_f = KeyEvent::new(
+        // Ctrl+F -> terminal find.
+        let ctrl_f = KeyEvent::new(
             Key::Character(SmolStr::new("f")),
             Some("f".to_string()),
+            ModifiersState::CONTROL,
+            ElementState::Pressed,
+        );
+        assert_eq!(check_input_action(&ctrl_f), Some(InputAction::ToggleSearch));
+
+        let ctrl_shift_p = KeyEvent::new(
+            Key::Character(SmolStr::new("p")),
+            Some("p".to_string()),
             ModifiersState::CONTROL | ModifiersState::SHIFT,
             ElementState::Pressed,
         );
         assert_eq!(
-            check_input_action(&ctrl_shift_f),
-            Some(InputAction::ToggleSearch)
+            check_input_action(&ctrl_shift_p),
+            Some(InputAction::TogglePalette)
         );
 
         // F3 -> SearchNext
