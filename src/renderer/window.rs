@@ -31,7 +31,9 @@ pub fn default_window_attributes(title: &str) -> WindowAttributes {
     #[allow(unused_mut)]
     let mut attrs = WindowAttributes::default()
         .with_title(title)
-        .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+        .with_min_inner_size(LogicalSize::new(640.0, 480.0))
+        .with_decorations(false);
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
