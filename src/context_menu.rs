@@ -31,7 +31,7 @@ pub enum ContextAction {
     RevealDirectory,
     /// Request closing the selected terminal session.
     CloseSession,
-    /// Ask for confirmation before unregistering and stopping a workspace's sessions.
+    /// Ask for confirmation before stopping a workspace's sessions while retaining registration.
     CloseWorkspace,
     /// Ask for confirmation before removing its registration and stopping its sessions.
     RemoveWorkspace,

@@ -1728,7 +1728,7 @@ pub fn build_close_confirm_labels(
             "This removes its registration and stops its sessions; project files stay on disk."
                 .to_string()
         } else if state.workspace_index.is_some() {
-            "This removes the workspace from Oxidite and stops its sessions; project files stay on disk.".to_string()
+            "This closes its terminal sessions but keeps the workspace registered; project files stay on disk.".to_string()
         } else {
             "Closing this session will terminate its child processes.".to_string()
         },
@@ -1741,7 +1741,13 @@ pub fn build_close_confirm_labels(
 
     // Close button label
     labels.push(TabLabel {
-        text: "Close Tab".to_string(),
+        text: if state.remove_workspace {
+            "Remove Workspace".to_string()
+        } else if state.workspace_index.is_some() {
+            "Close Workspace".to_string()
+        } else {
+            "Close Tab".to_string()
+        },
         x: card_x + card_w - 212.0,
         y: card_y + 117.0,
         color: theme.glyphon(theme.foreground_primary),
@@ -2053,6 +2059,24 @@ mod tests {
         assert!(!quads.is_empty());
         let labels = build_close_confirm_labels(&confirm, 800.0, 600.0, theme);
         assert_eq!(labels.len(), 5);
+    }
+
+    #[test]
+    fn workspace_close_and_remove_confirmations_describe_distinct_effects() {
+        let theme = crate::theme::ThemeTokens::default();
+        let close = CloseConfirmState::for_workspace(1, "Oxidite".into());
+        let close_labels = build_close_confirm_labels(&close, 800.0, 600.0, theme);
+        assert_eq!(close_labels[3].text, "Close Workspace");
+        assert!(
+            close_labels[2]
+                .text
+                .contains("keeps the workspace registered")
+        );
+
+        let remove = CloseConfirmState::for_remove_workspace(1, "Oxidite".into());
+        let remove_labels = build_close_confirm_labels(&remove, 800.0, 600.0, theme);
+        assert_eq!(remove_labels[3].text, "Remove Workspace");
+        assert!(remove_labels[2].text.contains("removes its registration"));
     }
 
     #[test]
