@@ -58,11 +58,11 @@ impl ReviewVerdict {
 
     /// Color representing this verdict in [r, g, b, a].
     #[must_use]
-    pub fn badge_color(self) -> [f32; 4] {
+    pub fn badge_color(self, theme: crate::theme::ThemeTokens) -> [f32; 4] {
         match self {
-            ReviewVerdict::InReview => [0.91, 0.72, 0.36, 0.95], // Amber
-            ReviewVerdict::Approved => [0.21, 0.82, 0.50, 0.95], // Emerald green
-            ReviewVerdict::ChangesRequested => [1.0, 0.38, 0.42, 0.95], // Danger red
+            ReviewVerdict::InReview => theme.rgba(theme.warning),
+            ReviewVerdict::Approved => theme.rgba(theme.success),
+            ReviewVerdict::ChangesRequested => theme.rgba(theme.error),
         }
     }
 
@@ -119,13 +119,13 @@ impl ReviewTag {
 
     /// Primary accent color for the tag.
     #[must_use]
-    pub fn color(self) -> [f32; 4] {
+    pub fn color(self, theme: crate::theme::ThemeTokens) -> [f32; 4] {
         match self {
-            ReviewTag::Nit => [0.65, 0.68, 0.75, 1.0],
-            ReviewTag::Suggestion => [0.47, 0.67, 1.0, 1.0],
-            ReviewTag::Issue => [1.0, 0.45, 0.45, 1.0],
-            ReviewTag::Approval => [0.35, 0.85, 0.55, 1.0],
-            ReviewTag::Note => [0.95, 0.75, 0.35, 1.0],
+            ReviewTag::Nit => theme.rgba(theme.foreground_muted),
+            ReviewTag::Suggestion => theme.rgba(theme.info),
+            ReviewTag::Issue => theme.rgba(theme.error),
+            ReviewTag::Approval => theme.rgba(theme.success),
+            ReviewTag::Note => theme.rgba(theme.warning),
         }
     }
 }
@@ -1268,7 +1268,7 @@ pub fn assemble_diff_view_quads(
 
     // If review mode is active, render review verdict badge and review actions
     if let Some(vb) = layout.verdict_badge_rect {
-        let v_color = state.review_verdict.badge_color();
+        let v_color = state.review_verdict.badge_color(theme);
         // Verdict pill badge
         push_button_quads(
             &mut quads,
@@ -1483,7 +1483,7 @@ pub fn assemble_diff_view_quads(
                             current_y + 1.0,
                             3.0,
                             DIFF_COMMENT_HEIGHT - 2.0,
-                            c.tag.color(),
+                            c.tag.color(theme),
                         ));
                         // Resolve button
                         quads.extend_from_slice(&build_quad_vertices(
@@ -1524,7 +1524,7 @@ pub fn assemble_diff_view_quads(
                             current_y + 1.0,
                             3.0,
                             DIFF_COMMENT_HEIGHT - 2.0,
-                            c.tag.color(),
+                            c.tag.color(theme),
                         ));
                         // Resolve button
                         quads.extend_from_slice(&build_quad_vertices(
@@ -1579,13 +1579,13 @@ pub fn assemble_diff_view_quads(
                             current_y + 1.0,
                             3.0,
                             DIFF_COMMENT_HEIGHT - 2.0,
-                            draft.tag.color(),
+                            draft.tag.color(theme),
                         ));
                         push_button_quads(
                             &mut quads,
                             (card_x + 6.0, current_y + 3.0, 56.0, 16.0),
                             [0.12, 0.15, 0.22, 0.9],
-                            draft.tag.color(),
+                            draft.tag.color(theme),
                         );
                         push_button_quads(
                             &mut quads,
@@ -1615,13 +1615,13 @@ pub fn assemble_diff_view_quads(
                             current_y + 1.0,
                             3.0,
                             DIFF_COMMENT_HEIGHT - 2.0,
-                            draft.tag.color(),
+                            draft.tag.color(theme),
                         ));
                         push_button_quads(
                             &mut quads,
                             (card_x + 6.0, current_y + 3.0, 56.0, 16.0),
                             [0.12, 0.15, 0.22, 0.9],
-                            draft.tag.color(),
+                            draft.tag.color(theme),
                         );
                         push_button_quads(
                             &mut quads,
@@ -1711,7 +1711,7 @@ pub fn build_diff_view_labels(
 
     // Review status and actions if review mode active
     if let Some(vb) = layout.verdict_badge_rect {
-        let v_color = state.review_verdict.badge_color();
+        let v_color = state.review_verdict.badge_color(theme);
         let vr = (v_color[0] * 255.0).round() as u8;
         let vg = (v_color[1] * 255.0).round() as u8;
         let vb_b = (v_color[2] * 255.0).round() as u8;
@@ -2047,7 +2047,7 @@ pub fn build_diff_view_labels(
                     if let Some(c) = left_comments.get(c_idx) {
                         let card_x = diff_x + DIFF_GUTTER_WIDTH + 3.0;
                         let card_w = half_w - DIFF_GUTTER_WIDTH - 6.0;
-                        let tc = c.tag.color();
+                        let tc = c.tag.color(theme);
                         let tag_color = GlyphonColor::rgb(
                             (tc[0] * 255.0).round() as u8,
                             (tc[1] * 255.0).round() as u8,
@@ -2071,9 +2071,9 @@ pub fn build_diff_view_labels(
                             x: card_x + 64.0,
                             y: current_y + 3.0,
                             color: if c.resolved {
-                                GlyphonColor::rgb(140, 145, 155)
+                                theme.glyphon(theme.foreground_muted)
                             } else {
-                                GlyphonColor::rgb(220, 225, 240)
+                                theme.glyphon(theme.foreground_secondary)
                             },
                             bold: false,
                             max_width: card_w - 110.0,
@@ -2086,9 +2086,9 @@ pub fn build_diff_view_labels(
                             x: card_x + card_w - 42.0,
                             y: current_y + 3.0,
                             color: if c.resolved {
-                                GlyphonColor::rgb(50, 210, 120)
+                                theme.glyphon(theme.success)
                             } else {
-                                GlyphonColor::rgb(150, 155, 170)
+                                theme.glyphon(theme.foreground_muted)
                             },
                             bold: true,
                             max_width: 22.0,
@@ -2099,7 +2099,7 @@ pub fn build_diff_view_labels(
                             text: "x".to_string(),
                             x: card_x + card_w - 16.0,
                             y: current_y + 3.0,
-                            color: GlyphonColor::rgb(160, 165, 180),
+                            color: theme.glyphon(theme.error),
                             bold: true,
                             max_width: 14.0,
                         });
@@ -2108,7 +2108,7 @@ pub fn build_diff_view_labels(
                     if let Some(c) = right_comments.get(c_idx) {
                         let card_x = diff_x + half_w + DIFF_GUTTER_WIDTH + 3.0;
                         let card_w = half_w - DIFF_GUTTER_WIDTH - 6.0;
-                        let tc = c.tag.color();
+                        let tc = c.tag.color(theme);
                         let tag_color = GlyphonColor::rgb(
                             (tc[0] * 255.0).round() as u8,
                             (tc[1] * 255.0).round() as u8,
@@ -2132,9 +2132,9 @@ pub fn build_diff_view_labels(
                             x: card_x + 64.0,
                             y: current_y + 3.0,
                             color: if c.resolved {
-                                GlyphonColor::rgb(140, 145, 155)
+                                theme.glyphon(theme.foreground_muted)
                             } else {
-                                GlyphonColor::rgb(220, 225, 240)
+                                theme.glyphon(theme.foreground_secondary)
                             },
                             bold: false,
                             max_width: card_w - 110.0,
@@ -2147,9 +2147,9 @@ pub fn build_diff_view_labels(
                             x: card_x + card_w - 42.0,
                             y: current_y + 3.0,
                             color: if c.resolved {
-                                GlyphonColor::rgb(50, 210, 120)
+                                theme.glyphon(theme.success)
                             } else {
-                                GlyphonColor::rgb(150, 155, 170)
+                                theme.glyphon(theme.foreground_muted)
                             },
                             bold: true,
                             max_width: 22.0,
@@ -2160,7 +2160,7 @@ pub fn build_diff_view_labels(
                             text: "x".to_string(),
                             x: card_x + card_w - 16.0,
                             y: current_y + 3.0,
-                            color: GlyphonColor::rgb(160, 165, 180),
+                            color: theme.glyphon(theme.error),
                             bold: true,
                             max_width: 14.0,
                         });
@@ -2190,7 +2190,7 @@ pub fn build_diff_view_labels(
                     if has_left_draft && let Some(draft) = &state.comment_draft {
                         let card_x = diff_x + DIFF_GUTTER_WIDTH + 3.0;
                         let card_w = half_w - DIFF_GUTTER_WIDTH - 6.0;
-                        let tc = draft.tag.color();
+                        let tc = draft.tag.color(theme);
                         let tag_color = GlyphonColor::rgb(
                             (tc[0] * 255.0).round() as u8,
                             (tc[1] * 255.0).round() as u8,
@@ -2214,9 +2214,9 @@ pub fn build_diff_view_labels(
                             x: card_x + 66.0,
                             y: current_y + 3.0,
                             color: if draft.content.is_empty() {
-                                GlyphonColor::rgb(130, 135, 150)
+                                theme.glyphon(theme.foreground_muted)
                             } else {
-                                GlyphonColor::rgb(240, 245, 255)
+                                theme.glyphon(theme.foreground_primary)
                             },
                             bold: false,
                             max_width: (card_w - 136.0).max(10.0),
@@ -2225,7 +2225,7 @@ pub fn build_diff_view_labels(
                             text: "Post".to_string(),
                             x: card_x + card_w - 58.0,
                             y: current_y + 3.0,
-                            color: GlyphonColor::rgb(140, 235, 170),
+                            color: theme.glyphon(theme.success),
                             bold: true,
                             max_width: 32.0,
                         });
@@ -2233,7 +2233,7 @@ pub fn build_diff_view_labels(
                             text: "x".to_string(),
                             x: card_x + card_w - 18.0,
                             y: current_y + 3.0,
-                            color: GlyphonColor::rgb(220, 140, 150),
+                            color: theme.glyphon(theme.error),
                             bold: true,
                             max_width: 14.0,
                         });
@@ -2242,7 +2242,7 @@ pub fn build_diff_view_labels(
                     if has_right_draft && let Some(draft) = &state.comment_draft {
                         let card_x = diff_x + half_w + DIFF_GUTTER_WIDTH + 3.0;
                         let card_w = half_w - DIFF_GUTTER_WIDTH - 6.0;
-                        let tc = draft.tag.color();
+                        let tc = draft.tag.color(theme);
                         let tag_color = GlyphonColor::rgb(
                             (tc[0] * 255.0).round() as u8,
                             (tc[1] * 255.0).round() as u8,
@@ -2266,9 +2266,9 @@ pub fn build_diff_view_labels(
                             x: card_x + 66.0,
                             y: current_y + 3.0,
                             color: if draft.content.is_empty() {
-                                GlyphonColor::rgb(130, 135, 150)
+                                theme.glyphon(theme.foreground_muted)
                             } else {
-                                GlyphonColor::rgb(240, 245, 255)
+                                theme.glyphon(theme.foreground_primary)
                             },
                             bold: false,
                             max_width: (card_w - 136.0).max(10.0),
@@ -2277,7 +2277,7 @@ pub fn build_diff_view_labels(
                             text: "Post".to_string(),
                             x: card_x + card_w - 58.0,
                             y: current_y + 3.0,
-                            color: GlyphonColor::rgb(140, 235, 170),
+                            color: theme.glyphon(theme.success),
                             bold: true,
                             max_width: 32.0,
                         });
@@ -2285,7 +2285,7 @@ pub fn build_diff_view_labels(
                             text: "x".to_string(),
                             x: card_x + card_w - 18.0,
                             y: current_y + 3.0,
-                            color: GlyphonColor::rgb(220, 140, 150),
+                            color: theme.glyphon(theme.error),
                             bold: true,
                             max_width: 14.0,
                         });
@@ -2670,6 +2670,31 @@ mod tests {
         assert_eq!(
             deletion[0].color,
             theme.glyphon(theme.diff_removed_foreground)
+        );
+    }
+
+    #[test]
+    fn review_tags_and_verdicts_use_active_semantic_theme_colors() {
+        let theme = crate::theme::Theme::dracula().tokens();
+        assert_eq!(
+            ReviewTag::Nit.color(theme),
+            theme.rgba(theme.foreground_muted)
+        );
+        assert_eq!(ReviewTag::Suggestion.color(theme), theme.rgba(theme.info));
+        assert_eq!(ReviewTag::Issue.color(theme), theme.rgba(theme.error));
+        assert_eq!(ReviewTag::Approval.color(theme), theme.rgba(theme.success));
+        assert_eq!(ReviewTag::Note.color(theme), theme.rgba(theme.warning));
+        assert_eq!(
+            ReviewVerdict::InReview.badge_color(theme),
+            theme.rgba(theme.warning)
+        );
+        assert_eq!(
+            ReviewVerdict::Approved.badge_color(theme),
+            theme.rgba(theme.success)
+        );
+        assert_eq!(
+            ReviewVerdict::ChangesRequested.badge_color(theme),
+            theme.rgba(theme.error)
         );
     }
 
