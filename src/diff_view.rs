@@ -174,6 +174,7 @@ pub fn tokenize_syntax_line(
     content: &str,
     file_name: &str,
     line_type: DiffLineType,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<SyntaxSpan> {
     if content.is_empty() {
         return Vec::new();
@@ -192,16 +193,16 @@ pub fn tokenize_syntax_line(
     let is_config = matches!(ext.as_str(), "toml" | "json" | "yaml" | "yml");
 
     let default_color = match line_type {
-        DiffLineType::Deletion => GlyphonColor::rgb(255, 175, 180),
-        DiffLineType::Addition => GlyphonColor::rgb(165, 235, 185),
-        _ => GlyphonColor::rgb(215, 220, 235),
+        DiffLineType::Deletion => theme.glyphon(theme.diff_removed_foreground),
+        DiffLineType::Addition => theme.glyphon(theme.diff_added_foreground),
+        _ => theme.glyphon(theme.foreground_primary),
     };
 
-    let keyword_color = GlyphonColor::rgb(195, 140, 245);
-    let type_color = GlyphonColor::rgb(235, 195, 115);
-    let string_color = GlyphonColor::rgb(140, 220, 165);
-    let number_color = GlyphonColor::rgb(235, 165, 105);
-    let comment_color = GlyphonColor::rgb(115, 125, 145);
+    let keyword_color = theme.glyphon(theme.accent_secondary);
+    let type_color = theme.glyphon(theme.warning);
+    let string_color = theme.glyphon(theme.success);
+    let number_color = theme.glyphon(theme.info);
+    let comment_color = theme.glyphon(theme.foreground_muted);
 
     let mut spans = Vec::new();
     let mut chars = content.char_indices().peekable();
@@ -1154,6 +1155,7 @@ pub fn assemble_diff_view_quads(
     diff_height: f32,
     accent_color: [f32; 4],
     state: &DiffViewState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
 
@@ -1163,7 +1165,7 @@ pub fn assemble_diff_view_quads(
         diff_y,
         diff_width,
         diff_height,
-        [0.0, 0.0, 0.0, 1.0],
+        theme.background_primary.to_rgba_array(1.0),
     ));
 
     // 2. Left 1px border dividing from terminal / agent pane (#181a20)
@@ -1172,7 +1174,7 @@ pub fn assemble_diff_view_quads(
         diff_y,
         1.0,
         diff_height,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // 3. Top header bar background and bottom 1px divider (#181a20)
@@ -1181,14 +1183,14 @@ pub fn assemble_diff_view_quads(
         diff_y,
         diff_width,
         DIFF_HEADER_HEIGHT,
-        [0.025, 0.028, 0.038, 0.95],
+        theme.background_tertiary.to_rgba_array(0.95),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         diff_x,
         diff_y + DIFF_HEADER_HEIGHT - 1.0,
         diff_width,
         1.0,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     let layout = DiffHeaderLayout::compute(diff_x, diff_y, diff_width, state);
@@ -1202,21 +1204,21 @@ pub fn assemble_diff_view_quads(
         push_button_quads(
             &mut quads,
             p,
-            [0.07, 0.09, 0.13, 0.95],
-            [0.22, 0.28, 0.38, 0.9],
+            theme.background_secondary.to_rgba_array(0.95),
+            theme.border_default.to_rgba_array(0.9),
         );
         quads.extend_from_slice(&build_quad_vertices(
             c.0,
             c.1,
             c.2,
             c.3,
-            [0.03, 0.04, 0.06, 0.8],
+            theme.background_primary.to_rgba_array(0.8),
         ));
         push_button_quads(
             &mut quads,
             n,
-            [0.07, 0.09, 0.13, 0.95],
-            [0.22, 0.28, 0.38, 0.9],
+            theme.background_secondary.to_rgba_array(0.95),
+            theme.border_default.to_rgba_array(0.9),
         );
     }
 
@@ -1236,26 +1238,26 @@ pub fn assemble_diff_view_quads(
 
     // Diff / Review mode toggle buttons
     let diff_btn_bg = if !state.review_mode {
-        [0.09, 0.11, 0.16, 0.95]
+        theme.focus_background.to_rgba_array(0.95)
     } else {
-        [0.04, 0.05, 0.07, 0.8]
+        theme.background_secondary.to_rgba_array(0.8)
     };
     let diff_border = if !state.review_mode {
         accent_color
     } else {
-        [0.18, 0.20, 0.26, 0.7]
+        theme.border_subtle.to_rgba_array(0.7)
     };
     push_button_quads(&mut quads, layout.diff_tab_rect, diff_btn_bg, diff_border);
 
     let review_btn_bg = if state.review_mode {
-        [0.09, 0.11, 0.16, 0.95]
+        theme.focus_background.to_rgba_array(0.95)
     } else {
-        [0.04, 0.05, 0.07, 0.8]
+        theme.background_secondary.to_rgba_array(0.8)
     };
     let review_border = if state.review_mode {
         accent_color
     } else {
-        [0.18, 0.20, 0.26, 0.7]
+        theme.border_subtle.to_rgba_array(0.7)
     };
     push_button_quads(
         &mut quads,
@@ -1291,15 +1293,15 @@ pub fn assemble_diff_view_quads(
         push_button_quads(
             &mut quads,
             ai,
-            [0.10, 0.14, 0.22, 0.95],
-            [0.32, 0.52, 0.90, 0.9],
+            theme.background_secondary.to_rgba_array(0.95),
+            theme.border_active.to_rgba_array(0.9),
         );
         quads.extend_from_slice(&build_quad_vertices(
             ai.0,
             ai.1,
             2.5,
             ai.3,
-            [0.35, 0.75, 1.0, 1.0],
+            theme.accent_secondary.to_rgba_array(1.0),
         ));
     }
 
@@ -1307,15 +1309,15 @@ pub fn assemble_diff_view_quads(
     push_button_quads(
         &mut quads,
         layout.open_btn_rect,
-        [0.07, 0.09, 0.13, 0.95],
-        [0.22, 0.28, 0.38, 0.9],
+        theme.background_secondary.to_rgba_array(0.95),
+        theme.border_default.to_rgba_array(0.9),
     );
     // Close button
     push_button_quads(
         &mut quads,
         layout.close_btn_rect,
-        [0.15, 0.08, 0.09, 0.95],
-        [0.45, 0.20, 0.22, 0.9],
+        theme.diff_removed_background.to_rgba_array(0.95),
+        theme.error.to_rgba_array(0.9),
     );
 
     // 4. Side-by-side columns geometry
@@ -1329,7 +1331,7 @@ pub fn assemble_diff_view_quads(
         content_y,
         1.0,
         content_h,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // Left gutter background
@@ -1338,7 +1340,7 @@ pub fn assemble_diff_view_quads(
         content_y,
         DIFF_GUTTER_WIDTH,
         content_h,
-        [0.015, 0.018, 0.024, 0.95],
+        theme.background_secondary.to_rgba_array(0.95),
     ));
     // Left gutter divider
     quads.extend_from_slice(&build_quad_vertices(
@@ -1346,7 +1348,7 @@ pub fn assemble_diff_view_quads(
         content_y,
         1.0,
         content_h,
-        [0.07, 0.075, 0.095, 0.8],
+        theme.border_subtle.to_rgba_array(0.8),
     ));
 
     // Right gutter background
@@ -1659,6 +1661,7 @@ pub fn build_diff_view_labels(
     diff_width: f32,
     diff_height: f32,
     state: &DiffViewState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let mut labels = Vec::new();
 
@@ -1670,7 +1673,7 @@ pub fn build_diff_view_labels(
         text: tab_text,
         x: layout.file_title_rect.0,
         y: layout.file_title_rect.1,
-        color: GlyphonColor::rgb(240, 245, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: layout.file_title_rect.2,
     });
@@ -1684,9 +1687,9 @@ pub fn build_diff_view_labels(
         x: layout.diff_tab_rect.0 + 8.0,
         y: btn_text_y,
         color: if !state.review_mode {
-            GlyphonColor::rgb(240, 245, 255)
+            theme.glyphon(theme.foreground_primary)
         } else {
-            GlyphonColor::rgb(140, 145, 160)
+            theme.glyphon(theme.foreground_muted)
         },
         bold: !state.review_mode,
         max_width: (layout.diff_tab_rect.2 - 6.0).max(10.0),
@@ -1698,9 +1701,9 @@ pub fn build_diff_view_labels(
         x: layout.review_tab_rect.0 + 6.0,
         y: btn_text_y,
         color: if state.review_mode {
-            GlyphonColor::rgb(240, 245, 255)
+            theme.glyphon(theme.foreground_primary)
         } else {
-            GlyphonColor::rgb(140, 145, 160)
+            theme.glyphon(theme.foreground_muted)
         },
         bold: state.review_mode,
         max_width: (layout.review_tab_rect.2 - 6.0).max(10.0),
@@ -1735,7 +1738,7 @@ pub fn build_diff_view_labels(
             text: ai_text.to_string(),
             x: ai.0 + 6.0,
             y: btn_text_y,
-            color: GlyphonColor::rgb(140, 215, 255),
+            color: theme.glyphon(theme.accent_secondary),
             bold: true,
             max_width: (ai.2 - 8.0).max(10.0),
         });
@@ -1754,7 +1757,7 @@ pub fn build_diff_view_labels(
             text: app_text.to_string(),
             x: app.0 + offset_x,
             y: btn_text_y,
-            color: GlyphonColor::rgb(130, 230, 160),
+            color: theme.glyphon(theme.success),
             bold: true,
             max_width: (app.2 - 4.0).max(10.0),
         });
@@ -1773,7 +1776,7 @@ pub fn build_diff_view_labels(
             text: chg_text.to_string(),
             x: chg.0 + offset_x,
             y: btn_text_y,
-            color: GlyphonColor::rgb(255, 140, 150),
+            color: theme.glyphon(theme.error),
             bold: true,
             max_width: (chg.2 - 4.0).max(10.0),
         });
@@ -1790,7 +1793,7 @@ pub fn build_diff_view_labels(
             text: exp_text.to_string(),
             x: exp.0 + offset_x,
             y: btn_text_y,
-            color: GlyphonColor::rgb(210, 215, 230),
+            color: theme.glyphon(theme.foreground_secondary),
             bold: true,
             max_width: (exp.2 - 4.0).max(10.0),
         });
@@ -1812,7 +1815,7 @@ pub fn build_diff_view_labels(
             text: stage_text.to_string(),
             x: layout.stage_btn_rect.0 + stage_offset,
             y: btn_text_y,
-            color: GlyphonColor::rgb(220, 225, 240),
+            color: theme.glyphon(theme.foreground_secondary),
             bold: false,
             max_width: (layout.stage_btn_rect.2 - 4.0).max(10.0),
         });
@@ -1831,7 +1834,7 @@ pub fn build_diff_view_labels(
         text: open_text.to_string(),
         x: layout.open_btn_rect.0 + open_offset,
         y: btn_text_y,
-        color: GlyphonColor::rgb(220, 225, 240),
+        color: theme.glyphon(theme.foreground_secondary),
         bold: false,
         max_width: (layout.open_btn_rect.2 - 4.0).max(10.0),
     });
@@ -1841,7 +1844,7 @@ pub fn build_diff_view_labels(
         text: "x".to_string(),
         x: layout.close_btn_rect.0 + 7.0,
         y: btn_text_y,
-        color: GlyphonColor::rgb(160, 165, 180),
+        color: theme.glyphon(theme.foreground_muted),
         bold: true,
         max_width: (layout.close_btn_rect.2 - 4.0).max(10.0),
     });
@@ -1857,9 +1860,9 @@ pub fn build_diff_view_labels(
             x: p.0 + 7.0,
             y: btn_text_y,
             color: if state.file_index > 0 {
-                GlyphonColor::rgb(220, 225, 240)
+                theme.glyphon(theme.foreground_secondary)
             } else {
-                GlyphonColor::rgb(90, 95, 110)
+                theme.glyphon(theme.foreground_muted)
             },
             bold: true,
             max_width: (p.2 - 4.0).max(10.0),
@@ -1868,7 +1871,7 @@ pub fn build_diff_view_labels(
             text: format!("{}/{}", state.file_index + 1, state.total_files),
             x: c.0 + 6.0,
             y: btn_text_y,
-            color: GlyphonColor::rgb(180, 185, 200),
+            color: theme.glyphon(theme.foreground_secondary),
             bold: false,
             max_width: (c.2 - 4.0).max(10.0),
         });
@@ -1877,9 +1880,9 @@ pub fn build_diff_view_labels(
             x: n.0 + 7.0,
             y: btn_text_y,
             color: if state.file_index + 1 < state.total_files {
-                GlyphonColor::rgb(220, 225, 240)
+                theme.glyphon(theme.foreground_secondary)
             } else {
-                GlyphonColor::rgb(90, 95, 110)
+                theme.glyphon(theme.foreground_muted)
             },
             bold: true,
             max_width: (n.2 - 4.0).max(10.0),
@@ -1896,7 +1899,7 @@ pub fn build_diff_view_labels(
             text: "No diff hunks or modifications in this commit / file.".to_string(),
             x: diff_x + 20.0,
             y: content_y + 30.0,
-            color: GlyphonColor::rgb(140, 150, 175),
+            color: theme.glyphon(theme.foreground_muted),
             bold: false,
             max_width: diff_width - 40.0,
         });
@@ -1908,7 +1911,7 @@ pub fn build_diff_view_labels(
             text: hunk.header.clone(),
             x: diff_x + 10.0,
             y: current_y + 3.0,
-            color: GlyphonColor::rgb(120, 150, 200),
+            color: theme.glyphon(theme.accent_secondary),
             bold: true,
             max_width: diff_width - 20.0,
         });
@@ -1930,7 +1933,7 @@ pub fn build_diff_view_labels(
                         text: format!("{num:>3}"),
                         x: diff_x + 8.0,
                         y: current_y + 3.0,
-                        color: GlyphonColor::rgb(110, 115, 130),
+                        color: theme.glyphon(theme.foreground_muted),
                         bold: false,
                         max_width: DIFF_GUTTER_WIDTH - 10.0,
                     });
@@ -1940,7 +1943,7 @@ pub fn build_diff_view_labels(
                     let char_w = 7.22f32;
                     let mut col_offset = 0;
                     for span in
-                        tokenize_syntax_line(&left.content, &state.file_name, left.line_type)
+                        tokenize_syntax_line(&left.content, &state.file_name, left.line_type, theme)
                     {
                         let span_len = span.text.chars().count();
                         let span_x =
@@ -1970,7 +1973,7 @@ pub fn build_diff_view_labels(
                         text: format!("{num:>3}"),
                         x: diff_x + half_w + 8.0,
                         y: current_y + 3.0,
-                        color: GlyphonColor::rgb(110, 115, 130),
+                        color: theme.glyphon(theme.foreground_muted),
                         bold: false,
                         max_width: DIFF_GUTTER_WIDTH - 10.0,
                     });
@@ -1979,9 +1982,12 @@ pub fn build_diff_view_labels(
                 if !right.content.is_empty() {
                     let char_w = 7.22f32;
                     let mut col_offset = 0;
-                    for span in
-                        tokenize_syntax_line(&right.content, &state.file_name, right.line_type)
-                    {
+                    for span in tokenize_syntax_line(
+                        &right.content,
+                        &state.file_name,
+                        right.line_type,
+                        theme,
+                    ) {
                         let span_len = span.text.chars().count();
                         let span_x = diff_x
                             + half_w
@@ -2526,15 +2532,29 @@ mod tests {
     #[test]
     fn assemble_diff_view_quads_generates_quads() {
         let state = DiffViewState::default();
-        let quads =
-            assemble_diff_view_quads(200.0, 36.0, 600.0, 500.0, [0.0, 1.0, 0.5, 1.0], &state);
+        let quads = assemble_diff_view_quads(
+            200.0,
+            36.0,
+            600.0,
+            500.0,
+            [0.0, 1.0, 0.5, 1.0],
+            &state,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert_ne!(quads.len(), 0);
     }
 
     #[test]
     fn build_diff_view_labels_contains_code_and_buttons() {
         let state = DiffViewState::default();
-        let labels = build_diff_view_labels(200.0, 36.0, 600.0, 500.0, &state);
+        let labels = build_diff_view_labels(
+            200.0,
+            36.0,
+            600.0,
+            500.0,
+            &state,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert_ne!(labels.len(), 0);
         assert!(labels.iter().any(|l| l.text.contains("sw.js")));
         assert!(labels.iter().any(|l| l.text.contains("CACHE_NAME")));
@@ -2611,22 +2631,46 @@ mod tests {
             "pub fn test() { let x = 42; }",
             "lib.rs",
             DiffLineType::Context,
+            crate::theme::Theme::default_dark().tokens(),
         );
         assert!(rust_spans.iter().any(|s| s.text == "pub" && s.bold));
         assert!(rust_spans.iter().any(|s| s.text == "fn" && s.bold));
         assert!(rust_spans.iter().any(|s| s.text == "42"));
 
         // JavaScript
-        let js_spans =
-            tokenize_syntax_line("const name = 'oxidite';", "app.js", DiffLineType::Addition);
+        let js_spans = tokenize_syntax_line(
+            "const name = 'oxidite';",
+            "app.js",
+            DiffLineType::Addition,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert!(js_spans.iter().any(|s| s.text == "const" && s.bold));
         assert!(js_spans.iter().any(|s| s.text == "'oxidite'"));
 
         // Python
-        let py_spans =
-            tokenize_syntax_line("def run(): # comment\n", "main.py", DiffLineType::Context);
+        let py_spans = tokenize_syntax_line(
+            "def run(): # comment\n",
+            "main.py",
+            DiffLineType::Context,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert!(py_spans.iter().any(|s| s.text == "def" && s.bold));
         assert!(py_spans.iter().any(|s| s.text.contains("# comment")));
+    }
+
+    #[test]
+    fn diff_addition_and_deletion_colors_come_from_shared_theme_tokens() {
+        let theme = crate::theme::Theme::dracula().tokens();
+        let addition = tokenize_syntax_line("plain", "plain.txt", DiffLineType::Addition, theme);
+        let deletion = tokenize_syntax_line("plain", "plain.txt", DiffLineType::Deletion, theme);
+        assert_eq!(
+            addition[0].color,
+            theme.glyphon(theme.diff_added_foreground)
+        );
+        assert_eq!(
+            deletion[0].color,
+            theme.glyphon(theme.diff_removed_foreground)
+        );
     }
 
     #[test]
@@ -2669,10 +2713,25 @@ mod tests {
         let w = 800.0;
         let h = 600.0;
 
-        let quads = assemble_diff_view_quads(x, y, w, h, [0.0, 1.0, 0.5, 1.0], &state);
+        let quads = assemble_diff_view_quads(
+            x,
+            y,
+            w,
+            h,
+            [0.0, 1.0, 0.5, 1.0],
+            &state,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert!(!quads.is_empty());
 
-        let labels = build_diff_view_labels(x, y, w, h, &state);
+        let labels = build_diff_view_labels(
+            x,
+            y,
+            w,
+            h,
+            &state,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert!(
             labels
                 .iter()

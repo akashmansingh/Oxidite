@@ -3413,6 +3413,7 @@ impl App {
                 geo.content_h,
                 accent_color,
                 &self.diff_view_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -3716,6 +3717,7 @@ impl App {
                 geo.diff_w,
                 geo.content_h,
                 &self.diff_view_state,
+                theme_tokens,
             ));
         }
 
