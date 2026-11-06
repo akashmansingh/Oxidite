@@ -1551,19 +1551,9 @@ impl App {
         if count == 0 {
             return Vec::new();
         }
-        let (layouts, plus_btn, sidebar_btn) = compute_tab_layouts(count, window_width);
+        let (layouts, plus_btn, _) = compute_tab_layouts(count, window_width);
         let chrome = crate::tab::compute_chrome_buttons_extended(window_width);
         let mut labels = Vec::new();
-
-        // Sidebar toggle button label [◨]
-        labels.push(TabLabel {
-            text: "◨".to_string(),
-            x: sidebar_btn.0 + 3.0,
-            y: sidebar_btn.1 + 1.0,
-            color: glyphon::Color::rgb(180, 185, 200),
-            bold: true,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
 
         for (idx, layout) in layouts.iter().enumerate() {
             let is_active = idx == self.active_tab_index;
@@ -1641,48 +1631,18 @@ impl App {
             max_width: crate::tab::TAB_BUTTON_SIZE,
         });
 
-        // Upper ribbon right-aligned buttons
+        // Contextual terminal action; window/sidebar actions live in the application shell.
         let btn_color = if self.config.theme.is_light() {
             glyphon::Color::rgb(70, 80, 95)
         } else {
             glyphon::Color::rgb(180, 185, 205)
         };
 
-        // Settings button [⚙]
-        labels.push(TabLabel {
-            text: "⚙".to_string(),
-            x: chrome.settings_btn.0 + 3.0,
-            y: chrome.settings_btn.1 + 1.0,
-            color: btn_color,
-            bold: false,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
-
         // Split pane button [◫]
         labels.push(TabLabel {
             text: "◫".to_string(),
             x: chrome.split_btn.0 + 3.0,
             y: chrome.split_btn.1 + 1.0,
-            color: btn_color,
-            bold: false,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
-
-        // Fullscreen button [⛶]
-        labels.push(TabLabel {
-            text: "⛶".to_string(),
-            x: chrome.fullscreen_btn.0 + 3.0,
-            y: chrome.fullscreen_btn.1 + 1.0,
-            color: btn_color,
-            bold: false,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
-
-        // Maximize button [⤢]
-        labels.push(TabLabel {
-            text: "⤢".to_string(),
-            x: chrome.max_btn.0 + 3.0,
-            y: chrome.max_btn.1 + 1.0,
             color: btn_color,
             bold: false,
             max_width: crate::tab::TAB_BUTTON_SIZE,
@@ -5440,18 +5400,14 @@ mod tests {
         app.create_tab(Some("Workspaces".to_string()));
 
         let labels = app.build_tab_labels(800.0);
-        // 1 sidebar button + 2 tabs * 2 labels (title + close) + 1 plus button + 4 chrome buttons = 10 labels
-        assert_eq!(labels.len(), 10);
-        assert_eq!(labels[0].text, "◨");
-        assert_eq!(labels[1].text, "Tab 1");
-        assert_eq!(labels[2].text, "×");
-        assert_eq!(labels[3].text, "Workspaces");
-        assert_eq!(labels[4].text, "×");
-        assert_eq!(labels[5].text, "+");
-        assert_eq!(labels[6].text, "⚙");
-        assert_eq!(labels[7].text, "◫");
-        assert_eq!(labels[8].text, "⛶");
-        assert_eq!(labels[9].text, "⤢");
+        // Two actual terminal tabs, new tab, and the contextual split action.
+        assert_eq!(labels.len(), 6);
+        assert_eq!(labels[0].text, "Tab 1");
+        assert_eq!(labels[1].text, "×");
+        assert_eq!(labels[2].text, "Workspaces");
+        assert_eq!(labels[3].text, "×");
+        assert_eq!(labels[4].text, "+");
+        assert_eq!(labels[5].text, "◫");
 
         // Verify agent detection badge formatting
         app.create_tab(Some("claude-code".to_string()));
