@@ -19,6 +19,8 @@ pub enum ContextAction {
     Open,
     /// Create a terminal in the selected workspace.
     NewTerminal,
+    /// Rename the selected workspace or terminal session.
+    Rename,
     /// Open a new right-side terminal pane in the selected session.
     SplitRight,
     /// Open a new lower terminal pane in the selected session.
@@ -186,10 +188,12 @@ fn items(target: ContextTarget) -> &'static [(ContextAction, &'static str)] {
         ContextTarget::Workspace(_) => &[
             (ContextAction::Open, "Open Workspace"),
             (ContextAction::NewTerminal, "New Terminal"),
+            (ContextAction::Rename, "Rename Workspace"),
             (ContextAction::RevealDirectory, "Reveal Folder"),
         ],
         ContextTarget::Session(_) => &[
             (ContextAction::Open, "Open Session"),
+            (ContextAction::Rename, "Rename Session"),
             (ContextAction::SplitRight, "Split Right"),
             (ContextAction::SplitDown, "Split Down"),
             (ContextAction::RevealDirectory, "Reveal Working Directory"),
@@ -216,7 +220,7 @@ mod tests {
             menu.hit_test(
                 target,
                 menu.x + 8.0,
-                menu.y + 4.0 + 4.0 * menu.row_height + 1.0
+                menu.y + 4.0 + 5.0 * menu.row_height + 1.0
             ),
             Some(ContextAction::CloseSession)
         );
@@ -227,8 +231,9 @@ mod tests {
         let target = ContextTarget::Workspace(1);
         let menu = ContextMenuState::new(target, 10.0, 10.0).layout(800.0, 600.0, 1.0);
         let labels = menu.labels(target, ThemeTokens::default());
-        assert_eq!(labels.len(), 3);
+        assert_eq!(labels.len(), 4);
         assert!(labels.iter().any(|label| label.text == "Reveal Folder"));
+        assert!(labels.iter().any(|label| label.text == "Rename Workspace"));
         assert!(
             menu.quads(target, Some(ContextAction::Open), ThemeTokens::default())
                 .len()

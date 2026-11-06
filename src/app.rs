@@ -854,14 +854,7 @@ impl App {
                     }
                     Key::Named(NamedKey::Enter) => {
                         self.tab_rename_state = None;
-                        let custom = rename.input_text.trim().to_string();
-                        if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
-                            tab.set_custom_title(if custom.is_empty() {
-                                None
-                            } else {
-                                Some(custom)
-                            });
-                        }
+                        self.apply_rename(&rename);
                         win.request_redraw();
                         return;
                     }
@@ -2652,6 +2645,15 @@ impl App {
                 }
                 None
             }
+            (ContextTarget::Workspace(index), Action::Rename) => {
+                if let Some(workspace) = self.workspace_manager.workspaces().get(index) {
+                    self.tab_rename_state = Some(crate::tab::TabRenameState::for_workspace(
+                        index,
+                        &workspace.name,
+                    ));
+                }
+                None
+            }
             (ContextTarget::Workspace(index), Action::RevealDirectory) => self
                 .workspace_manager
                 .workspaces()
@@ -2659,6 +2661,13 @@ impl App {
                 .map(|workspace| workspace.root_directory.clone()),
             (ContextTarget::Session(index), Action::Open) => {
                 self.select_tab(index);
+                None
+            }
+            (ContextTarget::Session(index), Action::Rename) => {
+                if let Some(tab) = self.tabs.get(index) {
+                    self.tab_rename_state =
+                        Some(crate::tab::TabRenameState::new(index, tab.display_title()));
+                }
                 None
             }
             (ContextTarget::Session(index), Action::SplitRight | Action::SplitDown) => {
@@ -2686,6 +2695,16 @@ impl App {
         }
         self.context_menu = None;
         win.request_redraw();
+    }
+
+    fn apply_rename(&mut self, rename: &crate::tab::TabRenameState) {
+        let name = rename.input_text.trim().to_string();
+        if let Some(workspace_index) = rename.workspace_index {
+            self.rename_workspace(workspace_index, &name);
+        } else if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
+            tab.set_custom_title(if name.is_empty() { None } else { Some(name) });
+            self.persist_workspace_state();
+        }
     }
 
     fn reveal_directory(path: &std::path::Path) {
@@ -4549,14 +4568,7 @@ impl ApplicationHandler<AppEvent> for App {
                         match action {
                             Some(crate::tab::TabRenameAction::Save) => {
                                 self.tab_rename_state = None;
-                                let custom = rename.input_text.trim().to_string();
-                                if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
-                                    tab.set_custom_title(if custom.is_empty() {
-                                        None
-                                    } else {
-                                        Some(custom)
-                                    });
-                                }
+                                self.apply_rename(&rename);
                                 win.request_redraw();
                             }
                             Some(
@@ -5759,6 +5771,27 @@ mod tests {
                 .iter()
                 .any(|result| result.title == "Source Control: Changes")
         );
+    }
+
+    #[test]
+    fn rename_modal_routes_workspace_and_session_names_to_their_owners() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        let workspace_rename = crate::tab::TabRenameState::for_workspace(0, "Oxidite");
+        app.apply_rename(&crate::tab::TabRenameState {
+            input_text: "Renamed workspace".into(),
+            ..workspace_rename
+        });
+        assert_eq!(
+            app.workspace_manager.workspaces()[0].name,
+            "Renamed workspace"
+        );
+
+        let session_rename = crate::tab::TabRenameState::new(0, "Initial");
+        app.apply_rename(&crate::tab::TabRenameState {
+            input_text: "Renamed session".into(),
+            ..session_rename
+        });
+        assert_eq!(app.tabs[0].display_title(), "Renamed session");
     }
 
     #[test]

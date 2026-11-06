@@ -1175,6 +1175,8 @@ pub struct TabRenameState {
     pub input_text: String,
     /// Character cursor position within `input_text`.
     pub cursor_pos: usize,
+    /// Whether this modal is renaming a workspace instead of a terminal session.
+    pub workspace_index: Option<usize>,
 }
 
 impl TabRenameState {
@@ -1187,6 +1189,25 @@ impl TabRenameState {
             tab_index,
             input_text,
             cursor_pos,
+            workspace_index: None,
+        }
+    }
+
+    /// Creates a rename modal state for a registered workspace.
+    #[must_use]
+    pub fn for_workspace(workspace_index: usize, current_name: &str) -> Self {
+        let mut state = Self::new(workspace_index, current_name);
+        state.workspace_index = Some(workspace_index);
+        state
+    }
+
+    /// Returns the entity name displayed in the modal heading.
+    #[must_use]
+    pub const fn dialog_title(&self) -> &'static str {
+        if self.workspace_index.is_some() {
+            "Rename Workspace"
+        } else {
+            "Rename Session"
         }
     }
 
@@ -1403,7 +1424,7 @@ pub fn build_tab_rename_labels(
 
     // Dialog title
     labels.push(TabLabel {
-        text: "Rename Tab".to_string(),
+        text: state.dialog_title().to_string(),
         x: card_x + 20.0,
         y: card_y + 14.0,
         color: theme.glyphon(theme.foreground_primary),
@@ -1907,6 +1928,7 @@ mod tests {
     #[test]
     fn test_tab_rename_state_and_dialog() {
         let mut rename = TabRenameState::new(0, "Tab 1");
+        assert_eq!(rename.dialog_title(), "Rename Session");
         assert_eq!(rename.input_text, "Tab 1");
         assert_eq!(rename.cursor_pos, 5);
 
@@ -1945,6 +1967,10 @@ mod tests {
         assert!(!quads.is_empty());
         let labels = build_tab_rename_labels(&rename, 800.0, 600.0, true, theme);
         assert_eq!(labels.len(), 4);
+        assert_eq!(
+            TabRenameState::for_workspace(2, "Oxidite").dialog_title(),
+            "Rename Workspace"
+        );
     }
 
     #[test]
