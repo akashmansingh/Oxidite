@@ -22,7 +22,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let x = (in.position.x / uniforms.screen_size.x) * 2.0 - 1.0;
     let y = 1.0 - (in.position.y / uniforms.screen_size.y) * 2.0;
     out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
-    out.color = in.color;
+    // Theme and UI colors are authored as sRGB bytes/fractions. The swapchain
+    // performs sRGB encoding on output, so convert those values to linear here.
+    let srgb = in.color.rgb;
+    let linear = select(
+        srgb / vec3<f32>(12.92),
+        pow((srgb + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4)),
+        srgb > vec3<f32>(0.04045),
+    );
+    out.color = vec4<f32>(linear, in.color.a);
     return out;
 }
 

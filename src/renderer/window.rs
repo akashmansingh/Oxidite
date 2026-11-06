@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use thiserror::Error;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
@@ -25,6 +25,40 @@ pub const DEFAULT_TITLE: &str = "Oxidite";
 /// Default window dimensions in logical pixels.
 pub const DEFAULT_WIDTH: f64 = 800.0;
 pub const DEFAULT_HEIGHT: f64 = 600.0;
+
+/// Restores a saved physical window size without creating an off-screen window.
+///
+/// A saved size that nearly fills the current monitor is treated as a maximized
+/// window. Smaller saved sizes are constrained to the available monitor area.
+#[must_use]
+pub fn restore_window_size(
+    saved: Option<(u32, u32)>,
+    monitor: Option<PhysicalSize<u32>>,
+) -> (PhysicalSize<u32>, bool) {
+    let default = PhysicalSize::new(800, 600);
+    let Some((width, height)) = saved else {
+        return (default, false);
+    };
+    let mut restored = PhysicalSize::new(width.max(640), height.max(480));
+    let Some(monitor) = monitor.filter(|size| size.width > 0 && size.height > 0) else {
+        return (restored, false);
+    };
+
+    let fills_monitor = u64::from(width) * 10 >= u64::from(monitor.width) * 9
+        && u64::from(height) * 10 >= u64::from(monitor.height) * 9;
+    if fills_monitor {
+        return (monitor, true);
+    }
+
+    // Leave room for the OS taskbar/menu and window frame so the titlebar remains reachable.
+    restored.width = restored
+        .width
+        .min(monitor.width.saturating_sub(32).max(640));
+    restored.height = restored
+        .height
+        .min(monitor.height.saturating_sub(64).max(480));
+    (restored, false)
+}
 
 /// Builds the default window attributes for Oxidite.
 pub fn default_window_attributes(title: &str) -> WindowAttributes {
@@ -199,5 +233,21 @@ mod tests {
         assert_eq!(pty_size.rows, 1);
         assert_eq!(pty_size.px_w, 1);
         assert_eq!(pty_size.px_h, 1);
+    }
+
+    #[test]
+    fn restore_window_size_maximizes_saved_monitor_sized_windows() {
+        let (size, maximized) =
+            restore_window_size(Some((1920, 1032)), Some(PhysicalSize::new(1920, 1080)));
+        assert_eq!(size, PhysicalSize::new(1920, 1080));
+        assert!(maximized);
+    }
+
+    #[test]
+    fn restore_window_size_clamps_normal_windows_to_current_monitor() {
+        let (size, maximized) =
+            restore_window_size(Some((1700, 800)), Some(PhysicalSize::new(1600, 900)));
+        assert_eq!(size, PhysicalSize::new(1568, 800));
+        assert!(!maximized);
     }
 }

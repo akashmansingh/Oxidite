@@ -22,7 +22,8 @@ use crate::renderer::draw::{
 use crate::renderer::font::CellMetrics;
 use crate::renderer::gpu::GpuContext;
 use crate::renderer::window::{
-    DEFAULT_TITLE, create_window, window_size_to_grid_dimensions, window_size_to_pty_size,
+    DEFAULT_TITLE, create_window, restore_window_size, window_size_to_grid_dimensions,
+    window_size_to_pty_size,
 };
 use crate::tab::{TAB_BAR_HEIGHT, Tab, TabBarAction, compute_tab_layouts, hit_test};
 use crate::terminal::Terminal;
@@ -3583,8 +3584,13 @@ impl ApplicationHandler<AppEvent> for App {
             match create_window(event_loop, &self.title) {
                 Ok(win) => {
                     self.scale_factor = win.scale_factor();
-                    if let Some((width, height)) = self.last_window_size {
-                        let _ = win.request_inner_size(PhysicalSize::new(width, height));
+                    let (restored_size, maximized) = restore_window_size(
+                        self.last_window_size,
+                        win.current_monitor().map(|monitor| monitor.size()),
+                    );
+                    let _ = win.request_inner_size(restored_size);
+                    if maximized {
+                        win.set_maximized(true);
                     }
                     match GpuContext::new(Arc::clone(&win)) {
                         Ok(gpu) => {
