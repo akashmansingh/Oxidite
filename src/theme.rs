@@ -205,6 +205,12 @@ impl ThemeTokens {
     }
 }
 
+impl Default for ThemeTokens {
+    fn default() -> Self {
+        Theme::pitch_black().tokens()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ThemeFile {
     name: Option<String>,

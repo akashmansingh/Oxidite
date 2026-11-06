@@ -649,6 +649,7 @@ impl App {
         SettingsModalState {
             is_open: self.settings_open,
             active_theme: self.config.theme.name.clone(),
+            theme_tokens: self.config.theme.tokens(),
             font_size: self.base_font_size,
             font_family: self.config.font_family.clone(),
             zoom_pct,
@@ -1606,19 +1607,43 @@ impl App {
     /// Increases base font size by one zoom step.
     pub fn zoom_in(&mut self) {
         self.base_font_size = (self.base_font_size + Self::FONT_SIZE_STEP).min(Self::MAX_FONT_SIZE);
+        self.config.font_size = self.base_font_size;
         self.update_scale();
+        self.save_config();
     }
 
     /// Decreases base font size by one zoom step.
     pub fn zoom_out(&mut self) {
         self.base_font_size = (self.base_font_size - Self::FONT_SIZE_STEP).max(Self::MIN_FONT_SIZE);
+        self.config.font_size = self.base_font_size;
         self.update_scale();
+        self.save_config();
     }
 
     /// Resets base font size to default.
     pub fn zoom_reset(&mut self) {
         self.base_font_size = Self::DEFAULT_FONT_SIZE;
+        self.config.font_size = self.base_font_size;
         self.update_scale();
+        self.save_config();
+    }
+
+    /// Applies a theme to all UI and terminal render states without restarting sessions.
+    fn apply_theme(&mut self, theme: crate::theme::Theme, persist: bool) {
+        self.config.theme = theme;
+        self.terminal.mark_all_dirty();
+        for tab in &mut self.tabs {
+            tab.terminal.mark_all_dirty();
+            for pane in &mut tab.panes {
+                pane.terminal.mark_all_dirty();
+            }
+        }
+        if persist {
+            self.save_config();
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
     }
 
     /// Cycles to the next available color theme.
@@ -1635,8 +1660,7 @@ impl App {
         let next_theme_name = &themes[next_index];
         if let Some(next_theme) = crate::config::load_theme_by_name(next_theme_name) {
             log::info!("Switched theme to '{}'", next_theme.name);
-            self.config.theme = next_theme;
-            self.terminal.mark_all_dirty();
+            self.apply_theme(next_theme, true);
             win.request_redraw();
         }
     }
@@ -2203,6 +2227,15 @@ impl App {
                 "Failed to save workspace state '{}': {error}",
                 path.display()
             );
+        }
+    }
+
+    /// Persists config-backed user preferences after they change in the UI.
+    fn save_config(&self) {
+        if self.persistence_enabled
+            && let Err(error) = self.config.save()
+        {
+            log::warn!("Failed to persist user configuration: {error}");
         }
     }
 
@@ -3943,10 +3976,11 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(path) = crate::config::config_path() {
                     match crate::config::Config::load_from_path(&path) {
                         Ok(new_config) => {
+                            let theme = new_config.theme.clone();
                             self.config = new_config;
+                            self.apply_theme(theme, false);
                             self.base_font_size = self.config.font_size;
                             self.update_scale();
-                            self.terminal.mark_all_dirty();
                             if let Some(ref win) = self.window {
                                 win.request_redraw();
                             }
@@ -3959,11 +3993,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::ThemeChanged(theme_name) => {
                 if let Some(new_theme) = crate::config::load_theme_by_name(&theme_name) {
-                    self.config.theme = new_theme;
-                    self.terminal.mark_all_dirty();
-                    if let Some(ref win) = self.window {
-                        win.request_redraw();
-                    }
+                    self.apply_theme(new_theme, false);
                 }
             }
         }
@@ -4362,16 +4392,13 @@ impl ApplicationHandler<AppEvent> for App {
                                 if let Some(new_theme) =
                                     crate::theme::Theme::preset_by_name(&theme_name)
                                 {
-                                    self.config.theme = new_theme;
-                                    for tab in &mut self.tabs {
-                                        tab.terminal.mark_all_dirty();
-                                    }
-                                    self.terminal.mark_all_dirty();
+                                    self.apply_theme(new_theme, true);
                                     win.request_redraw();
                                 }
                             }
                             crate::settings_modal::SettingsAction::SelectFontFamily(family) => {
                                 self.config.font_family = family;
+                                self.save_config();
                                 win.request_redraw();
                             }
                             crate::settings_modal::SettingsAction::DecreaseFontSize => {
@@ -4410,12 +4437,14 @@ impl ApplicationHandler<AppEvent> for App {
                                 let (px, py) = choice.pixels();
                                 self.config.padding_x = px;
                                 self.config.padding_y = py;
+                                self.save_config();
                                 self.handle_resize(win.inner_size());
                                 self.terminal.mark_all_dirty();
                                 win.request_redraw();
                             }
                             crate::settings_modal::SettingsAction::ToggleStatusBar => {
                                 self.config.status_bar = !self.config.status_bar;
+                                self.save_config();
                                 self.handle_resize(win.inner_size());
                                 self.terminal.mark_all_dirty();
                                 win.request_redraw();
