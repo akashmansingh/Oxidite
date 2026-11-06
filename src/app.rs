@@ -3165,7 +3165,11 @@ impl App {
                 .and_then(|name| name.to_str())
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
-            self.sidebar_mode,
+            if self.settings_open {
+                crate::shell::SidebarMode::Settings
+            } else {
+                self.sidebar_mode
+            },
             hovered_activity,
             theme_tokens,
         );
@@ -3693,7 +3697,11 @@ impl App {
                 .and_then(|name| name.to_str())
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
-            self.sidebar_mode,
+            if self.settings_open {
+                crate::shell::SidebarMode::Settings
+            } else {
+                self.sidebar_mode
+            },
             hovered_activity,
             theme_tokens,
         );
@@ -4624,7 +4632,9 @@ impl ApplicationHandler<AppEvent> for App {
                             self.scale_factor as f32,
                         )
                     {
-                        if self.sidebar_mode == mode && self.sidebar_open {
+                        if mode == crate::shell::SidebarMode::Settings {
+                            self.settings_open = !self.settings_open;
+                        } else if self.sidebar_mode == mode && self.sidebar_open {
                             self.sidebar_open = false;
                         } else {
                             self.sidebar_mode = mode;

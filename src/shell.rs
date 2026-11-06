@@ -32,6 +32,8 @@ pub enum SidebarMode {
     Conversations,
     /// Notification history.
     Notifications,
+    /// Application preferences.
+    Settings,
 }
 
 /// Action requested by the custom titlebar.
@@ -113,6 +115,7 @@ pub fn hit_test_activity(y: f32, body_top: f32, scale: f32) -> Option<SidebarMod
         2 => Some(SidebarMode::SourceControl),
         3 => Some(SidebarMode::Conversations),
         4 => Some(SidebarMode::Notifications),
+        5 => Some(SidebarMode::Settings),
         _ => None,
     }
 }
@@ -129,6 +132,7 @@ pub const fn activity_tooltip(mode: SidebarMode) -> (&'static str, &'static str)
         ),
         SidebarMode::Conversations => ("AI Agents", "AI Agents — Conversations and agent sessions"),
         SidebarMode::Notifications => ("Notifications", "Notifications — Recent activity"),
+        SidebarMode::Settings => ("Settings", "Settings — Appearance and preferences"),
     }
 }
 
@@ -277,6 +281,7 @@ pub fn build_shell_chrome(
         (SidebarMode::SourceControl, "⑂"),
         (SidebarMode::Conversations, "✣"),
         (SidebarMode::Notifications, "◉"),
+        (SidebarMode::Settings, "⚙"),
     ];
     for (index, (mode, icon)) in modes.into_iter().enumerate() {
         let y = layout.activity_rail.y + index as f32 * 44.0 * scale;
@@ -319,6 +324,7 @@ pub fn build_shell_chrome(
             SidebarMode::SourceControl => 2.0,
             SidebarMode::Conversations => 3.0,
             SidebarMode::Notifications => 4.0,
+            SidebarMode::Settings => 5.0,
         };
         let x = layout.activity_rail.x + layout.activity_rail.width + 12.0 * scale;
         let y = layout.activity_rail.y + row * 44.0 * scale + 14.0 * scale;
@@ -378,6 +384,7 @@ pub fn build_activity_tooltip_quads(
         SidebarMode::SourceControl => 2.0,
         SidebarMode::Conversations => 3.0,
         SidebarMode::Notifications => 4.0,
+        SidebarMode::Settings => 5.0,
     };
     let x = layout.activity_rail.x + layout.activity_rail.width + 4.0 * scale;
     let y = layout.activity_rail.y + row * 44.0 * scale + 4.0 * scale;
@@ -586,6 +593,10 @@ mod tests {
             activity_tooltip(SidebarMode::Notifications),
             ("Notifications", "Notifications — Recent activity")
         );
+        assert_eq!(
+            activity_tooltip(SidebarMode::Settings),
+            ("Settings", "Settings — Appearance and preferences")
+        );
     }
 
     #[test]
@@ -636,6 +647,14 @@ mod tests {
         assert_eq!(shell.navigation.width, 0.0);
         assert_eq!(shell.canvas.x, ACTIVITY_RAIL_WIDTH);
         assert!(shell.canvas.width > 0.0);
+    }
+
+    #[test]
+    fn activity_rail_routes_settings_as_its_sixth_entry() {
+        assert_eq!(
+            hit_test_activity(40.0 + 5.0 * 44.0 + 10.0, 40.0, 1.0),
+            Some(SidebarMode::Settings)
+        );
     }
 
     #[test]

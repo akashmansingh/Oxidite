@@ -105,6 +105,7 @@ pub fn build_navigation_labels(
         crate::shell::SidebarMode::SourceControl => "SOURCE CONTROL",
         crate::shell::SidebarMode::Conversations => "AI CONVERSATIONS",
         crate::shell::SidebarMode::Notifications => "NOTIFICATIONS",
+        crate::shell::SidebarMode::Settings => "SETTINGS",
     };
     let mut add =
         |text: String, x: f32, y: f32, _legacy_color: GlyphonColor, bold: bool, max_width: f32| {
@@ -359,6 +360,16 @@ pub fn build_navigation_labels(
                 14.0,
                 sidebar_y + 36.0,
                 GlyphonColor::rgb(104, 109, 121),
+                false,
+                sidebar_width - 28.0,
+            );
+        }
+        crate::shell::SidebarMode::Settings => {
+            add(
+                "Appearance and preferences are open in Settings".into(),
+                14.0,
+                sidebar_y + 36.0,
+                GlyphonColor::rgb(146, 149, 161),
                 false,
                 sidebar_width - 28.0,
             );
@@ -959,7 +970,7 @@ pub fn hit_test_navigation(
                 return SidebarAction::SelectChat(((y - start) / CHAT_ROW_HEIGHT) as usize);
             }
         }
-        crate::shell::SidebarMode::Notifications => {}
+        crate::shell::SidebarMode::Notifications | crate::shell::SidebarMode::Settings => {}
     }
     SidebarAction::None
 }
