@@ -3394,6 +3394,7 @@ impl App {
                 self.cell_metrics.cell_height,
                 x_offset,
                 y_offset,
+                theme_tokens,
             ));
         }
 
@@ -3502,6 +3503,7 @@ impl App {
                 geo.term_w,
                 accent_color,
                 &self.search_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -3762,6 +3764,7 @@ impl App {
                 geo.tab_bar_px,
                 geo.term_w,
                 &self.search_state,
+                self.config.theme.tokens(),
             ));
         }
 
