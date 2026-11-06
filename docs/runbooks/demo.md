@@ -40,7 +40,7 @@ on macOS, Linux, and Windows.
 | 4 htop + resize | PASS | PASS | PASS | Full reflow and scroll region (DECSTBM) updates on resize |
 | 5 Large output + scrollback | PASS | PASS | PASS | >85 MB/s throughput, Shift+PageUp scrollback navigation |
 | 6 Selection / clipboard | PASS | PASS | PASS | Mouse selection highlight, Ctrl+Shift+C / Ctrl+Shift+V |
-| 7 Theme cycle + hot reload | PASS | PASS | PASS | Ctrl+Shift+T live theme cycling, notify background reload |
+| 7 Theme cycle + hot reload | PASS | PASS | PASS | Ctrl+Shift+Y live theme cycling, notify background reload |
 | 8 Truecolor + wide / emoji | PASS | PASS | PASS | 24-bit Truecolor, CJK characters and emoji width & rendering |
 | 9 Clean exit | PASS | PASS | PASS | Process exit detected, exit code captured, window closes cleanly |
 

@@ -65,7 +65,7 @@ All 9 Golden Demo requirements pass:
 4. `htop`/`top` reflows and scrolls smoothly on window resize.
 5. Large output (`seq 1 100000`) completes without freezing; Shift+PageUp scrollback works.
 6. Mouse selection, copy, and paste operate seamlessly.
-7. Live theme cycling (`Ctrl+Shift+T`) and `config.toml` hot reload update instant visual styles.
+7. Live theme cycling (`Ctrl+Shift+Y`) and `config.toml` hot reload update instant visual styles.
 8. Truecolor orange (`\e[38;2;255;100;0m`) and wide characters (`日本語 🦀`) render properly.
 9. Shell exit cleanly closes the application with process status code.
 

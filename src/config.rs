@@ -139,7 +139,7 @@ impl Default for KeybindingsConfig {
             scroll_to_top: "Shift+Home".to_string(),
             scroll_to_bottom: "Shift+End".to_string(),
             cycle_theme: "Ctrl+Shift+Y".to_string(),
-            toggle_status_bar: "Ctrl+Shift+B".to_string(),
+            toggle_status_bar: "Ctrl+Alt+B".to_string(),
             search: "Ctrl+Shift+F".to_string(),
             split_vertical: "Ctrl+Shift+\\".to_string(),
             split_horizontal: "Ctrl+Shift+-".to_string(),
@@ -573,6 +573,33 @@ mod tests {
         assert!(config.shell.is_none());
         assert_eq!(config.shell_args, Vec::<String>::new());
         assert_eq!(config.scrollback_lines, 10_000);
+    }
+
+    #[test]
+    fn status_bar_default_shortcut_does_not_conflict_with_sidebar_toggle() {
+        let keybindings = KeybindingsConfig::default();
+        let event = |key: &str, modifiers| {
+            crate::input::KeyEvent::new(
+                winit::keyboard::Key::Character(key.into()),
+                Some(key.to_string()),
+                modifiers,
+                winit::event::ElementState::Pressed,
+            )
+        };
+        let ctrl_shift =
+            winit::keyboard::ModifiersState::CONTROL | winit::keyboard::ModifiersState::SHIFT;
+        let ctrl_alt =
+            winit::keyboard::ModifiersState::CONTROL | winit::keyboard::ModifiersState::ALT;
+
+        assert_eq!(
+            keybindings.check_action(&event("b", ctrl_shift)),
+            None,
+            "Ctrl+Shift+B remains dedicated to the sidebar"
+        );
+        assert_eq!(
+            keybindings.check_action(&event("b", ctrl_alt)),
+            Some(crate::input::InputAction::ToggleStatusBar)
+        );
     }
 
     #[test]
