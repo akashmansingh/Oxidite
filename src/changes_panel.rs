@@ -1,4 +1,4 @@
-//! Git and changes review panel (right rail of workspace).
+//! Git changes and commit history views.
 
 use crate::renderer::draw::{QuadVertex, TabLabel, build_quad_vertices};
 use glyphon::Color as GlyphonColor;
@@ -23,6 +23,35 @@ pub enum ChangesTab {
     History,
 }
 
+/// Working-tree status derived from Git's porcelain status code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// An existing tracked file has edits.
+    Modified,
+    /// A new file is staged or untracked.
+    Added,
+    /// A tracked file was removed.
+    Deleted,
+    /// Git reports a path rename.
+    Renamed,
+    /// A file is not tracked by Git.
+    Untracked,
+}
+
+impl ChangeKind {
+    /// Compact status marker used in the navigation tree.
+    #[must_use]
+    pub const fn marker(self) -> &'static str {
+        match self {
+            Self::Modified => "M",
+            Self::Added => "A",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+            Self::Untracked => "?",
+        }
+    }
+}
+
 /// Represents a modified, added, or deleted file in the working tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
@@ -36,6 +65,8 @@ pub struct ChangedFile {
     pub deletions: usize,
     /// Whether this file is staged for commit.
     pub staged: bool,
+    /// Type of change reported by Git.
+    pub kind: ChangeKind,
 }
 
 /// State representation required to layout and render the changes panel.
@@ -71,39 +102,11 @@ impl Default for ChangesPanelState {
     fn default() -> Self {
         Self {
             active_tab: ChangesTab::Changes,
-            changed_files: vec![
-                ChangedFile {
-                    filename: "sw.js".to_string(),
-                    path_info: "public".to_string(),
-                    additions: 1,
-                    deletions: 1,
-                    staged: true,
-                },
-                ChangedFile {
-                    filename: "cargo.toml".to_string(),
-                    path_info: ".".to_string(),
-                    additions: 12,
-                    deletions: 2,
-                    staged: false,
-                },
-            ],
-            history: vec![
-                crate::git::GitCommit {
-                    hash: "1b60625".to_string(),
-                    author: "Antigravity".to_string(),
-                    relative_time: "10m ago".to_string(),
-                    message: "feat(diff_view): add in-built code review workspace".to_string(),
-                },
-                crate::git::GitCommit {
-                    hash: "53e1aac".to_string(),
-                    author: "Antigravity".to_string(),
-                    relative_time: "1h ago".to_string(),
-                    message: "feat(git): add real workspace project inspection".to_string(),
-                },
-            ],
+            changed_files: Vec::new(),
+            history: Vec::new(),
             history_scroll_offset: 0,
-            selected_file_index: Some(0),
-            selected_commit_index: Some(0),
+            selected_file_index: None,
+            selected_commit_index: None,
             commit_message: String::new(),
             commit_input_focused: false,
             git_branch: "--".to_string(),
@@ -1032,12 +1035,33 @@ pub fn hit_test_changes_panel(
 mod tests {
     use super::*;
 
+    fn populated_state(tab: ChangesTab) -> ChangesPanelState {
+        ChangesPanelState {
+            active_tab: tab,
+            changed_files: vec![ChangedFile {
+                filename: "sample.rs".into(),
+                path_info: "src".into(),
+                additions: 4,
+                deletions: 1,
+                staged: false,
+                kind: ChangeKind::Modified,
+            }],
+            history: vec![crate::git::GitCommit {
+                hash: "abc1234".into(),
+                author: "Test Author".into(),
+                relative_time: "2h ago".into(),
+                message: "test: populate history fixture".into(),
+            }],
+            ..ChangesPanelState::default()
+        }
+    }
+
     #[test]
-    fn default_changes_panel_state_has_files_and_history() {
+    fn default_changes_panel_state_starts_without_repository_data() {
         let state = ChangesPanelState::default();
         assert_eq!(state.active_tab, ChangesTab::Changes);
-        assert_ne!(state.changed_files.len(), 0);
-        assert_ne!(state.history.len(), 0);
+        assert!(state.changed_files.is_empty());
+        assert!(state.history.is_empty());
         assert_eq!(state.git_branch, "--");
         assert!(!state.commit_input_focused);
         assert_eq!(state.commit_message, "");
@@ -1045,7 +1069,7 @@ mod tests {
 
     #[test]
     fn assemble_changes_panel_quads_generates_quads() {
-        let state = ChangesPanelState::default();
+        let state = populated_state(ChangesTab::Changes);
         let quads = assemble_changes_panel_quads(
             500.0,
             36.0,
@@ -1059,31 +1083,27 @@ mod tests {
 
     #[test]
     fn build_changes_panel_labels_contains_files_and_buttons() {
-        let state = ChangesPanelState::default();
+        let state = populated_state(ChangesTab::Changes);
         let labels = build_changes_panel_labels(500.0, 36.0, CHANGES_PANEL_WIDTH, 600.0, &state);
         assert_ne!(labels.len(), 0);
         assert!(labels.iter().any(|l| l.text.contains("Changes")));
         assert!(labels.iter().any(|l| l.text.contains("History")));
-        assert!(labels.iter().any(|l| l.text.contains("sw.js")));
+        assert!(labels.iter().any(|l| l.text.contains("sample.rs")));
         assert!(labels.iter().any(|l| l.text.contains("Stage All")));
         assert!(labels.iter().any(|l| l.text.contains("Commit Tracked")));
     }
 
     #[test]
     fn build_changes_panel_history_labels_renders_commit_hashes() {
-        let state = ChangesPanelState {
-            active_tab: ChangesTab::History,
-            ..ChangesPanelState::default()
-        };
+        let state = populated_state(ChangesTab::History);
         let labels = build_changes_panel_labels(500.0, 36.0, CHANGES_PANEL_WIDTH, 600.0, &state);
         assert_ne!(labels.len(), 0);
-        assert!(labels.iter().any(|l| l.text.contains("1b60625")));
-        assert!(labels.iter().any(|l| l.text.contains("53e1aac")));
+        assert!(labels.iter().any(|l| l.text.contains("abc1234")));
     }
 
     #[test]
     fn hit_test_changes_panel_detects_tabs_and_rows() {
-        let state = ChangesPanelState::default();
+        let state = populated_state(ChangesTab::Changes);
         let panel_x = 500.0;
         let panel_y = 36.0;
         let w = CHANGES_PANEL_WIDTH;
