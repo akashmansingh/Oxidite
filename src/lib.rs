@@ -20,6 +20,7 @@ pub mod session_state;
 pub mod settings_modal;
 pub mod shell;
 pub mod sidebar;
+pub mod split_picker;
 pub mod status_bar;
 pub mod tab;
 pub mod terminal;

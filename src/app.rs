@@ -234,6 +234,10 @@ pub struct App {
     pub search_state: crate::search::SearchState,
     /// Application-wide workspace, session, and command search state.
     pub global_search_state: crate::global_search::SearchState,
+    /// Whether the split-layout picker is open.
+    pub split_picker_open: bool,
+    /// Layout option currently hovered in the split picker.
+    pub split_picker_hover: Option<crate::split_picker::SplitPreset>,
     /// Currently hovered URL span `(viewport_row, start_col, end_col, url)` if any.
     pub hovered_url: Option<(usize, usize, usize, String)>,
     /// Active tab drag-and-drop state for reordering tabs.
@@ -500,6 +504,8 @@ impl App {
             last_active_cwd: Some(cwd),
             search_state: crate::search::SearchState::default(),
             global_search_state: crate::global_search::SearchState::default(),
+            split_picker_open: false,
+            split_picker_hover: None,
             hovered_url: None,
             dragging_tab: None,
             last_tab_click: None,
@@ -723,6 +729,45 @@ impl App {
                             self.global_search_state.selected = 0;
                         }
                     }
+                }
+                win.request_redraw();
+            }
+            return;
+        }
+
+        if self.split_picker_open {
+            if key_ev.state == winit::event::ElementState::Pressed {
+                use winit::keyboard::{Key, NamedKey};
+                match key_ev.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.split_picker_open = false;
+                        self.split_picker_hover = None;
+                    }
+                    Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
+                        let presets = crate::split_picker::PRESETS;
+                        let current = self
+                            .split_picker_hover
+                            .and_then(|preset| presets.iter().position(|item| *item == preset))
+                            .unwrap_or(0);
+                        let direction = if key_ev.logical_key == Key::Named(NamedKey::ArrowUp) {
+                            -1
+                        } else {
+                            1
+                        };
+                        let next = (isize::try_from(current).unwrap_or(0) + direction)
+                            .rem_euclid(isize::try_from(presets.len()).unwrap_or(1));
+                        self.split_picker_hover = usize::try_from(next)
+                            .ok()
+                            .and_then(|index| presets.get(index).copied());
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(preset) = self.split_picker_hover {
+                            self.apply_split_preset(preset);
+                        }
+                        self.split_picker_open = false;
+                        self.split_picker_hover = None;
+                    }
+                    _ => {}
                 }
                 win.request_redraw();
             }
@@ -2750,6 +2795,39 @@ impl App {
         self.persist_workspace_state();
     }
 
+    /// Applies a split-picker recipe inside the focused pane, preserving every sibling pane.
+    pub fn apply_split_preset(&mut self, preset: crate::split_picker::SplitPreset) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab_index) else {
+            return false;
+        };
+        let fits = preset.fits(tab.terminal.grid.cols, tab.terminal.grid.rows);
+        if !fits {
+            return false;
+        }
+        if preset == crate::split_picker::SplitPreset::Single {
+            return true;
+        }
+        let mut pane_slots = vec![tab.active_pane_id];
+        for step in preset.steps() {
+            let Some(target_id) = pane_slots.get(step.target_slot).copied() else {
+                return false;
+            };
+            if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
+                tab.select_pane(target_id);
+            }
+            let previous_count = self.tabs[self.active_tab_index].panes.len();
+            self.split_active_pane(step.direction);
+            let Some(tab) = self.tabs.get(self.active_tab_index) else {
+                return false;
+            };
+            if tab.panes.len() != previous_count + 1 {
+                return false;
+            }
+            pane_slots.push(tab.active_pane_id);
+        }
+        true
+    }
+
     /// Closes the currently active pane. If it is the last pane in the tab, closes the tab.
     pub fn close_active_pane(&mut self) {
         let Some(active_tab) = self.tabs.get_mut(self.active_tab_index) else {
@@ -3266,6 +3344,22 @@ impl App {
             ));
         }
 
+        if self.split_picker_open {
+            let (split_button, _) =
+                crate::tab::compute_chrome_buttons((screen_size[0] - geo.workspace_x).max(0.0));
+            let layout = crate::split_picker::SplitPickerLayout::calculate(
+                screen_size[0],
+                screen_size[1] - geo.status_bar_px,
+                geo.workspace_x + split_button.0,
+                geo.workspace_tabs_y + split_button.1,
+            );
+            quad_vertices.extend_from_slice(&crate::split_picker::assemble_quads(
+                layout,
+                self.split_picker_hover,
+                self.config.theme.tokens(),
+            ));
+        }
+
         // 5.5. Central Side-by-side Diff View workspace quads (if open)
         if geo.diff_view_visible && geo.diff_w > 10.0 {
             quad_vertices.extend_from_slice(&crate::diff_view::assemble_diff_view_quads(
@@ -3634,6 +3728,21 @@ impl App {
             ));
         }
 
+        if self.split_picker_open {
+            let (split_button, _) =
+                crate::tab::compute_chrome_buttons((screen_size[0] - geo.workspace_x).max(0.0));
+            let layout = crate::split_picker::SplitPickerLayout::calculate(
+                screen_size[0],
+                screen_size[1] - geo.status_bar_px,
+                geo.workspace_x + split_button.0,
+                geo.workspace_tabs_y + split_button.1,
+            );
+            tab_labels.extend(crate::split_picker::build_labels(
+                layout,
+                self.config.theme.tokens(),
+            ));
+        }
+
         let palette = self.config.theme.to_f32_palette();
 
         let (Some(gpu), Some(quad_pipeline), Some(glyph_pipeline)) = (
@@ -3907,6 +4016,29 @@ impl ApplicationHandler<AppEvent> for App {
                 let win_w = win.inner_size().width as f32;
                 let win_h = win.inner_size().height as f32;
                 let geo = self.compute_pane_geometry(win_w, win_h);
+
+                if self.split_picker_open {
+                    let (split_button, _) =
+                        crate::tab::compute_chrome_buttons((win_w - geo.workspace_x).max(0.0));
+                    let layout = crate::split_picker::SplitPickerLayout::calculate(
+                        win_w,
+                        win_h - geo.status_bar_px,
+                        geo.workspace_x + split_button.0,
+                        geo.workspace_tabs_y + split_button.1,
+                    );
+                    let next = if layout
+                        .hit_test(position.x as f32, position.y as f32)
+                        .is_some()
+                    {
+                        layout.hit_test(position.x as f32, position.y as f32)
+                    } else {
+                        None
+                    };
+                    if next != self.split_picker_hover {
+                        self.split_picker_hover = next;
+                        win.request_redraw();
+                    }
+                }
 
                 if !win.is_maximized()
                     && self.dragging_splitter == DraggingSplitter::None
@@ -4374,6 +4506,31 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
+                if self.split_picker_open && state == winit::event::ElementState::Pressed {
+                    let size = win.inner_size();
+                    let geometry =
+                        self.compute_pane_geometry(size.width as f32, size.height as f32);
+                    let (split_button, _) = crate::tab::compute_chrome_buttons(
+                        (size.width as f32 - geometry.workspace_x).max(0.0),
+                    );
+                    let layout = crate::split_picker::SplitPickerLayout::calculate(
+                        size.width as f32,
+                        size.height as f32 - geometry.status_bar_px,
+                        geometry.workspace_x + split_button.0,
+                        geometry.workspace_tabs_y + split_button.1,
+                    );
+                    if let Some(preset) = layout.hit_test(
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                    ) {
+                        self.apply_split_preset(preset);
+                    }
+                    self.split_picker_open = false;
+                    self.split_picker_hover = None;
+                    win.request_redraw();
+                    return;
+                }
+
                 if self.cursor_pixel_pos.0 < f64::from(geometry.activity_rail_w)
                     && self.cursor_pixel_pos.1 >= f64::from(geometry.titlebar_px)
                 {
@@ -4550,9 +4707,10 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.toggle_sidebar_or_restore_content(win.inner_size());
                             }
                             TabBarAction::ToggleSplit => {
-                                self.diff_view_open = !self.diff_view_open;
-                                self.handle_resize(win.inner_size());
-                                self.terminal.mark_all_dirty();
+                                self.split_picker_open = !self.split_picker_open;
+                                self.split_picker_hover = self
+                                    .split_picker_open
+                                    .then_some(crate::split_picker::SplitPreset::Single);
                             }
                             TabBarAction::ToggleFullscreen => {
                                 let is_fullscreen = win.fullscreen().is_some();
@@ -5269,6 +5427,27 @@ mod tests {
                 .iter()
                 .any(|result| result.title == "Source Control: Changes")
         );
+    }
+
+    #[test]
+    fn split_picker_applies_independent_nested_terminal_panes() {
+        let mut app = App::new(None, Terminal::new(120, 24), None);
+        assert!(app.apply_split_preset(crate::split_picker::SplitPreset::Grid));
+        assert_eq!(app.tabs[0].panes.len(), 4);
+        assert_eq!(app.tabs[0].pane_tree.panes_count(), 4);
+        let ids = app.tabs[0]
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn split_picker_rejects_layouts_that_would_violate_minimum_grids() {
+        let mut app = App::new(None, Terminal::new(40, 24), None);
+        assert!(!app.apply_split_preset(crate::split_picker::SplitPreset::Grid));
+        assert_eq!(app.tabs[0].panes.len(), 1);
     }
     use crate::pty::{PtySize, ShellCommand};
 
