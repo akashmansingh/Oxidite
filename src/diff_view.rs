@@ -1139,8 +1139,7 @@ fn push_button_quads(
     ));
 }
 
-/// Builds quads for the side-by-side diff: pitch black background, column gutters,
-/// center divider, green/red line highlights, and inline code review comment cards.
+/// Builds themed side-by-side diff surfaces, line highlights, and review comment cards.
 #[must_use]
 #[allow(
     clippy::cast_precision_loss,
@@ -1357,7 +1356,7 @@ pub fn assemble_diff_view_quads(
         content_y,
         DIFF_GUTTER_WIDTH,
         content_h,
-        [0.015, 0.018, 0.024, 0.95],
+        theme.background_secondary.to_rgba_array(0.95),
     ));
     // Right gutter divider
     quads.extend_from_slice(&build_quad_vertices(
@@ -1365,7 +1364,7 @@ pub fn assemble_diff_view_quads(
         content_y,
         1.0,
         content_h,
-        [0.07, 0.075, 0.095, 0.8],
+        theme.border_subtle.to_rgba_array(0.8),
     ));
 
     // 5. Line highlights and inline code review cards
@@ -1377,7 +1376,7 @@ pub fn assemble_diff_view_quads(
             current_y,
             diff_width,
             DIFF_LINE_HEIGHT,
-            [0.04, 0.05, 0.07, 0.75],
+            theme.background_tertiary.to_rgba_array(0.75),
         ));
         current_y += DIFF_LINE_HEIGHT;
 
@@ -1399,14 +1398,14 @@ pub fn assemble_diff_view_quads(
                     current_y,
                     half_w - DIFF_GUTTER_WIDTH - 1.0,
                     DIFF_LINE_HEIGHT,
-                    [0.169, 0.067, 0.078, 0.85],
+                    theme.diff_removed_background.to_rgba_array(0.85),
                 ));
                 quads.extend_from_slice(&build_quad_vertices(
                     diff_x,
                     current_y,
                     DIFF_GUTTER_WIDTH,
                     DIFF_LINE_HEIGHT,
-                    [0.294, 0.09, 0.11, 0.8],
+                    theme.diff_removed_background.to_rgba_array(0.8),
                 ));
             }
 
@@ -1419,14 +1418,14 @@ pub fn assemble_diff_view_quads(
                     current_y,
                     half_w - DIFF_GUTTER_WIDTH - 1.0,
                     DIFF_LINE_HEIGHT,
-                    [0.063, 0.153, 0.098, 0.85],
+                    theme.diff_added_background.to_rgba_array(0.85),
                 ));
                 quads.extend_from_slice(&build_quad_vertices(
                     diff_x + half_w,
                     current_y,
                     DIFF_GUTTER_WIDTH,
                     DIFF_LINE_HEIGHT,
-                    [0.09, 0.27, 0.16, 0.8],
+                    theme.diff_added_background.to_rgba_array(0.8),
                 ));
             }
 
@@ -1466,9 +1465,9 @@ pub fn assemble_diff_view_quads(
                         let card_w = half_w - DIFF_GUTTER_WIDTH - 6.0;
                         let card_x = diff_x + DIFF_GUTTER_WIDTH + 3.0;
                         let bg_color = if c.resolved {
-                            [0.04, 0.05, 0.06, 0.85]
+                            theme.background_secondary.to_rgba_array(0.85)
                         } else {
-                            [0.08, 0.09, 0.13, 0.95]
+                            theme.background_elevated.to_rgba_array(0.95)
                         };
                         quads.extend_from_slice(&build_quad_vertices(
                             card_x,
@@ -1491,7 +1490,7 @@ pub fn assemble_diff_view_quads(
                             current_y + 3.0,
                             18.0,
                             16.0,
-                            [0.12, 0.14, 0.18, 0.9],
+                            theme.background_tertiary.to_rgba_array(0.9),
                         ));
                         // Delete button
                         quads.extend_from_slice(&build_quad_vertices(
@@ -1499,7 +1498,7 @@ pub fn assemble_diff_view_quads(
                             current_y + 3.0,
                             16.0,
                             16.0,
-                            [0.12, 0.14, 0.18, 0.9],
+                            theme.background_tertiary.to_rgba_array(0.9),
                         ));
                     }
 
@@ -1507,9 +1506,9 @@ pub fn assemble_diff_view_quads(
                         let card_w = half_w - DIFF_GUTTER_WIDTH - 6.0;
                         let card_x = diff_x + half_w + DIFF_GUTTER_WIDTH + 3.0;
                         let bg_color = if c.resolved {
-                            [0.04, 0.05, 0.06, 0.85]
+                            theme.background_secondary.to_rgba_array(0.85)
                         } else {
-                            [0.08, 0.09, 0.13, 0.95]
+                            theme.background_elevated.to_rgba_array(0.95)
                         };
                         quads.extend_from_slice(&build_quad_vertices(
                             card_x,
@@ -1532,7 +1531,7 @@ pub fn assemble_diff_view_quads(
                             current_y + 3.0,
                             18.0,
                             16.0,
-                            [0.12, 0.14, 0.18, 0.9],
+                            theme.background_tertiary.to_rgba_array(0.9),
                         ));
                         // Delete button
                         quads.extend_from_slice(&build_quad_vertices(
@@ -1540,7 +1539,7 @@ pub fn assemble_diff_view_quads(
                             current_y + 3.0,
                             16.0,
                             16.0,
-                            [0.12, 0.14, 0.18, 0.9],
+                            theme.background_tertiary.to_rgba_array(0.9),
                         ));
                     }
 
@@ -1571,7 +1570,7 @@ pub fn assemble_diff_view_quads(
                         push_button_quads(
                             &mut quads,
                             (card_x, current_y + 1.0, card_w, DIFF_COMMENT_HEIGHT - 2.0),
-                            [0.08, 0.10, 0.15, 0.98],
+                            theme.background_elevated.to_rgba_array(0.98),
                             accent_color,
                         );
                         quads.extend_from_slice(&build_quad_vertices(
@@ -1584,20 +1583,20 @@ pub fn assemble_diff_view_quads(
                         push_button_quads(
                             &mut quads,
                             (card_x + 6.0, current_y + 3.0, 56.0, 16.0),
-                            [0.12, 0.15, 0.22, 0.9],
+                            theme.background_tertiary.to_rgba_array(0.9),
                             draft.tag.color(theme),
                         );
                         push_button_quads(
                             &mut quads,
                             (card_x + card_w - 64.0, current_y + 3.0, 38.0, 16.0),
-                            [0.10, 0.24, 0.15, 0.95],
-                            [0.25, 0.70, 0.40, 0.9],
+                            theme.success.to_rgba_array(0.25),
+                            theme.success.to_rgba_array(0.9),
                         );
                         push_button_quads(
                             &mut quads,
                             (card_x + card_w - 22.0, current_y + 3.0, 18.0, 16.0),
-                            [0.20, 0.08, 0.10, 0.95],
-                            [0.60, 0.20, 0.22, 0.9],
+                            theme.error.to_rgba_array(0.25),
+                            theme.error.to_rgba_array(0.9),
                         );
                     }
 
@@ -1607,7 +1606,7 @@ pub fn assemble_diff_view_quads(
                         push_button_quads(
                             &mut quads,
                             (card_x, current_y + 1.0, card_w, DIFF_COMMENT_HEIGHT - 2.0),
-                            [0.08, 0.10, 0.15, 0.98],
+                            theme.background_elevated.to_rgba_array(0.98),
                             accent_color,
                         );
                         quads.extend_from_slice(&build_quad_vertices(
@@ -1620,20 +1619,20 @@ pub fn assemble_diff_view_quads(
                         push_button_quads(
                             &mut quads,
                             (card_x + 6.0, current_y + 3.0, 56.0, 16.0),
-                            [0.12, 0.15, 0.22, 0.9],
+                            theme.background_tertiary.to_rgba_array(0.9),
                             draft.tag.color(theme),
                         );
                         push_button_quads(
                             &mut quads,
                             (card_x + card_w - 64.0, current_y + 3.0, 38.0, 16.0),
-                            [0.10, 0.24, 0.15, 0.95],
-                            [0.25, 0.70, 0.40, 0.9],
+                            theme.success.to_rgba_array(0.25),
+                            theme.success.to_rgba_array(0.9),
                         );
                         push_button_quads(
                             &mut quads,
                             (card_x + card_w - 22.0, current_y + 3.0, 18.0, 16.0),
-                            [0.20, 0.08, 0.10, 0.95],
-                            [0.60, 0.20, 0.22, 0.9],
+                            theme.error.to_rgba_array(0.25),
+                            theme.error.to_rgba_array(0.9),
                         );
                     }
 
@@ -2696,6 +2695,27 @@ mod tests {
             ReviewVerdict::ChangesRequested.badge_color(theme),
             theme.rgba(theme.error)
         );
+    }
+
+    #[test]
+    fn diff_surfaces_and_line_highlights_follow_the_active_theme_tokens() {
+        let mut state = DiffViewState::default();
+        state.review_mode = true;
+        let theme = crate::theme::Theme::dracula().tokens();
+        let quads = assemble_diff_view_quads(
+            0.0,
+            0.0,
+            900.0,
+            700.0,
+            theme.rgba(theme.accent_primary),
+            &state,
+            theme,
+        );
+        let colors = quads.iter().map(|vertex| vertex.color).collect::<Vec<_>>();
+
+        assert!(colors.contains(&theme.diff_removed_background.to_rgba_array(0.85)));
+        assert!(colors.contains(&theme.diff_added_background.to_rgba_array(0.85)));
+        assert!(colors.contains(&theme.background_tertiary.to_rgba_array(0.75)));
     }
 
     #[test]
