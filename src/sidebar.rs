@@ -81,6 +81,10 @@ pub enum SidebarAction {
     SelectChangedFile(usize),
     /// Open a commit diff in the main diff workspace.
     SelectCommit(usize),
+    /// Open or close the repository branch picker.
+    ToggleBranchPicker,
+    /// Check out a branch from the branch picker by index.
+    SwitchBranch(usize),
 }
 
 /// Builds concise labels for the active workspace, terminal, Git, or AI navigation view.
@@ -305,6 +309,18 @@ pub fn build_navigation_labels(
                     sidebar_width - 30.0,
                 );
             }
+            if changes.branch_picker_open {
+                for (index, branch) in changes.branch_list.iter().take(8).enumerate() {
+                    add(
+                        format!("  {branch}"),
+                        18.0,
+                        sidebar_y + 64.0 + index as f32 * 22.0,
+                        GlyphonColor::rgb(146, 149, 161),
+                        branch == &changes.git_branch,
+                        sidebar_width - 36.0,
+                    );
+                }
+            }
         }
         crate::shell::SidebarMode::Conversations => {
             add(
@@ -476,6 +492,41 @@ pub fn assemble_sidebar_quads(
         }
     }
 
+    quads
+}
+
+/// Draws the expanded branch list inside the source-control navigation sidebar.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn assemble_branch_picker_quads(
+    sidebar_y: f32,
+    sidebar_width: f32,
+    changes: &crate::changes_panel::ChangesPanelState,
+    theme: crate::theme::ThemeTokens,
+) -> Vec<QuadVertex> {
+    if !changes.branch_picker_open || changes.branch_list.is_empty() {
+        return Vec::new();
+    }
+    let rows = changes.branch_list.len().min(8);
+    let x = 8.0;
+    let y = sidebar_y + 58.0;
+    let width = (sidebar_width - 16.0).max(0.0);
+    let height = rows as f32 * 22.0 + 8.0;
+    let mut quads = build_quad_vertices(
+        x,
+        y,
+        width,
+        height,
+        theme.background_elevated.to_rgba_array(1.0),
+    )
+    .to_vec();
+    quads.extend_from_slice(&build_quad_vertices(
+        x,
+        y,
+        width,
+        1.0,
+        theme.border_default.to_rgba_array(1.0),
+    ));
     quads
 }
 
@@ -787,6 +838,16 @@ pub fn hit_test_source_control(
     sidebar_y: f32,
     changes: &crate::changes_panel::ChangesPanelState,
 ) -> SidebarAction {
+    if y >= sidebar_y + 34.0 && y < sidebar_y + 60.0 {
+        return SidebarAction::ToggleBranchPicker;
+    }
+    if changes.branch_picker_open {
+        let start = sidebar_y + 60.0;
+        let index = ((y - start) / 22.0) as usize;
+        if y >= start && y < start + changes.branch_list.len().min(8) as f32 * 22.0 {
+            return SidebarAction::SwitchBranch(index);
+        }
+    }
     let rows = source_file_rows(changes, sidebar_y);
     for (file_index, row_y) in &rows.files {
         if y >= *row_y && y < *row_y + SIDEBAR_ITEM_HEIGHT {
@@ -1046,6 +1107,36 @@ mod tests {
             hit_test_sidebar(60.0, history_y, sidebar_y, 500.0, 240.0, 2, 1),
             SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::History)
         );
+    }
+
+    #[test]
+    fn source_control_branch_picker_routes_toggle_and_checkout_rows() {
+        let mut changes = crate::changes_panel::ChangesPanelState::default();
+        assert_eq!(
+            hit_test_source_control(44.0, 10.0, &changes),
+            SidebarAction::ToggleBranchPicker
+        );
+        changes.branch_picker_open = true;
+        changes.branch_list = vec!["main".into(), "feature/ui".into()];
+        assert_eq!(
+            hit_test_source_control(72.0, 10.0, &changes),
+            SidebarAction::SwitchBranch(0)
+        );
+        assert_eq!(
+            hit_test_source_control(94.0, 10.0, &changes),
+            SidebarAction::SwitchBranch(1)
+        );
+    }
+
+    #[test]
+    fn branch_picker_surface_uses_theme_and_respects_sidebar_width() {
+        let mut changes = crate::changes_panel::ChangesPanelState::default();
+        changes.branch_picker_open = true;
+        changes.branch_list = vec!["main".into()];
+        let theme = crate::theme::Theme::nord().tokens();
+        let quads = assemble_branch_picker_quads(40.0, 220.0, &changes, theme);
+        assert_eq!(quads[0].color, theme.rgba(theme.background_elevated));
+        assert!(quads.iter().all(|vertex| vertex.position[0] <= 228.0));
     }
 
     #[test]

@@ -3197,6 +3197,16 @@ impl App {
             );
             crate::shell::translate_quads(&mut sidebar_quads, geo.activity_rail_w, 0.0);
             quad_vertices.extend_from_slice(&sidebar_quads);
+            if self.sidebar_mode == crate::shell::SidebarMode::SourceControl {
+                let mut branch_quads = crate::sidebar::assemble_branch_picker_quads(
+                    geo.titlebar_px,
+                    geo.sidebar_w,
+                    &self.changes_panel_state,
+                    theme_tokens,
+                );
+                crate::shell::translate_quads(&mut branch_quads, geo.activity_rail_w, 0.0);
+                quad_vertices.extend_from_slice(&branch_quads);
+            }
         }
         let is_multi_pane = self
             .tabs
@@ -4834,6 +4844,32 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
 
+                // The compact branch chip in the workspace header opens the real
+                // branch list in Source Control navigation.
+                if state == winit::event::ElementState::Pressed {
+                    let size = win.inner_size();
+                    let header_geometry =
+                        self.compute_pane_geometry(size.width as f32, size.height as f32);
+                    let scale = self.scale_factor as f32;
+                    let in_header = self.cursor_pixel_pos.1
+                        >= f64::from(header_geometry.titlebar_px)
+                        && self.cursor_pixel_pos.1 < f64::from(header_geometry.workspace_tabs_y)
+                        && self.cursor_pixel_pos.0 >= f64::from(size.width as f32 - 210.0 * scale)
+                        && self.cursor_pixel_pos.0 < f64::from(size.width as f32 - 8.0 * scale);
+                    if in_header && self.git_branch.is_some() {
+                        let cwd = self.active_cwd();
+                        self.changes_panel_state.branch_list = crate::git::list_branches(&cwd);
+                        self.changes_panel_state.branch_picker_open = true;
+                        self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                        self.sidebar_open = true;
+                        self.changes_panel_open = false;
+                        self.diff_view_open = false;
+                        self.handle_resize(size);
+                        win.request_redraw();
+                        return;
+                    }
+                }
+
                 // Check sidebar click if sidebar is open
                 let nav_geometry = self.compute_pane_geometry(
                     win.inner_size().width as f32,
@@ -4924,6 +4960,31 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.changes_panel_open = false;
                                     self.handle_resize(win.inner_size());
                                     self.terminal.mark_all_dirty();
+                                }
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::ToggleBranchPicker => {
+                                let cwd = self.active_cwd();
+                                if crate::git::is_git_repository(&cwd) {
+                                    if !self.changes_panel_state.branch_picker_open {
+                                        self.changes_panel_state.branch_list =
+                                            crate::git::list_branches(&cwd);
+                                    }
+                                    self.changes_panel_state.branch_picker_open =
+                                        !self.changes_panel_state.branch_picker_open;
+                                }
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SwitchBranch(index) => {
+                                if let Some(name) =
+                                    self.changes_panel_state.branch_list.get(index).cloned()
+                                {
+                                    let cwd = self.active_cwd();
+                                    if crate::git::is_git_repository(&cwd) {
+                                        let _ = crate::git::checkout_branch(&cwd, &name);
+                                        self.changes_panel_state.branch_picker_open = false;
+                                        self.refresh_git_status();
+                                    }
                                 }
                                 win.request_redraw();
                             }
