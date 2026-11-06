@@ -22,6 +22,8 @@ Oxidite is the **host window itself** (similar to Windows Terminal, Alacritty, o
 - **Mouse & Clipboard Integration**: Text selection, double-click selection, copy/paste (`Ctrl+Shift+C`, `Ctrl+Shift+V`), bracketed paste, and SGR 1006 mouse tracking.
 - **Live Workspaces**: Create independent workspaces with `Ctrl+Shift+E`, each with its own tabs and recursive split layout. Switching retains background PTY processes and routes their output while inactive.
 - **Session Layout Restore**: Workspace order, active tabs, nested splits, working directories, sidebar dimensions, and window size are stored in versioned TOML. Restarted panes start fresh shells; a terminated process cannot be resumed by the app.
+- **Native Workspace Shell**: Custom titlebar, activity rail, workspace/session navigation, Source Control changes/history, main terminal canvas, and compact status bar are laid out from shared parent bounds. The UI remains native Rust (`winit` + `wgpu` + `glyphon`).
+- **Monitor-safe Restore**: Near-fullscreen saved dimensions reopen maximized; restored windows are clamped to the active monitor. Every pane gets its own canvas bounds for grid and PTY resizing.
 
 ---
 

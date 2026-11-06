@@ -36,6 +36,28 @@ resize computes leaf rectangles from the currently available terminal area,
 then resizes each pane grid and PTY. Git status and diff operations live in
 `src/git.rs`, `src/changes_panel.rs`, and `src/diff_view.rs`.
 
+## Desktop shell and layout
+
+`src/shell.rs` is the shared geometry contract for the native UI. It allocates
+the custom titlebar, activity rail, navigation sidebar, workspace header, tab
+strip, terminal/editor canvas, and status bar as non-overlapping siblings.
+`App::compute_pane_geometry` uses that allocation for pane bounds, renderer
+clipping, pointer hit testing, and per-pane PTY sizing. It never derives a pane
+size from the whole window when a narrower parent rectangle is available.
+
+The activity rail selects Workspaces, Terminals, Source Control, Conversations,
+or Notifications in the adjacent sidebar. Source Control reads real `git`
+status and commit history; selecting a file or commit opens its actual diff in
+the main canvas. Closing that diff returns to the existing terminal tabs and
+does not recreate their PTYs. The legacy right-hand Changes panel remains in
+the code for its contextual Git actions, but sidebar navigation no longer
+opens it or takes space away from the terminal.
+
+The quad renderer receives sRGB-authored palette values and converts them to
+linear values before drawing into the sRGB swapchain. Text is rendered by
+glyphon separately. Saved near-monitor-sized windows reopen maximized; smaller
+saved sizes are constrained to the current monitor before being applied.
+
 ## Current workspace scope
 
 - Implemented: create workspace (`Ctrl+Shift+E`), select from the sidebar,
@@ -47,7 +69,8 @@ then resizes each pane grid and PTY. Git status and diff operations live in
   terminated child processes.
 - Not implemented yet: workspace rename/reorder/delete controls in the UI,
   notification history/navigation, Git worktree management, and the full shell
-  profile picker. Rename, reorder, and close operations exist at the app API
-  level, but still need user-facing controls.
+  profile picker. The Conversations and Notifications views show honest empty
+  states when the existing backend has no corresponding records; they do not
+  synthesize sample data.
 
 See `docs/RESIZING.md` and `docs/KEYBOARD_SHORTCUTS.md` for current behavior.
