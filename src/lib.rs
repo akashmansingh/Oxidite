@@ -17,6 +17,7 @@ pub mod renderer;
 pub mod search;
 pub mod session_state;
 pub mod settings_modal;
+pub mod shell;
 pub mod sidebar;
 pub mod status_bar;
 pub mod tab;
