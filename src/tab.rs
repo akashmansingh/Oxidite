@@ -856,6 +856,7 @@ pub fn assemble_tab_bar_quads(
         window_width,
         accent_color,
         [0.0, 0.0, 0.0, 1.0],
+        crate::theme::Theme::default_dark().tokens(),
     )
 }
 
@@ -866,52 +867,17 @@ pub fn assemble_tab_bar_quads_themed(
     tab_count: usize,
     active_index: usize,
     window_width: f32,
-    accent_color: [f32; 4],
-    bg_color: [f32; 4],
+    _accent_color: [f32; 4],
+    _bg_color: [f32; 4],
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     let (layouts, plus_btn, _) = compute_tab_layouts(tab_count, window_width);
     let chrome = compute_chrome_buttons_extended(window_width);
 
-    let is_light = (0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2]) > 0.51;
-
-    let bar_bg = if is_light {
-        [
-            bg_color[0] * 0.90,
-            bg_color[1] * 0.90,
-            bg_color[2] * 0.90,
-            1.0,
-        ]
-    } else {
-        [
-            (bg_color[0] * 0.85).max(0.0),
-            (bg_color[1] * 0.85).max(0.0),
-            (bg_color[2] * 0.85).max(0.0),
-            1.0,
-        ]
-    };
-
-    let border_color = if is_light {
-        [0.72, 0.75, 0.78, 1.0]
-    } else {
-        [0.12, 0.14, 0.19, 1.0]
-    };
-
-    let btn_bg = if is_light {
-        [
-            bg_color[0] * 0.94,
-            bg_color[1] * 0.94,
-            bg_color[2] * 0.94,
-            0.95,
-        ]
-    } else {
-        [
-            (bg_color[0] + 0.06).min(1.0),
-            (bg_color[1] + 0.065).min(1.0),
-            (bg_color[2] + 0.09).min(1.0),
-            0.9,
-        ]
-    };
+    let bar_bg = theme.background_secondary.to_rgba_array(1.0);
+    let border_color = theme.border_default.to_rgba_array(1.0);
+    let btn_bg = theme.background_elevated.to_rgba_array(0.95);
 
     // 1. Tab bar background
     quads.extend_from_slice(&build_quad_vertices(
@@ -933,43 +899,15 @@ pub fn assemble_tab_bar_quads_themed(
 
     for (idx, layout) in layouts.iter().enumerate() {
         let is_active = idx == active_index;
-        let (tab_bg, tab_border) = if is_active {
-            if is_light {
-                (
-                    [bg_color[0], bg_color[1], bg_color[2], 1.0],
-                    [0.65, 0.68, 0.72, 1.0],
-                )
-            } else {
-                (
-                    [
-                        (bg_color[0] + 0.08).min(1.0),
-                        (bg_color[1] + 0.085).min(1.0),
-                        (bg_color[2] + 0.11).min(1.0),
-                        1.0,
-                    ],
-                    [0.22, 0.28, 0.40, 0.85],
-                )
-            }
-        } else if is_light {
-            (
-                [
-                    bg_color[0] * 0.95,
-                    bg_color[1] * 0.95,
-                    bg_color[2] * 0.95,
-                    1.0,
-                ],
-                [0.78, 0.80, 0.84, 0.5],
-            )
+        let tab_bg = if is_active {
+            theme.background_primary.to_rgba_array(1.0)
         } else {
-            (
-                [
-                    (bg_color[0] + 0.02).min(1.0),
-                    (bg_color[1] + 0.022).min(1.0),
-                    (bg_color[2] + 0.035).min(1.0),
-                    0.8,
-                ],
-                [0.14, 0.16, 0.22, 0.5],
-            )
+            theme.background_secondary.to_rgba_array(1.0)
+        };
+        let tab_border = if is_active {
+            theme.border_active.to_rgba_array(1.0)
+        } else {
+            theme.border_subtle.to_rgba_array(0.65)
         };
 
         // Tab body quad
@@ -1011,7 +949,7 @@ pub fn assemble_tab_bar_quads_themed(
                 layout.y,
                 layout.width,
                 2.5,
-                accent_color,
+                theme.accent_primary.to_rgba_array(1.0),
             ));
         }
 
@@ -1021,11 +959,7 @@ pub fn assemble_tab_bar_quads_themed(
             layout.close_btn_y,
             layout.close_btn_size,
             layout.close_btn_size,
-            if is_light {
-                [0.85, 0.85, 0.88, 0.6]
-            } else {
-                [0.16, 0.18, 0.24, 0.6]
-            },
+            theme.hover_background.to_rgba_array(0.6),
         ));
     }
 
@@ -1817,6 +1751,17 @@ mod tests {
     fn assemble_tab_bar_quads_generates_correct_quad_count() {
         let quads = assemble_tab_bar_quads(2, 0, 800.0, [0.4, 0.6, 1.0, 1.0]);
         assert!(!quads.is_empty());
+    }
+
+    #[test]
+    fn themed_tab_strip_uses_shared_semantic_surfaces() {
+        let theme = crate::theme::Theme::dracula().tokens();
+        let quads = assemble_tab_bar_quads_themed(1, 0, 800.0, [0.0; 4], [0.0; 4], theme);
+        assert!(
+            quads[..6]
+                .iter()
+                .all(|vertex| vertex.color == theme.background_secondary.to_rgba_array(1.0))
+        );
     }
 
     #[test]

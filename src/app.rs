@@ -1652,6 +1652,7 @@ impl App {
         let (layouts, plus_btn, _) = compute_tab_layouts(count, window_width);
         let chrome = crate::tab::compute_chrome_buttons_extended(window_width);
         let mut labels = Vec::new();
+        let theme = self.config.theme.tokens();
 
         for (idx, layout) in layouts.iter().enumerate() {
             let is_active = idx == self.active_tab_index;
@@ -1661,7 +1662,7 @@ impl App {
 
             let color = if is_active {
                 if agent == crate::tab::AgentKind::Shell {
-                    glyphon::Color::rgb(240, 242, 250)
+                    theme.glyphon(theme.foreground_primary)
                 } else {
                     let [r, g, b] = agent.brand_color();
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1672,7 +1673,7 @@ impl App {
                     )
                 }
             } else {
-                glyphon::Color::rgb(140, 145, 160)
+                theme.glyphon(theme.foreground_muted)
             };
 
             // Tab title with agent badge (honors user-specified custom title)
@@ -1710,9 +1711,9 @@ impl App {
                 x: layout.close_btn_x + 5.0,
                 y: layout.close_btn_y + 1.0,
                 color: if is_active {
-                    glyphon::Color::rgb(200, 205, 220)
+                    theme.glyphon(theme.foreground_secondary)
                 } else {
-                    glyphon::Color::rgb(120, 125, 140)
+                    theme.glyphon(theme.foreground_muted)
                 },
                 bold: true,
                 max_width: crate::tab::TAB_BUTTON_SIZE,
@@ -1724,17 +1725,13 @@ impl App {
             text: "+".to_string(),
             x: plus_btn.0 + 5.0,
             y: plus_btn.1 + 1.0,
-            color: glyphon::Color::rgb(190, 195, 210),
+            color: theme.glyphon(theme.foreground_secondary),
             bold: true,
             max_width: crate::tab::TAB_BUTTON_SIZE,
         });
 
         // Contextual terminal action; window/sidebar actions live in the application shell.
-        let btn_color = if self.config.theme.is_light() {
-            glyphon::Color::rgb(70, 80, 95)
-        } else {
-            glyphon::Color::rgb(180, 185, 205)
-        };
+        let btn_color = theme.glyphon(theme.foreground_secondary);
 
         // Split pane button [◫]
         labels.push(TabLabel {
@@ -3096,7 +3093,8 @@ impl App {
         let palette = self.config.theme.to_f32_palette();
         let cursor_color = self.config.theme.cursor.to_rgba_array(1.0);
         let selection_color = self.config.theme.selection_bg.to_rgba_array(1.0);
-        let accent_color = palette[12]; // Vivid cyan/blue accent for active tab
+        let theme_tokens = self.config.theme.tokens();
+        let accent_color = theme_tokens.accent_primary.to_rgba_array(1.0);
 
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
         let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
@@ -3124,7 +3122,7 @@ impl App {
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
             self.sidebar_mode,
-            self.config.theme.tokens(),
+            theme_tokens,
         );
         quad_vertices.extend_from_slice(&shell_quads);
 
@@ -3136,6 +3134,7 @@ impl App {
             (screen_size[0] - geo.workspace_x).max(0.0),
             accent_color,
             bg_color,
+            self.config.theme.tokens(),
         );
         crate::shell::translate_quads(&mut tab_quads, geo.workspace_x, geo.workspace_tabs_y);
         quad_vertices.extend_from_slice(&tab_quads);
@@ -3149,7 +3148,7 @@ impl App {
                 accent_color,
                 self.active_tab_index,
                 self.tabs.len(),
-                self.config.theme.tokens(),
+                theme_tokens,
             );
             crate::shell::translate_quads(&mut sidebar_quads, geo.activity_rail_w, 0.0);
             quad_vertices.extend_from_slice(&sidebar_quads);
@@ -3594,6 +3593,7 @@ impl App {
             None => return,
         };
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
+        let theme_tokens = self.config.theme.tokens();
         let quad_vertices = self.assemble_quad_vertices(is_bell_active, screen_size);
         let shell_layout = crate::shell::ShellLayout::calculate(
             geo.win_w,
@@ -3613,7 +3613,7 @@ impl App {
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
             self.sidebar_mode,
-            self.config.theme.tokens(),
+            theme_tokens,
         );
         let mut tab_labels = shell_labels;
         let mut terminal_tab_labels =

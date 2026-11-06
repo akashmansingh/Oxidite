@@ -415,7 +415,7 @@ pub fn assemble_sidebar_quads(
     sidebar_y: f32,
     sidebar_height: f32,
     sidebar_width: f32,
-    accent_color: [f32; 4],
+    _accent_color: [f32; 4],
     active_tab_index: usize,
     tab_count: usize,
     theme: crate::theme::ThemeTokens,
@@ -471,7 +471,7 @@ pub fn assemble_sidebar_quads(
                 item_y,
                 2.5,
                 SIDEBAR_ITEM_HEIGHT - 4.0,
-                accent_color,
+                theme.accent_primary.to_rgba_array(1.0),
             ));
         }
     }
