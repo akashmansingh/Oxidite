@@ -1867,6 +1867,16 @@ impl App {
                 }
             }
         }
+        if self.git_branch.is_some() {
+            for branch in &self.changes_panel_state.branch_list {
+                results.push(SearchResult {
+                    category: "Branch".into(),
+                    title: branch.clone(),
+                    detail: format!("Switch branch in {}", self.workspace_name),
+                    target: SearchTarget::Branch(branch.clone()),
+                });
+            }
+        }
         for (title, detail, command) in [
             (
                 "New Terminal",
@@ -1920,6 +1930,13 @@ impl App {
                     self.select_workspace(*workspace);
                 }
                 self.select_tab(*tab);
+            }
+            SearchTarget::Branch(name) => {
+                let cwd = self.active_cwd();
+                if crate::git::is_git_repository(&cwd) {
+                    let _ = crate::git::checkout_branch(&cwd, name);
+                    self.refresh_git_status();
+                }
             }
             SearchTarget::Command(command) => match command {
                 Command::NewTerminal => self.create_tab(None),

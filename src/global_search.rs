@@ -10,6 +10,8 @@ pub enum SearchTarget {
     Workspace(usize),
     /// Switch to the workspace and terminal tab containing the session.
     Session { workspace: usize, tab: usize },
+    /// Check out a branch in the active repository.
+    Branch(String),
     /// Run an application command.
     Command(PaletteCommand),
 }
