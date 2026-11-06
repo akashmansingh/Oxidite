@@ -302,11 +302,19 @@ pub fn build_navigation_labels(
             }
         }
         crate::shell::SidebarMode::Conversations => {
+            add(
+                "AI AGENT SESSIONS".into(),
+                14.0,
+                sidebar_y + 34.0,
+                GlyphonColor::rgb(229, 231, 235),
+                true,
+                sidebar_width - 28.0,
+            );
             if state.chats.is_empty() {
                 add(
-                    "No saved conversations".into(),
+                    "No active agent terminals".into(),
                     14.0,
-                    sidebar_y + 36.0,
+                    sidebar_y + 62.0,
                     GlyphonColor::rgb(104, 109, 121),
                     false,
                     sidebar_width - 28.0,
@@ -316,7 +324,7 @@ pub fn build_navigation_labels(
                     add(
                         chat.title.clone(),
                         14.0,
-                        sidebar_y + 36.0 + index as f32 * CHAT_ROW_HEIGHT,
+                        sidebar_y + 62.0 + index as f32 * CHAT_ROW_HEIGHT,
                         GlyphonColor::rgb(190, 194, 204),
                         false,
                         sidebar_width - 28.0,
@@ -878,7 +886,13 @@ pub fn hit_test_navigation(
         crate::shell::SidebarMode::SourceControl => {
             return hit_test_source_control(y, sidebar_y, changes);
         }
-        crate::shell::SidebarMode::Conversations | crate::shell::SidebarMode::Notifications => {}
+        crate::shell::SidebarMode::Conversations => {
+            let start = sidebar_y + 58.0;
+            if y >= start && y < start + tab_count as f32 * CHAT_ROW_HEIGHT {
+                return SidebarAction::SelectChat(((y - start) / CHAT_ROW_HEIGHT) as usize);
+            }
+        }
+        crate::shell::SidebarMode::Notifications => {}
     }
     SidebarAction::None
 }
@@ -1116,6 +1130,17 @@ mod tests {
                 &changes
             ),
             SidebarAction::NewSession
+        );
+        assert_eq!(
+            hit_test_navigation(
+                crate::shell::SidebarMode::Conversations,
+                100.0,
+                40.0,
+                1,
+                2,
+                &changes
+            ),
+            SidebarAction::SelectChat(0)
         );
     }
 }

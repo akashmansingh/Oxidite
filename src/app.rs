@@ -1947,6 +1947,35 @@ impl App {
             .collect()
     }
 
+    fn agent_tab_indices(&self) -> Vec<usize> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.detect_agent() != crate::tab::AgentKind::Shell)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn agent_sidebar_entries(&self) -> Vec<crate::sidebar::ChatEntry> {
+        self.agent_tab_indices()
+            .into_iter()
+            .filter_map(|index| self.tabs.get(index))
+            .map(|tab| {
+                let agent = tab.detect_agent();
+                let (_, agent_name) = agent.display_badge();
+                crate::sidebar::ChatEntry {
+                    title: tab.display_title().to_string(),
+                    status: if tab.pty_exited {
+                        crate::sidebar::ChatStatus::Done
+                    } else {
+                        crate::sidebar::ChatStatus::Idle
+                    },
+                    model: agent_name.to_string(),
+                }
+            })
+            .collect()
+    }
+
     /// Saves workspace and split-layout metadata without serializing live processes.
     pub fn persist_workspace_state(&self) {
         if !self.persistence_enabled {
@@ -3315,7 +3344,7 @@ impl App {
                 tab_titles: self.tabs.iter().map(|t| t.title.clone()).collect(),
                 active_tab_index: self.active_tab_index,
                 workspaces: self.workspace_sidebar_entries(),
-                chats: self.sidebar_state.chats.clone(),
+                chats: self.agent_sidebar_entries(),
                 git_status: self.sidebar_state.git_status.clone(),
                 source_control_tab: self.changes_panel_state.active_tab,
                 changed_file_count: self.changes_panel_state.changed_files.len(),
@@ -4243,7 +4272,11 @@ impl ApplicationHandler<AppEvent> for App {
                         let action = hit_test(
                             self.cursor_pixel_pos.0 as f32 - geometry.workspace_x,
                             self.cursor_pixel_pos.1 as f32 - geometry.workspace_tabs_y,
-                            self.tabs.len(),
+                            if self.sidebar_mode == crate::shell::SidebarMode::Conversations {
+                                self.agent_tab_indices().len()
+                            } else {
+                                self.tabs.len()
+                            },
                             win_w,
                         );
                         match action {
@@ -4388,7 +4421,11 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.select_workspace(idx);
                                 win.request_redraw();
                             }
-                            crate::sidebar::SidebarAction::SelectChat(_idx) => {
+                            crate::sidebar::SidebarAction::SelectChat(idx) => {
+                                if let Some(tab_index) = self.agent_tab_indices().get(idx).copied()
+                                {
+                                    self.select_tab(tab_index);
+                                }
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::SelectSourceControl(tab) => {
@@ -5318,6 +5355,19 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         app.close_tab(0);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn agent_sidebar_uses_real_agent_terminal_tabs() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_tab(Some("Claude Code".to_string()));
+        app.create_tab(Some("PowerShell".to_string()));
+
+        assert_eq!(app.agent_tab_indices(), vec![1]);
+        let agents = app.agent_sidebar_entries();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].title, "Claude Code");
+        assert_eq!(agents[0].status, crate::sidebar::ChatStatus::Idle);
     }
 
     #[test]
