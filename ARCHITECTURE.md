@@ -45,13 +45,16 @@ strip, terminal/editor canvas, and status bar as non-overlapping siblings.
 clipping, pointer hit testing, and per-pane PTY sizing. It never derives a pane
 size from the whole window when a narrower parent rectangle is available.
 
-The activity rail selects Workspaces, Terminals, Source Control, Conversations,
-or Notifications in the adjacent sidebar. Source Control reads real `git`
-status and commit history; selecting a file or commit opens its actual diff in
-the main canvas. Closing that diff returns to the existing terminal tabs and
-does not recreate their PTYs. The legacy right-hand Changes panel remains in
-the code for its contextual Git actions, but sidebar navigation no longer
-opens it or takes space away from the terminal.
+The activity rail selects Workspaces, Terminals, Source Control, agent
+terminals, or Notifications in the adjacent sidebar. The agent list is derived
+from actual terminal tabs running a detected agent CLI; selecting one switches
+to that same live terminal tab. Standalone saved chat conversations are not
+provided by the existing backend. Source Control reads real `git` status and
+commit history; selecting a file or commit opens its actual diff in the main
+canvas. Closing that diff returns to the existing terminal tabs and does not
+recreate their PTYs. The legacy right-hand Changes panel remains in the code
+for its contextual Git actions, but sidebar navigation no longer opens it or
+takes space away from the terminal.
 
 The quad renderer receives sRGB-authored palette values and converts them to
 linear values before drawing into the sRGB swapchain. Text is rendered by
@@ -68,9 +71,10 @@ saved sizes are constrained to the current monitor before being applied.
   dimensions. Restored panes start fresh shells; they do not reattach to
   terminated child processes.
 - Not implemented yet: workspace rename/reorder/delete controls in the UI,
-  notification history/navigation, Git worktree management, and the full shell
-  profile picker. The Conversations and Notifications views show honest empty
-  states when the existing backend has no corresponding records; they do not
-  synthesize sample data.
+  notification history/navigation, Git worktree management, a global search
+  across files and conversations, and the full shell profile picker. The AI
+  view lists real agent terminal tabs but does not fabricate standalone chat
+  conversations; Notifications shows an empty state until a notification
+  backend is available.
 
 See `docs/RESIZING.md` and `docs/KEYBOARD_SHORTCUTS.md` for current behavior.
