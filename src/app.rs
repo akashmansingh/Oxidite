@@ -3198,7 +3198,6 @@ impl App {
             crate::shell::translate_quads(&mut sidebar_quads, geo.activity_rail_w, 0.0);
             quad_vertices.extend_from_slice(&sidebar_quads);
         }
-
         let is_multi_pane = self
             .tabs
             .get(self.active_tab_index)
@@ -3474,6 +3473,16 @@ impl App {
             effective_pad_y,
             accent_color,
         ));
+
+        // Draw rail tooltips above terminal and navigation surfaces. The rail remains
+        // discoverable when the full navigation sidebar has been collapsed.
+        if let Some(mode) = hovered_activity {
+            quad_vertices.extend_from_slice(&crate::shell::build_activity_tooltip_quads(
+                shell_layout,
+                mode,
+                theme_tokens,
+            ));
+        }
 
         // 7.5. Floating search bar overlay (if open)
         if self.search_state.is_open {

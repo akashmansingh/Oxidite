@@ -178,33 +178,6 @@ pub fn build_shell_chrome(
         border,
     ));
 
-    if let Some(mode) = hovered_mode {
-        let row = match mode {
-            SidebarMode::Workspaces => 0.0,
-            SidebarMode::Terminals => 1.0,
-            SidebarMode::SourceControl => 2.0,
-            SidebarMode::Conversations => 3.0,
-            SidebarMode::Notifications => 4.0,
-        };
-        let tooltip_x = layout.activity_rail.x + layout.activity_rail.width + 4.0 * scale;
-        let tooltip_y = layout.activity_rail.y + row * 44.0 * scale + 4.0 * scale;
-        let tooltip_w = (layout.window.width - tooltip_x - 8.0 * scale).clamp(0.0, 252.0 * scale);
-        let tooltip_h = 36.0 * scale;
-        quads.extend_from_slice(&build_quad_vertices(
-            tooltip_x,
-            tooltip_y,
-            tooltip_w,
-            tooltip_h,
-            theme.background_elevated.to_rgba_array(1.0),
-        ));
-        quads.extend_from_slice(&build_quad_vertices(
-            tooltip_x,
-            tooltip_y,
-            tooltip_w,
-            scale,
-            theme.border_default.to_rgba_array(1.0),
-        ));
-    }
     quads.extend_from_slice(&build_quad_vertices(
         layout.activity_rail.x,
         layout.activity_rail.y,
@@ -384,6 +357,47 @@ pub fn build_shell_chrome(
         ));
     }
     (quads, labels)
+}
+
+/// Builds the hover tooltip surface after sidebar surfaces have been drawn.
+///
+/// The caller appends these quads after navigation backgrounds so the sidebar
+/// cannot paint over the tooltip.
+#[must_use]
+pub fn build_activity_tooltip_quads(
+    layout: ShellLayout,
+    mode: SidebarMode,
+    theme: crate::theme::ThemeTokens,
+) -> Vec<crate::renderer::draw::QuadVertex> {
+    use crate::renderer::draw::build_quad_vertices;
+
+    let scale = (layout.titlebar.height / TITLEBAR_HEIGHT).max(0.5);
+    let row = match mode {
+        SidebarMode::Workspaces => 0.0,
+        SidebarMode::Terminals => 1.0,
+        SidebarMode::SourceControl => 2.0,
+        SidebarMode::Conversations => 3.0,
+        SidebarMode::Notifications => 4.0,
+    };
+    let x = layout.activity_rail.x + layout.activity_rail.width + 4.0 * scale;
+    let y = layout.activity_rail.y + row * 44.0 * scale + 4.0 * scale;
+    let width = (layout.window.width - x - 8.0 * scale).clamp(0.0, 300.0 * scale);
+    let height = 36.0 * scale;
+    let mut quads = Vec::from(build_quad_vertices(
+        x,
+        y,
+        width,
+        height,
+        theme.background_elevated.to_rgba_array(1.0),
+    ));
+    quads.extend_from_slice(&build_quad_vertices(
+        x,
+        y,
+        width,
+        scale,
+        theme.border_default.to_rgba_array(1.0),
+    ));
+    quads
 }
 
 /// Translates renderer geometry into its shell-owned rectangle.
@@ -572,6 +586,25 @@ mod tests {
             activity_tooltip(SidebarMode::Notifications),
             ("Notifications", "Notifications — Recent activity")
         );
+    }
+
+    #[test]
+    fn activity_tooltip_surface_is_themed_and_clipped_to_the_window() {
+        let shell = ShellLayout::calculate(320.0, 720.0, 1.0, 250.0, false, true);
+        let theme = crate::theme::Theme::dracula().tokens();
+        let quads = build_activity_tooltip_quads(shell, SidebarMode::SourceControl, theme);
+        assert_eq!(quads.len(), 12);
+        assert!(
+            quads
+                .iter()
+                .all(|vertex| vertex.position[0] <= shell.window.width)
+        );
+        assert!(
+            quads
+                .iter()
+                .all(|vertex| vertex.position[1] < shell.status_bar.y)
+        );
+        assert_eq!(quads[0].color, theme.rgba(theme.background_elevated));
     }
 
     #[test]
