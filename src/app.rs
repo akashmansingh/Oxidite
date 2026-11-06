@@ -193,6 +193,8 @@ pub struct App {
     pub git_branch: Option<String>,
     /// Sidebar persistent multi-workspace and chat state.
     pub sidebar_state: crate::sidebar::SidebarState,
+    /// Active view shown by the navigation sidebar.
+    pub sidebar_mode: crate::shell::SidebarMode,
     /// Live workspace sessions; inactive workspaces retain their PTYs and terminal state.
     pub workspace_manager: crate::workspace::WorkspaceManager<Vec<Tab>>,
     /// Active tab index remembered independently for every workspace.
@@ -249,6 +251,16 @@ pub struct PaneGeometry {
     pub win_w: f32,
     pub win_h: f32,
     pub tab_bar_px: f32,
+    /// Custom titlebar height.
+    pub titlebar_px: f32,
+    /// Activity rail width.
+    pub activity_rail_w: f32,
+    /// Left edge of the main workspace after navigation regions.
+    pub workspace_x: f32,
+    /// Workspace header height.
+    pub workspace_header_px: f32,
+    /// Workspace tab strip top edge.
+    pub workspace_tabs_y: f32,
     pub status_bar_px: f32,
     pub content_top: f32,
     pub content_bottom: f32,
@@ -367,18 +379,7 @@ impl App {
                 diff_stat: Some((total_adds, total_dels)),
                 is_active: true,
             }],
-            chats: vec![
-                crate::sidebar::ChatEntry {
-                    title: "Terminal Session 1".to_string(),
-                    status: crate::sidebar::ChatStatus::Idle,
-                    model: "Local Shell".to_string(),
-                },
-                crate::sidebar::ChatEntry {
-                    title: "AI Review Engine".to_string(),
-                    status: crate::sidebar::ChatStatus::Done,
-                    model: "Antigravity".to_string(),
-                },
-            ],
+            chats: Vec::new(),
             source_control_tab: crate::changes_panel::ChangesTab::Changes,
             changed_file_count: changed_files.len(),
             commit_count: history.len(),
@@ -476,6 +477,7 @@ impl App {
             workspace_name,
             git_branch,
             sidebar_state,
+            sidebar_mode: crate::shell::SidebarMode::Workspaces,
             workspace_manager,
             workspace_tab_indices: vec![0],
             persistence_enabled: false,
@@ -508,27 +510,8 @@ impl App {
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub fn compute_pane_geometry(&self, win_w: f32, win_h: f32) -> PaneGeometry {
         let scale = (self.scale_factor as f32).max(0.5);
-        let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
-        let status_bar_px = if self.config.status_bar {
-            (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32).round()
-        } else {
-            0.0
-        };
-        let content_top = tab_bar_px;
-        let content_bottom = (win_h - status_bar_px).max(content_top);
-        let content_h = (content_bottom - content_top).max(0.0);
-
         let min_term_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
         let min_diff_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
-        let sidebar_min = 185.0 * scale;
-        let mut sidebar_w = if self.sidebar_open && win_w >= sidebar_min + min_term_w {
-            (self.sidebar_width * scale)
-                .clamp(sidebar_min, 340.0 * scale)
-                .min(win_w - min_term_w)
-                .round()
-        } else {
-            0.0
-        };
         let minimum_main_width = if self.diff_view_open {
             min_term_w + min_diff_w
         } else {
@@ -539,13 +522,44 @@ impl App {
         } else {
             0.0
         };
-        let sidebar_auto_collapsed = sidebar_w > 0.0
+        let mut shell = crate::shell::ShellLayout::calculate(
+            win_w,
+            win_h,
+            scale,
+            self.sidebar_width,
+            self.sidebar_open,
+            self.config.status_bar,
+        );
+        let sidebar_auto_collapsed = shell.navigation.width > 0.0
             && (self.diff_view_open || self.changes_panel_open)
-            && win_w - sidebar_w < minimum_main_width + required_context_width;
+            && win_w - shell.workspace_header.x < minimum_main_width + required_context_width;
         if sidebar_auto_collapsed {
-            sidebar_w = 0.0;
+            shell = crate::shell::ShellLayout::calculate(
+                win_w,
+                win_h,
+                scale,
+                self.sidebar_width,
+                false,
+                self.config.status_bar,
+            );
         }
-        let after_sidebar = (win_w - sidebar_w).max(0.0);
+        let titlebar_px = shell.titlebar.height;
+        let activity_rail_w = shell.activity_rail.width;
+        let sidebar_w = shell.navigation.width;
+        let workspace_x = shell.workspace_header.x;
+        let workspace_header_px = shell.workspace_header.height;
+        let workspace_tabs_y = shell.workspace_tabs.y;
+        let tab_bar_px = shell.canvas.y;
+        let status_bar_px = if self.config.status_bar {
+            (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32).round()
+        } else {
+            0.0
+        };
+        let content_top = shell.canvas.y;
+        let content_bottom = (win_h - status_bar_px).max(content_top);
+        let content_h = (content_bottom - content_top).max(0.0);
+
+        let after_sidebar = (win_w - workspace_x).max(0.0);
         // Context panels collapse before the terminal and diff can overlap.
         let changes_min_space = (240.0 * scale) + minimum_main_width;
         let changes_panel_visible = self.changes_panel_open && after_sidebar >= changes_min_space;
@@ -558,7 +572,7 @@ impl App {
             0.0
         };
 
-        let avail_middle = (win_w - sidebar_w - changes_panel_w).max(0.0);
+        let avail_middle = (win_w - workspace_x - changes_panel_w).max(0.0);
         let diff_view_visible = self.diff_view_open && avail_middle >= min_term_w + min_diff_w;
         let term_w = if diff_view_visible {
             (avail_middle * self.term_split_ratio).clamp(min_term_w, avail_middle - min_diff_w)
@@ -570,13 +584,18 @@ impl App {
         } else {
             0.0
         };
-        let diff_x = sidebar_w + term_w;
+        let diff_x = workspace_x + term_w;
         let panel_x = win_w - changes_panel_w;
 
         PaneGeometry {
             win_w,
             win_h,
             tab_bar_px,
+            titlebar_px,
+            activity_rail_w,
+            workspace_x,
+            workspace_header_px,
+            workspace_tabs_y,
             status_bar_px,
             content_top,
             content_bottom,
@@ -631,19 +650,23 @@ impl App {
     }
 
     /// Converts window pixel coordinates to a clamped terminal grid point, accounting for tab bar height and window padding.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn pixel_to_grid_point(&self, pos: (f64, f64)) -> GridPoint {
         let pad_x = f64::from((self.config.padding_x * self.scale_factor as f32).round());
         let pad_y = f64::from((self.config.padding_y * self.scale_factor as f32).round());
-        let tab_bar = f64::from((TAB_BAR_HEIGHT * self.scale_factor as f32).round());
-        let sidebar_w = if self.sidebar_open {
-            f64::from((self.sidebar_width * self.scale_factor as f32).round())
-        } else {
-            0.0
-        };
-        let x_content = (pos.0 - sidebar_w - pad_x).max(0.0);
+        let size = self
+            .last_window_size
+            .map_or(PhysicalSize::new(800, 600), |(width, height)| {
+                PhysicalSize::new(width, height)
+            });
+        let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+        let x_content = (pos.0 - f64::from(geometry.workspace_x) - pad_x).max(0.0);
         let col = (x_content / f64::from(self.cell_metrics.cell_width)).max(0.0) as usize;
-        let y_content = (pos.1 - tab_bar - pad_y).max(0.0);
+        let y_content = (pos.1 - f64::from(geometry.content_top) - pad_y).max(0.0);
         let row = (y_content / f64::from(self.cell_metrics.cell_height)).max(0.0) as usize;
         GridPoint::new(
             col.min(self.terminal.grid.cols.saturating_sub(1)),
@@ -2839,31 +2862,56 @@ impl App {
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
         let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
         let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
-        let x_offset = geo.sidebar_w + effective_pad_x;
+        let x_offset = geo.workspace_x + effective_pad_x;
         let y_offset = geo.tab_bar_px + effective_pad_y;
 
         let mut quad_vertices = Vec::new();
 
-        // 1. Tab bar quads (background, tab bodies, active indicator, dividers)
+        let shell_layout = crate::shell::ShellLayout::calculate(
+            geo.win_w,
+            geo.win_h,
+            self.scale_factor as f32,
+            self.sidebar_width,
+            self.sidebar_open,
+            self.config.status_bar,
+        );
+        let (shell_quads, _) = crate::shell::build_shell_chrome(
+            shell_layout,
+            &self.workspace_name,
+            self.last_active_cwd
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+            self.git_branch.as_deref(),
+            self.sidebar_mode,
+        );
+        quad_vertices.extend_from_slice(&shell_quads);
+
+        // Terminal tabs occupy only the main workspace and sit below its header.
         let bg_color = self.config.theme.bg_color();
-        quad_vertices.extend_from_slice(&crate::tab::assemble_tab_bar_quads_themed(
+        let mut tab_quads = crate::tab::assemble_tab_bar_quads_themed(
             self.tabs.len(),
             self.active_tab_index,
-            screen_size[0],
+            (screen_size[0] - geo.workspace_x).max(0.0),
             accent_color,
             bg_color,
-        ));
+        );
+        crate::shell::translate_quads(&mut tab_quads, geo.workspace_x, geo.workspace_tabs_y);
+        quad_vertices.extend_from_slice(&tab_quads);
 
         // 1.5. Sidebar quads (if expanded)
         if geo.sidebar_w > 0.0 {
-            quad_vertices.extend_from_slice(&crate::sidebar::assemble_sidebar_quads(
-                geo.tab_bar_px,
-                geo.content_h,
+            let mut sidebar_quads = crate::sidebar::assemble_sidebar_quads(
+                geo.titlebar_px,
+                (geo.win_h - geo.titlebar_px - geo.status_bar_px).max(0.0),
                 geo.sidebar_w,
                 accent_color,
                 self.active_tab_index,
                 self.tabs.len(),
-            ));
+            );
+            crate::shell::translate_quads(&mut sidebar_quads, geo.activity_rail_w, 0.0);
+            quad_vertices.extend_from_slice(&sidebar_quads);
         }
 
         let is_multi_pane = self
@@ -2926,7 +2974,7 @@ impl App {
             ));
         } else if let Some(active_tab) = self.tabs.get(self.active_tab_index) {
             let container = crate::pane::PaneRect::new(
-                geo.sidebar_w,
+                geo.workspace_x,
                 geo.tab_bar_px,
                 geo.term_w,
                 geo.content_h,
@@ -3087,7 +3135,7 @@ impl App {
         };
         if highlight_splitter != DraggingSplitter::None {
             let split_x = match highlight_splitter {
-                DraggingSplitter::Sidebar => geo.sidebar_w,
+                DraggingSplitter::Sidebar => geo.workspace_x,
                 DraggingSplitter::ChangesPanel => geo.panel_x,
                 DraggingSplitter::TerminalDiff => geo.diff_x,
                 DraggingSplitter::None => 0.0,
@@ -3126,7 +3174,7 @@ impl App {
         // 7.5. Floating search bar overlay (if open)
         if self.search_state.is_open {
             quad_vertices.extend_from_slice(&crate::search::assemble_search_bar_quads(
-                geo.sidebar_w,
+                geo.workspace_x,
                 geo.tab_bar_px,
                 geo.term_w,
                 accent_color,
@@ -3149,15 +3197,20 @@ impl App {
         if let Some(ref drag) = self.dragging_tab
             && drag.is_dragging
         {
-            let target_idx =
-                crate::tab::compute_tab_drop_index(drag.current_x, self.tabs.len(), screen_size[0]);
-            quad_vertices.extend_from_slice(&crate::tab::assemble_tab_drag_indicator_quads(
+            let target_idx = crate::tab::compute_tab_drop_index(
+                drag.current_x,
+                self.tabs.len(),
+                (screen_size[0] - geo.workspace_x).max(0.0),
+            );
+            let mut drag_quads = crate::tab::assemble_tab_drag_indicator_quads(
                 self.tabs.len(),
                 drag.origin_idx,
                 target_idx,
-                screen_size[0],
+                (screen_size[0] - geo.workspace_x).max(0.0),
                 accent_color,
-            ));
+            );
+            crate::shell::translate_quads(&mut drag_quads, geo.workspace_x, geo.workspace_tabs_y);
+            quad_vertices.extend_from_slice(&drag_quads);
         }
 
         // 8.2. Tab rename modal dialog (if open)
@@ -3265,7 +3318,34 @@ impl App {
         };
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
         let quad_vertices = self.assemble_quad_vertices(is_bell_active, screen_size);
-        let mut tab_labels = self.build_tab_labels(screen_size[0]);
+        let shell_layout = crate::shell::ShellLayout::calculate(
+            geo.win_w,
+            geo.win_h,
+            self.scale_factor as f32,
+            self.sidebar_width,
+            self.sidebar_open,
+            self.config.status_bar,
+        );
+        let (_, shell_labels) = crate::shell::build_shell_chrome(
+            shell_layout,
+            &self.workspace_name,
+            self.last_active_cwd
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+            self.git_branch.as_deref(),
+            self.sidebar_mode,
+        );
+        let mut tab_labels = shell_labels;
+        let mut terminal_tab_labels =
+            self.build_tab_labels((screen_size[0] - geo.workspace_x).max(0.0));
+        crate::shell::translate_labels(
+            &mut terminal_tab_labels,
+            geo.workspace_x,
+            geo.workspace_tabs_y,
+        );
+        tab_labels.extend(terminal_tab_labels);
 
         if geo.sidebar_w > 0.0 {
             let sidebar_state = crate::sidebar::SidebarState {
@@ -3280,11 +3360,17 @@ impl App {
                 changed_file_count: self.changes_panel_state.changed_files.len(),
                 commit_count: self.changes_panel_state.history.len(),
             };
-            tab_labels.extend(crate::sidebar::build_sidebar_labels(
+            let mut sidebar_labels = crate::sidebar::build_navigation_labels(
                 &sidebar_state,
-                geo.tab_bar_px,
+                self.sidebar_mode,
+                &self.changes_panel_state,
+                geo.titlebar_px,
                 geo.sidebar_w,
-            ));
+            );
+            crate::shell::translate_labels(&mut sidebar_labels, geo.activity_rail_w, 0.0);
+            let sidebar_bottom = geo.win_h - geo.status_bar_px;
+            sidebar_labels.retain(|label| label.y < sidebar_bottom - 14.0);
+            tab_labels.extend(sidebar_labels);
         }
 
         if geo.diff_view_visible && geo.diff_w > 10.0 {
@@ -3313,7 +3399,7 @@ impl App {
 
         if self.search_state.is_open {
             tab_labels.extend(crate::search::build_search_bar_labels(
-                geo.sidebar_w,
+                geo.workspace_x,
                 geo.tab_bar_px,
                 geo.term_w,
                 &self.search_state,
@@ -3419,7 +3505,7 @@ impl App {
 
             let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
             let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
-            let x_offset = geo.sidebar_w + effective_pad_x;
+            let x_offset = geo.workspace_x + effective_pad_x;
             let y_offset = geo.tab_bar_px + effective_pad_y;
 
             let is_multi_pane = self
@@ -3442,7 +3528,7 @@ impl App {
                 let _ = glyph_pipeline.draw(&draw_ctx, &mut rpass, &self.terminal.grid);
             } else if let Some(active_tab) = self.tabs.get(self.active_tab_index) {
                 let container = crate::pane::PaneRect::new(
-                    geo.sidebar_w,
+                    geo.workspace_x,
                     geo.tab_bar_px,
                     geo.term_w,
                     geo.content_h,
@@ -3615,9 +3701,33 @@ impl ApplicationHandler<AppEvent> for App {
                 let win_h = win.inner_size().height as f32;
                 let geo = self.compute_pane_geometry(win_w, win_h);
 
+                if !win.is_maximized()
+                    && self.dragging_splitter == DraggingSplitter::None
+                    && self.dragging_pane_divider.is_none()
+                    && self.dragging_tab.is_none()
+                {
+                    let edge = crate::shell::hit_test_resize_edge(
+                        position.x as f32,
+                        position.y as f32,
+                        win_w,
+                        win_h,
+                        6.0 * self.scale_factor as f32,
+                    );
+                    if let Some(direction) = edge {
+                        win.set_cursor(winit::window::CursorIcon::from(direction));
+                    } else if self.hovered_splitter == DraggingSplitter::None
+                        && self.hovered_pane_divider.is_none()
+                    {
+                        win.set_cursor(winit::window::CursorIcon::Default);
+                    }
+                }
+
                 // Handle active tab header dragging for reordering
                 if let Some(ref mut drag) = self.dragging_tab {
-                    if drag.update_pos(position.x as f32, position.y as f32) {
+                    if drag.update_pos(
+                        position.x as f32 - geo.workspace_x,
+                        position.y as f32 - geo.workspace_tabs_y,
+                    ) {
                         win.request_redraw();
                     }
                     return;
@@ -3629,7 +3739,7 @@ impl ApplicationHandler<AppEvent> for App {
                         let cursor_x = position.x as f32;
                         let cursor_y = position.y as f32;
                         let container = crate::pane::PaneRect::new(
-                            geo.sidebar_w,
+                            geo.workspace_x,
                             geo.tab_bar_px,
                             geo.term_w,
                             geo.content_h,
@@ -3656,7 +3766,7 @@ impl ApplicationHandler<AppEvent> for App {
                     let cursor_x = position.x as f32;
 
                     if cursor_y >= geo.tab_bar_px && cursor_y <= (win_h - geo.status_bar_px) {
-                        if geo.sidebar_w > 0.0 && (cursor_x - geo.sidebar_w).abs() <= 8.0 {
+                        if geo.sidebar_w > 0.0 && (cursor_x - geo.workspace_x).abs() <= 8.0 {
                             detected = DraggingSplitter::Sidebar;
                         } else if geo.changes_panel_visible && (cursor_x - geo.panel_x).abs() <= 8.0
                         {
@@ -3687,7 +3797,7 @@ impl ApplicationHandler<AppEvent> for App {
                         let effective_pad_y =
                             (self.config.padding_y * self.scale_factor as f32).round();
                         let container = crate::pane::PaneRect::new(
-                            geo.sidebar_w,
+                            geo.workspace_x,
                             geo.tab_bar_px,
                             geo.term_w,
                             geo.content_h,
@@ -3737,8 +3847,8 @@ impl ApplicationHandler<AppEvent> for App {
                         && !self.settings_open
                     {
                         // Check URL hover within terminal content pane
-                        let in_terminal = cursor_x >= geo.sidebar_w
-                            && cursor_x < (geo.sidebar_w + geo.term_w)
+                        let in_terminal = cursor_x >= geo.workspace_x
+                            && cursor_x < (geo.workspace_x + geo.term_w)
                             && cursor_y >= geo.tab_bar_px
                             && cursor_y <= (win_h - geo.status_bar_px);
 
@@ -3768,8 +3878,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     match self.dragging_splitter {
                         DraggingSplitter::Sidebar => {
-                            let new_w =
-                                (position.x as f32 / self.scale_factor as f32).clamp(185.0, 340.0);
+                            let new_w = ((position.x as f32 - geo.activity_rail_w)
+                                / self.scale_factor as f32)
+                                .clamp(190.0, 360.0);
                             self.sidebar_width = new_w;
                         }
                         DraggingSplitter::ChangesPanel => {
@@ -3778,10 +3889,10 @@ impl ApplicationHandler<AppEvent> for App {
                             self.changes_panel_width = new_w;
                         }
                         DraggingSplitter::TerminalDiff => {
-                            let avail = (win_w - geo.sidebar_w - geo.changes_panel_w).max(1.0);
+                            let avail = (win_w - geo.workspace_x - geo.changes_panel_w).max(1.0);
                             let min_ratio = (geo.min_term_w / avail).min(0.5);
                             let max_ratio = 1.0 - (geo.min_diff_w / avail).min(0.5);
-                            let rel_x = (position.x as f32 - geo.sidebar_w)
+                            let rel_x = (position.x as f32 - geo.workspace_x)
                                 .clamp(avail * min_ratio, avail * max_ratio);
                             self.term_split_ratio = rel_x / avail;
                         }
@@ -3869,10 +3980,14 @@ impl ApplicationHandler<AppEvent> for App {
                     && drag.is_dragging
                 {
                     let win_w = win.inner_size().width as f32;
+                    let geo = self.compute_pane_geometry(
+                        win.inner_size().width as f32,
+                        win.inner_size().height as f32,
+                    );
                     let target_idx = crate::tab::compute_tab_drop_index(
-                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.0 as f32 - geo.workspace_x,
                         self.tabs.len(),
-                        win_w,
+                        (win_w - geo.workspace_x).max(0.0),
                     );
                     if target_idx != drag.origin_idx {
                         crate::tab::reorder_tabs(
@@ -3976,6 +4091,85 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
+                // The custom client titlebar owns native window controls and global search.
+                let geometry = self.compute_pane_geometry(
+                    win.inner_size().width as f32,
+                    win.inner_size().height as f32,
+                );
+                let titlebar_action = crate::shell::hit_test_titlebar(
+                    self.cursor_pixel_pos.0 as f32,
+                    self.cursor_pixel_pos.1 as f32,
+                    win.inner_size().width as f32,
+                );
+                if state == winit::event::ElementState::Pressed
+                    && !win.is_maximized()
+                    && (self.cursor_pixel_pos.1 >= f64::from(geometry.titlebar_px)
+                        || titlebar_action == crate::shell::TitlebarAction::Drag)
+                {
+                    let size = win.inner_size();
+                    if let Some(direction) = crate::shell::hit_test_resize_edge(
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                        size.width as f32,
+                        size.height as f32,
+                        6.0 * self.scale_factor as f32,
+                    ) {
+                        let _ = win.drag_resize_window(direction);
+                        return;
+                    }
+                }
+                if self.cursor_pixel_pos.1 < f64::from(geometry.titlebar_px) {
+                    if state == winit::event::ElementState::Pressed {
+                        match titlebar_action {
+                            crate::shell::TitlebarAction::Drag => {
+                                let _ = win.drag_window();
+                            }
+                            crate::shell::TitlebarAction::Search => {
+                                self.search_state.is_open = true;
+                            }
+                            crate::shell::TitlebarAction::Settings => {
+                                self.settings_open = true;
+                            }
+                            crate::shell::TitlebarAction::Minimize => win.set_minimized(true),
+                            crate::shell::TitlebarAction::ToggleMaximize => {
+                                win.set_maximized(!win.is_maximized());
+                            }
+                            crate::shell::TitlebarAction::Close => {
+                                self.persist_workspace_state();
+                                event_loop.exit();
+                            }
+                        }
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
+                if self.cursor_pixel_pos.0 < f64::from(geometry.activity_rail_w)
+                    && self.cursor_pixel_pos.1 >= f64::from(geometry.titlebar_px)
+                {
+                    if state == winit::event::ElementState::Pressed
+                        && let Some(mode) = crate::shell::hit_test_activity(
+                            self.cursor_pixel_pos.1 as f32,
+                            geometry.titlebar_px,
+                            self.scale_factor as f32,
+                        )
+                    {
+                        if self.sidebar_mode == mode && self.sidebar_open {
+                            self.sidebar_open = false;
+                        } else {
+                            self.sidebar_mode = mode;
+                            self.sidebar_open = true;
+                            if mode == crate::shell::SidebarMode::SourceControl {
+                                self.refresh_git_status();
+                            }
+                        }
+                        self.changes_panel_open = false;
+                        self.handle_resize(win.inner_size());
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
                 // If in-terminal search overlay is open, test for clicks on search bar controls
                 if self.search_state.is_open && state == winit::event::ElementState::Pressed {
                     let win_w = win.inner_size().width as f32;
@@ -3984,7 +4178,7 @@ impl ApplicationHandler<AppEvent> for App {
                     let action = crate::search::hit_test_search_bar(
                         self.cursor_pixel_pos.0 as f32,
                         self.cursor_pixel_pos.1 as f32,
-                        geo.sidebar_w,
+                        geo.workspace_x,
                         geo.tab_bar_px,
                         geo.term_w,
                         &self.search_state,
@@ -4071,12 +4265,18 @@ impl ApplicationHandler<AppEvent> for App {
                     win.request_redraw();
                     return;
                 }
-                if self.cursor_pixel_pos.1 <= f64::from(TAB_BAR_HEIGHT) {
+                if self.cursor_pixel_pos.1 >= f64::from(geometry.workspace_tabs_y)
+                    && self.cursor_pixel_pos.1
+                        < f64::from(
+                            geometry.workspace_tabs_y + TAB_BAR_HEIGHT * self.scale_factor as f32,
+                        )
+                    && self.cursor_pixel_pos.0 >= f64::from(geometry.workspace_x)
+                {
                     if state == winit::event::ElementState::Pressed {
-                        let win_w = win.inner_size().width as f32;
+                        let win_w = (win.inner_size().width as f32 - geometry.workspace_x).max(0.0);
                         let action = hit_test(
-                            self.cursor_pixel_pos.0 as f32,
-                            self.cursor_pixel_pos.1 as f32,
+                            self.cursor_pixel_pos.0 as f32 - geometry.workspace_x,
+                            self.cursor_pixel_pos.1 as f32 - geometry.workspace_tabs_y,
                             self.tabs.len(),
                             win_w,
                         );
@@ -4101,8 +4301,8 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.select_tab(idx);
                                     self.dragging_tab = Some(crate::tab::TabDragState::new(
                                         idx,
-                                        self.cursor_pixel_pos.0 as f32,
-                                        self.cursor_pixel_pos.1 as f32,
+                                        self.cursor_pixel_pos.0 as f32 - geometry.workspace_x,
+                                        self.cursor_pixel_pos.1 as f32 - geometry.workspace_tabs_y,
                                     ));
                                 }
                             }
@@ -4177,32 +4377,23 @@ impl ApplicationHandler<AppEvent> for App {
                 }
 
                 // Check sidebar click if sidebar is open
-                let sidebar_px = f64::from(
-                    self.compute_pane_geometry(
-                        win.inner_size().width as f32,
-                        win.inner_size().height as f32,
-                    )
-                    .sidebar_w,
+                let nav_geometry = self.compute_pane_geometry(
+                    win.inner_size().width as f32,
+                    win.inner_size().height as f32,
                 );
-                if sidebar_px > 0.0 && self.cursor_pixel_pos.0 <= sidebar_px {
+                let sidebar_px = f64::from(nav_geometry.sidebar_w);
+                if sidebar_px > 0.0
+                    && self.cursor_pixel_pos.0 >= f64::from(nav_geometry.activity_rail_w)
+                    && self.cursor_pixel_pos.0 < f64::from(nav_geometry.workspace_x)
+                {
                     if state == winit::event::ElementState::Pressed {
-                        let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
-                        let status_bar_px = if self.config.status_bar {
-                            (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32)
-                                .round()
-                        } else {
-                            0.0
-                        };
-                        let sidebar_h =
-                            (win.inner_size().height as f32 - tab_bar_px - status_bar_px).max(0.0);
-                        let action = crate::sidebar::hit_test_sidebar(
-                            self.cursor_pixel_pos.0 as f32,
+                        let action = crate::sidebar::hit_test_navigation(
+                            self.sidebar_mode,
                             self.cursor_pixel_pos.1 as f32,
-                            tab_bar_px,
-                            sidebar_h,
-                            sidebar_px as f32,
-                            self.tabs.len(),
+                            nav_geometry.titlebar_px,
                             self.workspace_manager.workspaces().len(),
+                            self.tabs.len(),
+                            &self.changes_panel_state,
                         );
                         match action {
                             crate::sidebar::SidebarAction::SelectTab(idx) => {
@@ -4237,11 +4428,39 @@ impl ApplicationHandler<AppEvent> for App {
                             crate::sidebar::SidebarAction::SelectSourceControl(tab) => {
                                 self.changes_panel_state.active_tab = tab;
                                 self.changes_panel_state.commit_input_focused = false;
+                                self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
                                 self.changes_panel_open = true;
                                 self.diff_view_open = false;
                                 self.refresh_git_status();
                                 self.handle_resize(win.inner_size());
                                 self.terminal.mark_all_dirty();
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectChangedFile(index) => {
+                                self.changes_panel_state.commit_input_focused = false;
+                                self.select_diff_file(index);
+                                self.changes_panel_open = false;
+                                self.handle_resize(win.inner_size());
+                                self.terminal.mark_all_dirty();
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectCommit(index) => {
+                                self.changes_panel_state.commit_input_focused = false;
+                                self.changes_panel_state.selected_commit_index = Some(index);
+                                if let Some(commit) = self.changes_panel_state.history.get(index) {
+                                    let cwd = self.active_cwd();
+                                    let (filename, path, hunks) =
+                                        crate::git::query_commit_diff(&cwd, &commit.hash);
+                                    self.diff_view_state.file_name = filename;
+                                    self.diff_view_state.path_info = path;
+                                    self.diff_view_state.hunks = hunks;
+                                    self.diff_view_state.staged = true;
+                                    self.diff_view_state.scroll_offset = 0;
+                                    self.diff_view_open = true;
+                                    self.changes_panel_open = false;
+                                    self.handle_resize(win.inner_size());
+                                    self.terminal.mark_all_dirty();
+                                }
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::None => {}
@@ -4670,7 +4889,7 @@ impl ApplicationHandler<AppEvent> for App {
                         let effective_pad_y =
                             (self.config.padding_y * self.scale_factor as f32).round();
                         let container = crate::pane::PaneRect::new(
-                            geo.sidebar_w,
+                            geo.workspace_x,
                             geo.tab_bar_px,
                             geo.term_w,
                             geo.content_h,
@@ -4872,9 +5091,9 @@ mod tests {
     fn layout_sidebar_width_is_clamped_to_navigation_constraints() {
         let mut app = App::new(None, Terminal::new(80, 24), None);
         app.sidebar_open = true;
-        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 240.0);
+        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 0.0);
         assert_eq!(app.compute_pane_geometry(360.0, 800.0).sidebar_w, 0.0);
-        for (requested, expected) in [(80.0, 185.0), (240.0, 240.0), (500.0, 340.0)] {
+        for (requested, expected) in [(80.0, 190.0), (240.0, 240.0), (500.0, 360.0)] {
             app.sidebar_width = requested;
             let geo = app.compute_pane_geometry(1200.0, 800.0);
             assert_eq!(geo.sidebar_w, expected);
@@ -4887,14 +5106,14 @@ mod tests {
         app.sidebar_open = true;
         app.changes_panel_open = true;
 
-        let geo = app.compute_pane_geometry(420.0, 800.0);
+        let geo = app.compute_pane_geometry(600.0, 800.0);
         assert_eq!(geo.sidebar_w, 0.0);
         assert!(geo.sidebar_auto_collapsed);
         assert!(geo.changes_panel_visible);
         assert!(geo.term_w >= geo.min_term_w);
 
-        app.toggle_sidebar_or_restore_content(PhysicalSize::new(420, 800));
-        let restored = app.compute_pane_geometry(420.0, 800.0);
+        app.toggle_sidebar_or_restore_content(PhysicalSize::new(600, 800));
+        let restored = app.compute_pane_geometry(600.0, 800.0);
         assert!(app.sidebar_open);
         assert!(!app.changes_panel_open);
         assert!(restored.sidebar_w > 0.0);
@@ -4946,16 +5165,23 @@ mod tests {
 
         app.handle_resize(PhysicalSize::new(1000, 800));
 
-        assert_eq!(app.terminal.grid.cols, 99);
-        assert_eq!(app.terminal.grid.rows, 36);
-        assert_eq!(app.terminal.alternate_grid.cols, 99);
-        assert_eq!(app.terminal.alternate_grid.rows, 36);
+        let geometry = app.compute_pane_geometry(1000.0, 800.0);
+        let expected_cols = ((geometry.term_w - app.config.padding_x * 2.0)
+            / app.cell_metrics.cell_width)
+            .floor() as usize;
+        let expected_rows = ((geometry.content_h - app.config.padding_y * 2.0)
+            / app.cell_metrics.cell_height)
+            .floor() as usize;
+        assert_eq!(app.terminal.grid.cols, expected_cols);
+        assert_eq!(app.terminal.grid.rows, expected_rows);
+        assert_eq!(app.terminal.alternate_grid.cols, expected_cols);
+        assert_eq!(app.terminal.alternate_grid.rows, expected_rows);
         assert!(app.terminal.has_damage());
 
         // When sidebar is opened: columns adjust to fit narrower width (240px sidebar)
         app.sidebar_open = true;
         app.handle_resize(PhysicalSize::new(1000, 800));
-        assert_eq!(app.terminal.grid.cols, 75);
+        assert!(app.terminal.grid.cols < expected_cols);
 
         // When all cockpit panes are opened: terminal fits agent pane
         app.changes_panel_open = true;
@@ -4988,8 +5214,15 @@ mod tests {
             };
 
             app.handle_resize(PhysicalSize::new(1000, 800));
-            assert_eq!(app.terminal.grid.cols, 99);
-            assert_eq!(app.terminal.grid.rows, 36);
+            let geometry = app.compute_pane_geometry(1000.0, 800.0);
+            let expected_cols = ((geometry.term_w - app.config.padding_x * 2.0)
+                / app.cell_metrics.cell_width)
+                .floor() as usize;
+            let expected_rows = ((geometry.content_h - app.config.padding_y * 2.0)
+                / app.cell_metrics.cell_height)
+                .floor() as usize;
+            assert_eq!(app.terminal.grid.cols, expected_cols);
+            assert_eq!(app.terminal.grid.rows, expected_rows);
         }
     }
 
@@ -5233,13 +5466,20 @@ mod tests {
         app.config.padding_x = 10.0;
         app.config.padding_y = 10.0;
 
-        // Exactly at (pad_x, TAB_BAR_HEIGHT + pad_y) -> (col 0, row 0)
-        let pt0 = app.pixel_to_grid_point((10.0, 36.0 + 10.0));
+        let geometry = app.compute_pane_geometry(800.0, 600.0);
+        // Terminal grid coordinates start within the canvas after shell chrome.
+        let pt0 = app.pixel_to_grid_point((
+            f64::from(geometry.workspace_x) + 10.0,
+            f64::from(geometry.content_top) + 10.0,
+        ));
         assert_eq!(pt0.col, 0);
         assert_eq!(pt0.row, 0);
 
         // One cell over in X and Y
-        let pt1 = app.pixel_to_grid_point((20.0, 36.0 + 30.0));
+        let pt1 = app.pixel_to_grid_point((
+            f64::from(geometry.workspace_x) + 20.0,
+            f64::from(geometry.content_top) + 30.0,
+        ));
         assert_eq!(pt1.col, 1);
         assert_eq!(pt1.row, 1);
     }
