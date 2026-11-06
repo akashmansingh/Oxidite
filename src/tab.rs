@@ -1266,7 +1266,8 @@ pub enum TabRenameAction {
 pub fn assemble_tab_rename_quads(
     window_width: f32,
     window_height: f32,
-    accent_color: [f32; 4],
+    _accent_color: [f32; 4],
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     let card_w = 400.0_f32;
@@ -1280,7 +1281,11 @@ pub fn assemble_tab_rename_quads(
         0.0,
         window_width,
         window_height,
-        [0.0, 0.0, 0.0, 0.65],
+        {
+            let mut color = theme.rgba(theme.background_primary);
+            color[3] = 0.65;
+            color
+        },
     ));
 
     // 2. Card border (accent)
@@ -1289,7 +1294,7 @@ pub fn assemble_tab_rename_quads(
         card_y - 1.0,
         card_w + 2.0,
         card_h + 2.0,
-        accent_color,
+        theme.rgba(theme.border_active),
     ));
 
     // 3. Card background (#0b0c10)
@@ -1298,7 +1303,7 @@ pub fn assemble_tab_rename_quads(
         card_y,
         card_w,
         card_h,
-        [0.045, 0.048, 0.065, 0.98],
+        theme.rgba(theme.background_elevated),
     ));
 
     // 4. Text input box border
@@ -1307,7 +1312,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 44.0,
         card_w - 38.0,
         34.0,
-        [0.22, 0.25, 0.35, 0.8],
+        theme.rgba(theme.border_default),
     ));
 
     // 5. Text input box background (#040507)
@@ -1316,7 +1321,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 45.0,
         card_w - 40.0,
         32.0,
-        [0.02, 0.025, 0.035, 1.0],
+        theme.rgba(theme.background_primary),
     ));
 
     // 6. Save button background
@@ -1325,7 +1330,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 92.0,
         80.0,
         28.0,
-        [0.18, 0.42, 0.78, 0.9],
+        theme.rgba(theme.accent_primary),
     ));
 
     // 7. Cancel button background
@@ -1334,7 +1339,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 92.0,
         75.0,
         28.0,
-        [0.14, 0.15, 0.20, 0.8],
+        theme.rgba(theme.background_tertiary),
     ));
 
     quads
@@ -1387,6 +1392,7 @@ pub fn build_tab_rename_labels(
     window_width: f32,
     window_height: f32,
     show_cursor: bool,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let card_w = 400.0_f32;
     let card_h = 140.0_f32;
@@ -1400,7 +1406,7 @@ pub fn build_tab_rename_labels(
         text: "Rename Tab".to_string(),
         x: card_x + 20.0,
         y: card_y + 14.0,
-        color: glyphon::Color::rgb(240, 242, 250),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: card_w - 40.0,
     });
@@ -1426,7 +1432,7 @@ pub fn build_tab_rename_labels(
         text: input_display,
         x: card_x + 28.0,
         y: card_y + 51.0,
-        color: glyphon::Color::rgb(220, 225, 240),
+        color: theme.glyphon(theme.foreground_primary),
         bold: false,
         max_width: card_w - 56.0,
     });
@@ -1436,7 +1442,7 @@ pub fn build_tab_rename_labels(
         text: "Save".to_string(),
         x: card_x + card_w - 168.0,
         y: card_y + 97.0,
-        color: glyphon::Color::rgb(255, 255, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 60.0,
     });
@@ -1446,7 +1452,7 @@ pub fn build_tab_rename_labels(
         text: "Cancel".to_string(),
         x: card_x + card_w - 82.0,
         y: card_y + 97.0,
-        color: glyphon::Color::rgb(180, 185, 200),
+        color: theme.glyphon(theme.foreground_secondary),
         bold: false,
         max_width: 60.0,
     });
@@ -1500,6 +1506,7 @@ pub fn assemble_close_confirm_quads(
     window_height: f32,
     confirm_selected: bool,
     _accent_color: [f32; 4],
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     let card_w = 440.0_f32;
@@ -1513,7 +1520,11 @@ pub fn assemble_close_confirm_quads(
         0.0,
         window_width,
         window_height,
-        [0.0, 0.0, 0.0, 0.65],
+        {
+            let mut color = theme.rgba(theme.background_primary);
+            color[3] = 0.65;
+            color
+        },
     ));
 
     // 2. Card border
@@ -1522,7 +1533,7 @@ pub fn assemble_close_confirm_quads(
         card_y - 1.0,
         card_w + 2.0,
         card_h + 2.0,
-        [0.25, 0.28, 0.38, 0.9],
+        theme.rgba(theme.border_default),
     ));
 
     // 3. Card body (#0b0c10)
@@ -1531,7 +1542,7 @@ pub fn assemble_close_confirm_quads(
         card_y,
         card_w,
         card_h,
-        [0.045, 0.048, 0.065, 0.98],
+        theme.rgba(theme.background_elevated),
     ));
 
     // 4. Header warning accent line (coral red)
@@ -1540,14 +1551,14 @@ pub fn assemble_close_confirm_quads(
         card_y,
         card_w,
         3.0,
-        [0.92, 0.35, 0.35, 1.0],
+        theme.rgba(theme.error),
     ));
 
     // 5. Close Tab button: card_x + card_w - 235.0, card_y + 110.0, 115.0, 32.0
     let close_bg = if confirm_selected {
-        [0.85, 0.22, 0.25, 0.95] // Highlighted vibrant red
+        theme.rgba(theme.error)
     } else {
-        [0.18, 0.19, 0.26, 0.8]
+        theme.rgba(theme.background_tertiary)
     };
     quads.extend_from_slice(&build_quad_vertices(
         card_x + card_w - 235.0,
@@ -1559,9 +1570,9 @@ pub fn assemble_close_confirm_quads(
 
     // 6. Cancel button: card_x + card_w - 105.0, card_y + 110.0, 85.0, 32.0
     let cancel_bg = if confirm_selected {
-        [0.14, 0.15, 0.20, 0.8]
+        theme.rgba(theme.background_tertiary)
     } else {
-        [0.28, 0.32, 0.44, 0.95] // Highlighted gray
+        theme.rgba(theme.focus_background)
     };
     quads.extend_from_slice(&build_quad_vertices(
         card_x + card_w - 105.0,
@@ -1614,6 +1625,7 @@ pub fn build_close_confirm_labels(
     state: &CloseConfirmState,
     window_width: f32,
     window_height: f32,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let card_w = 440.0_f32;
     let card_h = 160.0_f32;
@@ -1627,7 +1639,7 @@ pub fn build_close_confirm_labels(
         text: "Close Active Tab?".to_string(),
         x: card_x + 20.0,
         y: card_y + 16.0,
-        color: glyphon::Color::rgb(250, 100, 100),
+        color: theme.glyphon(theme.error),
         bold: true,
         max_width: card_w - 40.0,
     });
@@ -1638,7 +1650,7 @@ pub fn build_close_confirm_labels(
         text: subtitle,
         x: card_x + 20.0,
         y: card_y + 46.0,
-        color: glyphon::Color::rgb(210, 215, 230),
+        color: theme.glyphon(theme.foreground_primary),
         bold: false,
         max_width: card_w - 40.0,
     });
@@ -1647,7 +1659,7 @@ pub fn build_close_confirm_labels(
         text: "Closing this tab will terminate all child processes.".to_string(),
         x: card_x + 20.0,
         y: card_y + 68.0,
-        color: glyphon::Color::rgb(140, 145, 160),
+        color: theme.glyphon(theme.foreground_muted),
         bold: false,
         max_width: card_w - 40.0,
     });
@@ -1657,7 +1669,7 @@ pub fn build_close_confirm_labels(
         text: "Close Tab".to_string(),
         x: card_x + card_w - 212.0,
         y: card_y + 117.0,
-        color: glyphon::Color::rgb(255, 255, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 90.0,
     });
@@ -1667,7 +1679,7 @@ pub fn build_close_confirm_labels(
         text: "Cancel".to_string(),
         x: card_x + card_w - 88.0,
         y: card_y + 117.0,
-        color: glyphon::Color::rgb(220, 225, 240),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 70.0,
     });
@@ -1928,9 +1940,10 @@ mod tests {
         assert_eq!(hit_cancel, Some(TabRenameAction::Cancel));
 
         // Quads and labels
-        let quads = assemble_tab_rename_quads(800.0, 600.0, [0.2, 0.6, 1.0, 1.0]);
+        let theme = crate::theme::ThemeTokens::default();
+        let quads = assemble_tab_rename_quads(800.0, 600.0, [0.2, 0.6, 1.0, 1.0], theme);
         assert!(!quads.is_empty());
-        let labels = build_tab_rename_labels(&rename, 800.0, 600.0, true);
+        let labels = build_tab_rename_labels(&rename, 800.0, 600.0, true, theme);
         assert_eq!(labels.len(), 4);
     }
 
@@ -1955,9 +1968,10 @@ mod tests {
         assert_eq!(hit_cancel, Some(CloseConfirmAction::Cancel));
 
         // Quads and labels
-        let quads = assemble_close_confirm_quads(800.0, 600.0, true, [0.9, 0.3, 0.3, 1.0]);
+        let theme = crate::theme::ThemeTokens::default();
+        let quads = assemble_close_confirm_quads(800.0, 600.0, true, [0.9, 0.3, 0.3, 1.0], theme);
         assert!(!quads.is_empty());
-        let labels = build_close_confirm_labels(&confirm, 800.0, 600.0);
+        let labels = build_close_confirm_labels(&confirm, 800.0, 600.0, theme);
         assert_eq!(labels.len(), 5);
     }
 

@@ -3544,6 +3544,7 @@ impl App {
                 screen_size[0],
                 screen_size[1],
                 accent_color,
+                theme_tokens,
             ));
         }
 
@@ -3554,6 +3555,7 @@ impl App {
                 screen_size[1],
                 confirm_state.confirm_selected,
                 accent_color,
+                theme_tokens,
             ));
         }
 
@@ -3783,6 +3785,7 @@ impl App {
                 screen_size[0],
                 screen_size[1],
                 self.cursor_blink_visible,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -3791,6 +3794,7 @@ impl App {
                 confirm_state,
                 screen_size[0],
                 screen_size[1],
+                self.config.theme.tokens(),
             ));
         }
 
