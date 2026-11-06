@@ -92,6 +92,7 @@ pub fn build_navigation_labels(
     changes: &crate::changes_panel::ChangesPanelState,
     sidebar_y: f32,
     sidebar_width: f32,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let mut labels = Vec::new();
     let heading = match mode {
@@ -102,12 +103,16 @@ pub fn build_navigation_labels(
         crate::shell::SidebarMode::Notifications => "NOTIFICATIONS",
     };
     let mut add =
-        |text: String, x: f32, y: f32, color: GlyphonColor, bold: bool, max_width: f32| {
+        |text: String, x: f32, y: f32, _legacy_color: GlyphonColor, bold: bool, max_width: f32| {
             labels.push(TabLabel {
                 text,
                 x,
                 y,
-                color,
+                color: theme.glyphon(if bold {
+                    theme.foreground_primary
+                } else {
+                    theme.foreground_secondary
+                }),
                 bold,
                 max_width,
             });
@@ -413,6 +418,7 @@ pub fn assemble_sidebar_quads(
     accent_color: [f32; 4],
     active_tab_index: usize,
     tab_count: usize,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
 
@@ -422,7 +428,7 @@ pub fn assemble_sidebar_quads(
         sidebar_y,
         sidebar_width,
         sidebar_height,
-        [0.12, 0.13, 0.15, 1.0],
+        theme.background_secondary.to_rgba_array(1.0),
     ));
 
     // 2. Right vertical border dividing sidebar from terminal grid / agent pane (#181a20)
@@ -431,7 +437,7 @@ pub fn assemble_sidebar_quads(
         sidebar_y,
         1.0,
         sidebar_height,
-        [0.23, 0.24, 0.28, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // 3. Workspace header bottom divider line (#181a20)
@@ -440,7 +446,7 @@ pub fn assemble_sidebar_quads(
         sidebar_y + SIDEBAR_HEADER_HEIGHT - 1.0,
         sidebar_width,
         1.0,
-        [0.23, 0.24, 0.28, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // 4. Active tab session item highlight & left indicator strip
@@ -456,7 +462,7 @@ pub fn assemble_sidebar_quads(
                 item_y,
                 sidebar_width - 12.0,
                 SIDEBAR_ITEM_HEIGHT - 4.0,
-                [0.045, 0.048, 0.065, 0.95],
+                theme.focus_background.to_rgba_array(0.95),
             ));
 
             // Left neon phosphor indicator bar (2.5px wide)
@@ -910,7 +916,15 @@ mod tests {
 
     #[test]
     fn assemble_sidebar_quads_generates_quads() {
-        let quads = assemble_sidebar_quads(36.0, 500.0, 240.0, [0.0, 1.0, 0.5, 1.0], 0, 2);
+        let quads = assemble_sidebar_quads(
+            36.0,
+            500.0,
+            240.0,
+            [0.0, 1.0, 0.5, 1.0],
+            0,
+            2,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         // 3 base quads (bg, right border, header divider) + 2 quads for active tab = 5 quads * 6 = 30 vertices
         assert_eq!(quads.len(), 30);
     }
@@ -1074,6 +1088,7 @@ mod tests {
             &changes,
             40.0,
             250.0,
+            crate::theme::Theme::default_dark().tokens(),
         );
         assert!(labels.iter().any(|label| label.text == "MODIFIED (1)"));
         assert!(

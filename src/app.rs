@@ -2875,6 +2875,7 @@ impl App {
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
             self.sidebar_mode,
+            self.config.theme.tokens(),
         );
         quad_vertices.extend_from_slice(&shell_quads);
 
@@ -2899,6 +2900,7 @@ impl App {
                 accent_color,
                 self.active_tab_index,
                 self.tabs.len(),
+                self.config.theme.tokens(),
             );
             crate::shell::translate_quads(&mut sidebar_quads, geo.activity_rail_w, 0.0);
             quad_vertices.extend_from_slice(&sidebar_quads);
@@ -3326,6 +3328,7 @@ impl App {
                 .unwrap_or_default(),
             self.git_branch.as_deref(),
             self.sidebar_mode,
+            self.config.theme.tokens(),
         );
         let mut tab_labels = shell_labels;
         let mut terminal_tab_labels =
@@ -3356,6 +3359,7 @@ impl App {
                 &self.changes_panel_state,
                 geo.titlebar_px,
                 geo.sidebar_w,
+                self.config.theme.tokens(),
             );
             crate::shell::translate_labels(&mut sidebar_labels, geo.activity_rail_w, 0.0);
             let sidebar_bottom = geo.win_h - geo.status_bar_px;

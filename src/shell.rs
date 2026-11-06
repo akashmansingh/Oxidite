@@ -131,6 +131,7 @@ pub fn build_shell_chrome(
     root_name: &str,
     branch: Option<&str>,
     active_mode: SidebarMode,
+    theme: crate::theme::ThemeTokens,
 ) -> (
     Vec<crate::renderer::draw::QuadVertex>,
     Vec<crate::renderer::draw::TabLabel>,
@@ -141,11 +142,11 @@ pub fn build_shell_chrome(
     let mut quads = Vec::new();
     let mut labels = Vec::new();
     let scale = (layout.titlebar.height / TITLEBAR_HEIGHT).max(0.5);
-    let title_bg = [0.13, 0.14, 0.17, 1.0];
-    let rail_bg = [0.105, 0.112, 0.135, 1.0];
-    let header_bg = [0.16, 0.17, 0.20, 1.0];
-    let border = [0.23, 0.24, 0.28, 1.0];
-    let accent = [0.21, 0.79, 0.54, 1.0];
+    let title_bg = theme.background_tertiary.to_rgba_array(1.0);
+    let rail_bg = theme.background_secondary.to_rgba_array(1.0);
+    let header_bg = theme.background_tertiary.to_rgba_array(1.0);
+    let border = theme.border_default.to_rgba_array(1.0);
+    let accent = theme.accent_primary.to_rgba_array(1.0);
     quads.extend_from_slice(&build_quad_vertices(
         0.0,
         0.0,
@@ -172,7 +173,7 @@ pub fn build_shell_chrome(
         layout.navigation.y,
         layout.navigation.width,
         layout.navigation.height,
-        [0.12, 0.13, 0.15, 1.0],
+        theme.background_secondary.to_rgba_array(1.0),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         layout.workspace_header.x,
@@ -208,7 +209,7 @@ pub fn build_shell_chrome(
         "OXIDITE".into(),
         14.0 * scale,
         11.0 * scale,
-        Color::rgb(229, 231, 235),
+        theme.glyphon(theme.foreground_primary),
         true,
         90.0 * scale,
     ));
@@ -216,7 +217,7 @@ pub fn build_shell_chrome(
         "Search workspace, sessions, files, commands…".into(),
         layout.window.width * 0.36,
         11.0 * scale,
-        Color::rgb(146, 149, 161),
+        theme.glyphon(theme.foreground_muted),
         false,
         layout.window.width * 0.28,
     ));
@@ -224,7 +225,7 @@ pub fn build_shell_chrome(
         "⚙".into(),
         layout.window.width - 180.0 * scale,
         10.0 * scale,
-        Color::rgb(190, 194, 204),
+        theme.glyphon(theme.foreground_secondary),
         false,
         24.0 * scale,
     ));
@@ -232,7 +233,7 @@ pub fn build_shell_chrome(
         "—".into(),
         layout.window.width - 130.0 * scale,
         10.0 * scale,
-        Color::rgb(190, 194, 204),
+        theme.glyphon(theme.foreground_secondary),
         false,
         24.0 * scale,
     ));
@@ -240,7 +241,7 @@ pub fn build_shell_chrome(
         "□".into(),
         layout.window.width - 84.0 * scale,
         10.0 * scale,
-        Color::rgb(190, 194, 204),
+        theme.glyphon(theme.foreground_secondary),
         false,
         24.0 * scale,
     ));
@@ -248,7 +249,7 @@ pub fn build_shell_chrome(
         "×".into(),
         layout.window.width - 38.0 * scale,
         10.0 * scale,
-        Color::rgb(229, 231, 235),
+        theme.glyphon(theme.foreground_primary),
         false,
         24.0 * scale,
     ));
@@ -276,9 +277,9 @@ pub fn build_shell_chrome(
             layout.activity_rail.x + 15.0 * scale,
             y + 12.0 * scale,
             if mode == active_mode {
-                Color::rgb(229, 231, 235)
+                theme.glyphon(theme.foreground_primary)
             } else {
-                Color::rgb(146, 149, 161)
+                theme.glyphon(theme.foreground_muted)
             },
             mode == active_mode,
             24.0 * scale,
@@ -294,7 +295,7 @@ pub fn build_shell_chrome(
         workspace_label,
         layout.workspace_header.x + 14.0 * scale,
         layout.workspace_header.y + 11.0 * scale,
-        Color::rgb(229, 231, 235),
+        theme.glyphon(theme.foreground_primary),
         true,
         layout.workspace_header.width * 0.58,
     ));
@@ -303,7 +304,7 @@ pub fn build_shell_chrome(
             format!("⎇  {branch}"),
             layout.window.width - 200.0 * scale,
             layout.workspace_header.y + 11.0 * scale,
-            Color::rgb(146, 149, 161),
+            theme.glyphon(theme.foreground_secondary),
             false,
             180.0 * scale,
         ));

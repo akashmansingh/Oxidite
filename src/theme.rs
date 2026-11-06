@@ -129,6 +129,82 @@ pub struct Theme {
     pub ansi: [Rgb; 16],
 }
 
+/// Semantic colors shared by every application surface.
+///
+/// UI components consume this palette instead of defining theme-specific colors of
+/// their own. Terminal ANSI colors remain available through [`Theme::ansi`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeTokens {
+    /// Main application and terminal canvas surface.
+    pub background_primary: Rgb,
+    /// Navigation and secondary panel surface.
+    pub background_secondary: Rgb,
+    /// Header and inactive surface.
+    pub background_tertiary: Rgb,
+    /// Menus and elevated surfaces.
+    pub background_elevated: Rgb,
+    /// Main UI text.
+    pub foreground_primary: Rgb,
+    /// Supporting UI text.
+    pub foreground_secondary: Rgb,
+    /// Low emphasis UI text.
+    pub foreground_muted: Rgb,
+    /// Standard panel border.
+    pub border_default: Rgb,
+    /// Subtle separators.
+    pub border_subtle: Rgb,
+    /// Focused border.
+    pub border_active: Rgb,
+    /// Main interaction accent.
+    pub accent_primary: Rgb,
+    /// Secondary interaction accent.
+    pub accent_secondary: Rgb,
+    /// Success state.
+    pub success: Rgb,
+    /// Warning state.
+    pub warning: Rgb,
+    /// Error state.
+    pub error: Rgb,
+    /// Informational state.
+    pub info: Rgb,
+    /// Text selection surface.
+    pub selection_background: Rgb,
+    /// Hovered row surface.
+    pub hover_background: Rgb,
+    /// Keyboard focus surface.
+    pub focus_background: Rgb,
+    /// Terminal canvas.
+    pub terminal_background: Rgb,
+    /// Terminal default foreground.
+    pub terminal_foreground: Rgb,
+    /// Terminal cursor.
+    pub terminal_cursor: Rgb,
+    /// Terminal selection.
+    pub terminal_selection: Rgb,
+    /// Added line surface.
+    pub diff_added_background: Rgb,
+    /// Removed line surface.
+    pub diff_removed_background: Rgb,
+    /// Added line text.
+    pub diff_added_foreground: Rgb,
+    /// Removed line text.
+    pub diff_removed_foreground: Rgb,
+}
+
+impl ThemeTokens {
+    /// Converts a token to normalized RGBA for the renderer.
+    #[must_use]
+    pub fn rgba(self, color: Rgb) -> [f32; 4] {
+        color.to_rgba_array(1.0)
+    }
+
+    /// Converts a token to glyphon text color.
+    #[must_use]
+    pub fn glyphon(self, color: Rgb) -> glyphon::Color {
+        glyphon::Color::rgb(color.r, color.g, color.b)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ThemeFile {
     name: Option<String>,
@@ -177,6 +253,76 @@ struct NamedAnsiTable {
 }
 
 impl Theme {
+    /// Derives one complete semantic UI palette from this terminal theme.
+    #[must_use]
+    pub fn tokens(&self) -> ThemeTokens {
+        let mix = |a: Rgb, b: Rgb, amount: u16| {
+            let channel = |x: u8, y: u8| {
+                u8::try_from((u16::from(x) * (255 - amount) + u16::from(y) * amount) / 255)
+                    .unwrap_or(u8::MAX)
+            };
+            Rgb::new(channel(a.r, b.r), channel(a.g, b.g), channel(a.b, b.b))
+        };
+        let toward = |color: Rgb, target: Rgb, amount: u16| mix(color, target, amount);
+        let is_light = self.is_light();
+        let neutral = if is_light {
+            Rgb::new(0, 0, 0)
+        } else {
+            Rgb::new(255, 255, 255)
+        };
+        let tint = |amount| toward(self.background, neutral, amount);
+        let secondary_text = toward(
+            self.foreground,
+            self.background,
+            if is_light { 80 } else { 74 },
+        );
+        let muted_text = toward(
+            self.foreground,
+            self.background,
+            if is_light { 125 } else { 132 },
+        );
+        let border = toward(
+            self.background,
+            self.foreground,
+            if is_light { 64 } else { 48 },
+        );
+        let added = self.ansi[2];
+        let removed = self.ansi[1];
+        ThemeTokens {
+            background_primary: self.background,
+            background_secondary: tint(13),
+            background_tertiary: tint(24),
+            background_elevated: tint(36),
+            foreground_primary: self.foreground,
+            foreground_secondary: secondary_text,
+            foreground_muted: muted_text,
+            border_default: border,
+            border_subtle: toward(self.background, border, 128),
+            border_active: self.ansi[4],
+            accent_primary: self.ansi[6],
+            accent_secondary: self.ansi[4],
+            success: self.ansi[2],
+            warning: self.ansi[3],
+            error: self.ansi[1],
+            info: self.ansi[4],
+            selection_background: self.selection_bg,
+            hover_background: tint(if is_light { 14 } else { 28 }),
+            focus_background: tint(if is_light { 23 } else { 42 }),
+            terminal_background: self.background,
+            terminal_foreground: self.foreground,
+            terminal_cursor: self.cursor,
+            terminal_selection: self.selection_bg,
+            diff_added_background: toward(self.background, added, 34),
+            diff_removed_background: toward(self.background, removed, 34),
+            diff_added_foreground: if is_light {
+                self.ansi[2]
+            } else {
+                self.ansi[10]
+            },
+            diff_removed_foreground: if is_light { self.ansi[1] } else { self.ansi[9] },
+        }
+    }
+
     /// Parses a `Theme` from a TOML string representation.
     pub fn from_toml(content: &str) -> Result<Self, ThemeError> {
         let file: ThemeFile = toml::from_str(content)?;
@@ -752,6 +898,48 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_tokens_follow_the_selected_theme() {
+        let theme = Theme::dracula();
+        let tokens = theme.tokens();
+
+        assert_eq!(tokens.terminal_background, theme.background);
+        assert_eq!(tokens.terminal_foreground, theme.foreground);
+        assert_eq!(tokens.terminal_cursor, theme.cursor);
+        assert_eq!(tokens.terminal_selection, theme.selection_bg);
+        assert_eq!(tokens.background_primary, theme.background);
+        assert_ne!(
+            tokens.background_secondary,
+            Theme::pitch_black().tokens().background_secondary
+        );
+        assert!(tokens.foreground_muted != tokens.foreground_primary);
+    }
+
+    #[test]
+    fn every_builtin_theme_produces_a_complete_token_set() {
+        for name in [
+            "default-dark",
+            "dracula",
+            "solarized-dark",
+            "solarized-light",
+            "gruvbox-dark",
+            "nord",
+            "one-dark",
+            "bright-white",
+            "vampiric",
+            "graphite",
+            "sunset",
+            "pitch-black",
+        ] {
+            let theme =
+                Theme::preset_by_name(name).unwrap_or_else(|| panic!("missing preset {name}"));
+            let tokens = theme.tokens();
+            assert_eq!(tokens.background_primary, theme.background, "{name}");
+            assert_eq!(tokens.terminal_foreground, theme.foreground, "{name}");
+            assert_ne!(tokens.border_default, tokens.background_primary, "{name}");
+        }
+    }
 
     #[test]
     fn rgb_from_hex_valid_and_invalid() {
