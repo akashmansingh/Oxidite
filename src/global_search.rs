@@ -160,7 +160,9 @@ pub fn assemble_quads(
     selected: usize,
     theme: ThemeTokens,
 ) -> Vec<QuadVertex> {
-    let mut quads = build_quad_vertices(0.0, 0.0, width, height, [0.0, 0.0, 0.0, 0.45]).to_vec();
+    let mut backdrop = theme.rgba(theme.background_primary);
+    backdrop[3] = 0.45;
+    let mut quads = build_quad_vertices(0.0, 0.0, width, height, backdrop).to_vec();
     quads.extend_from_slice(&build_quad_vertices(
         layout.x,
         layout.y,
@@ -295,5 +297,17 @@ mod tests {
         let layout = SearchLayout::calculate(320.0, 240.0, 10);
         assert!(layout.x >= 0.0 && layout.x + layout.width <= 320.0);
         assert!(layout.y + layout.height <= 240.0);
+    }
+
+    #[test]
+    fn global_search_backdrop_tracks_selected_theme() {
+        let values = results();
+        let references = values.iter().collect::<Vec<_>>();
+        let layout = SearchLayout::calculate(1000.0, 700.0, references.len());
+        let dark = crate::theme::Theme::pitch_black().tokens();
+        let dracula = crate::theme::Theme::dracula().tokens();
+        let dark_quads = assemble_quads(1000.0, 700.0, layout, &references, 0, dark);
+        let dracula_quads = assemble_quads(1000.0, 700.0, layout, &references, 0, dracula);
+        assert_ne!(dark_quads[0].color, dracula_quads[0].color);
     }
 }
