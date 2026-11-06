@@ -1490,6 +1490,8 @@ pub struct CloseConfirmState {
     pub title: String,
     /// Whether the user has selected the Confirm [Close Tab] button vs [Cancel].
     pub confirm_selected: bool,
+    /// Workspace index when confirmation closes a workspace instead of one session.
+    pub workspace_index: Option<usize>,
 }
 
 impl CloseConfirmState {
@@ -1500,6 +1502,28 @@ impl CloseConfirmState {
             tab_index,
             title,
             confirm_selected: true,
+            workspace_index: None,
+        }
+    }
+
+    /// Creates a confirmation state for closing a registered workspace and its live sessions.
+    #[must_use]
+    pub fn for_workspace(workspace_index: usize, title: String) -> Self {
+        Self {
+            tab_index: 0,
+            title,
+            confirm_selected: true,
+            workspace_index: Some(workspace_index),
+        }
+    }
+
+    /// Returns a title appropriate for the close target.
+    #[must_use]
+    pub const fn dialog_title(&self) -> &'static str {
+        if self.workspace_index.is_some() {
+            "Close Workspace?"
+        } else {
+            "Close Active Session?"
         }
     }
 
@@ -1657,7 +1681,7 @@ pub fn build_close_confirm_labels(
 
     // Dialog title
     labels.push(TabLabel {
-        text: "Close Active Tab?".to_string(),
+        text: state.dialog_title().to_string(),
         x: card_x + 20.0,
         y: card_y + 16.0,
         color: theme.glyphon(theme.error),
@@ -1666,7 +1690,14 @@ pub fn build_close_confirm_labels(
     });
 
     // Subtitle warning
-    let subtitle = format!("A terminal process is still running in '{}'.", state.title);
+    let subtitle = if state.workspace_index.is_some() {
+        format!(
+            "Close workspace '{}' and its terminal sessions?",
+            state.title
+        )
+    } else {
+        format!("A terminal process is still running in '{}'.", state.title)
+    };
     labels.push(TabLabel {
         text: subtitle,
         x: card_x + 20.0,
@@ -1677,7 +1708,11 @@ pub fn build_close_confirm_labels(
     });
 
     labels.push(TabLabel {
-        text: "Closing this tab will terminate all child processes.".to_string(),
+        text: if state.workspace_index.is_some() {
+            "This removes the workspace from Oxidite and stops its sessions; project files stay on disk.".to_string()
+        } else {
+            "Closing this session will terminate its child processes.".to_string()
+        },
         x: card_x + 20.0,
         y: card_y + 68.0,
         color: theme.glyphon(theme.foreground_muted),

@@ -29,6 +29,8 @@ pub enum ContextAction {
     RevealDirectory,
     /// Request closing the selected terminal session.
     CloseSession,
+    /// Ask for confirmation before unregistering and stopping a workspace's sessions.
+    CloseWorkspace,
 }
 
 /// Popup placement and target for a navigation context menu.
@@ -190,6 +192,7 @@ fn items(target: ContextTarget) -> &'static [(ContextAction, &'static str)] {
             (ContextAction::NewTerminal, "New Terminal"),
             (ContextAction::Rename, "Rename Workspace"),
             (ContextAction::RevealDirectory, "Reveal Folder"),
+            (ContextAction::CloseWorkspace, "Close Workspace"),
         ],
         ContextTarget::Session(_) => &[
             (ContextAction::Open, "Open Session"),
@@ -231,9 +234,10 @@ mod tests {
         let target = ContextTarget::Workspace(1);
         let menu = ContextMenuState::new(target, 10.0, 10.0).layout(800.0, 600.0, 1.0);
         let labels = menu.labels(target, ThemeTokens::default());
-        assert_eq!(labels.len(), 4);
+        assert_eq!(labels.len(), 5);
         assert!(labels.iter().any(|label| label.text == "Reveal Folder"));
         assert!(labels.iter().any(|label| label.text == "Rename Workspace"));
+        assert!(labels.iter().any(|label| label.text == "Close Workspace"));
         assert!(
             menu.quads(target, Some(ContextAction::Open), ThemeTokens::default())
                 .len()
@@ -243,7 +247,7 @@ mod tests {
             ContextMenuState::new(target, 10.0, 10.0)
                 .move_selection(-1)
                 .selected_action(),
-            Some(ContextAction::RevealDirectory)
+            Some(ContextAction::CloseWorkspace)
         );
     }
 

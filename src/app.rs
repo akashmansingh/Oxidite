@@ -824,7 +824,7 @@ impl App {
                     Key::Named(NamedKey::Enter) => {
                         self.tab_close_confirm = None;
                         if confirm.confirm_selected {
-                            self.close_tab(confirm.tab_index);
+                            self.confirm_close_target(&confirm);
                         }
                         win.request_redraw();
                         return;
@@ -2191,6 +2191,23 @@ impl App {
         true
     }
 
+    /// Opens a confirmation before closing a workspace and terminating its sessions.
+    pub fn request_close_workspace(&mut self, index: usize) {
+        let Some(workspace) = self.workspace_manager.workspaces().get(index) else {
+            return;
+        };
+        if self.workspace_manager.workspaces().len() <= 1 {
+            return;
+        }
+        self.tab_close_confirm = Some(crate::tab::CloseConfirmState::for_workspace(
+            index,
+            workspace.name.clone(),
+        ));
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     fn workspace_sidebar_entries(&self) -> Vec<crate::sidebar::WorkspaceEntry> {
         self.workspace_manager
             .workspaces()
@@ -2659,6 +2676,10 @@ impl App {
                 .workspaces()
                 .get(index)
                 .map(|workspace| workspace.root_directory.clone()),
+            (ContextTarget::Workspace(index), Action::CloseWorkspace) => {
+                self.request_close_workspace(index);
+                None
+            }
             (ContextTarget::Session(index), Action::Open) => {
                 self.select_tab(index);
                 None
@@ -2704,6 +2725,14 @@ impl App {
         } else if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
             tab.set_custom_title(if name.is_empty() { None } else { Some(name) });
             self.persist_workspace_state();
+        }
+    }
+
+    fn confirm_close_target(&mut self, confirm: &crate::tab::CloseConfirmState) {
+        if let Some(workspace_index) = confirm.workspace_index {
+            self.close_workspace(workspace_index);
+        } else {
+            self.close_tab(confirm.tab_index);
         }
     }
 
@@ -4538,7 +4567,7 @@ impl ApplicationHandler<AppEvent> for App {
                         match action {
                             Some(crate::tab::CloseConfirmAction::Confirm) => {
                                 self.tab_close_confirm = None;
-                                self.close_tab(confirm.tab_index);
+                                self.confirm_close_target(&confirm);
                                 win.request_redraw();
                             }
                             Some(
@@ -5792,6 +5821,22 @@ mod tests {
             ..session_rename
         });
         assert_eq!(app.tabs[0].display_title(), "Renamed session");
+    }
+
+    #[test]
+    fn workspace_close_waits_for_confirmation_then_unregisters_workspace() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace("Second".into(), std::env::temp_dir());
+        app.request_close_workspace(1);
+        let confirm = app.tab_close_confirm.clone().expect("close prompt opened");
+        assert_eq!(confirm.workspace_index, Some(1));
+        assert_eq!(confirm.dialog_title(), "Close Workspace?");
+        assert_eq!(app.workspace_manager.workspaces().len(), 2);
+
+        app.tab_close_confirm = None;
+        app.confirm_close_target(&confirm);
+        assert_eq!(app.workspace_manager.workspaces().len(), 1);
+        assert!(app.tab_close_confirm.is_none());
     }
 
     #[test]
