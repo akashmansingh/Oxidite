@@ -1,7 +1,6 @@
 //! Git changes and commit history views.
 
 use crate::renderer::draw::{QuadVertex, TabLabel, build_quad_vertices};
-use glyphon::Color as GlyphonColor;
 
 /// Default width of the right changes panel in logical pixels.
 pub const CHANGES_PANEL_WIDTH: f32 = 280.0;
@@ -199,6 +198,7 @@ pub fn assemble_changes_panel_quads(
     panel_height: f32,
     accent_color: [f32; 4],
     state: &ChangesPanelState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
 
@@ -208,7 +208,7 @@ pub fn assemble_changes_panel_quads(
         panel_y,
         panel_width,
         panel_height,
-        [0.0, 0.0, 0.0, 1.0],
+        theme.rgba(theme.background_secondary),
     ));
 
     // 2. Left vertical border line dividing changes panel from main workspace (#181a20)
@@ -217,7 +217,7 @@ pub fn assemble_changes_panel_quads(
         panel_y,
         1.0,
         panel_height,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.rgba(theme.border_subtle),
     ));
 
     // 3. Top tab header bottom divider line (#181a20)
@@ -226,7 +226,7 @@ pub fn assemble_changes_panel_quads(
         panel_y + CHANGES_HEADER_HEIGHT - 1.0,
         panel_width,
         1.0,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.rgba(theme.border_subtle),
     ));
 
     // 4. Tab active indicators
@@ -564,6 +564,7 @@ pub fn build_changes_panel_labels(
     panel_width: f32,
     panel_height: f32,
     state: &ChangesPanelState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let mut labels = Vec::new();
 
@@ -578,9 +579,9 @@ pub fn build_changes_panel_labels(
         x: panel_x + 16.0,
         y: panel_y + 8.0,
         color: if is_changes {
-            GlyphonColor::rgb(240, 245, 255)
+            theme.glyphon(theme.foreground_primary)
         } else {
-            GlyphonColor::rgb(130, 135, 150)
+            theme.glyphon(theme.foreground_muted)
         },
         bold: is_changes,
         max_width: tab_w - 20.0,
@@ -591,9 +592,9 @@ pub fn build_changes_panel_labels(
         x: panel_x + tab_w + 16.0,
         y: panel_y + 8.0,
         color: if is_changes {
-            GlyphonColor::rgb(130, 135, 150)
+            theme.glyphon(theme.foreground_muted)
         } else {
-            GlyphonColor::rgb(240, 245, 255)
+            theme.glyphon(theme.foreground_primary)
         },
         bold: !is_changes,
         max_width: tab_w - 20.0,
@@ -612,7 +613,7 @@ pub fn build_changes_panel_labels(
                 text: diff_stat_text,
                 x: panel_x + 10.0,
                 y: subheader_y,
-                color: GlyphonColor::rgb(140, 145, 160),
+                color: theme.glyphon(theme.foreground_secondary),
                 bold: false,
                 max_width: 120.0,
             });
@@ -621,7 +622,7 @@ pub fn build_changes_panel_labels(
                 text: "Stage All".to_string(),
                 x: panel_x + panel_width - 142.0,
                 y: subheader_y,
-                color: GlyphonColor::rgb(220, 225, 240),
+                color: theme.glyphon(theme.foreground_primary),
                 bold: true,
                 max_width: 60.0,
             });
@@ -630,7 +631,7 @@ pub fn build_changes_panel_labels(
                 text: "Unstage".to_string(),
                 x: panel_x + panel_width - 68.0,
                 y: subheader_y,
-                color: GlyphonColor::rgb(220, 225, 240),
+                color: theme.glyphon(theme.foreground_primary),
                 bold: true,
                 max_width: 56.0,
             });
@@ -640,7 +641,7 @@ pub fn build_changes_panel_labels(
                 text: "Tracked Files".to_string(),
                 x: panel_x + 10.0,
                 y: subheader_y + 24.0,
-                color: GlyphonColor::rgb(110, 115, 130),
+                color: theme.glyphon(theme.foreground_muted),
                 bold: true,
                 max_width: 120.0,
             });
@@ -657,7 +658,7 @@ pub fn build_changes_panel_labels(
                     text: empty_text.to_string(),
                     x: panel_x + 14.0,
                     y: list_start_y + 6.0,
-                    color: GlyphonColor::rgb(115, 120, 135),
+                    color: theme.glyphon(theme.foreground_muted),
                     bold: false,
                     max_width: panel_width - 28.0,
                 });
@@ -676,9 +677,9 @@ pub fn build_changes_panel_labels(
                     x: panel_x + 14.0,
                     y: row_y + 2.0,
                     color: if is_selected {
-                        GlyphonColor::rgb(245, 248, 255)
+                        theme.glyphon(theme.foreground_primary)
                     } else {
-                        GlyphonColor::rgb(175, 180, 195)
+                        theme.glyphon(theme.foreground_secondary)
                     },
                     bold: is_selected,
                     max_width: panel_width - 90.0,
@@ -694,7 +695,7 @@ pub fn build_changes_panel_labels(
                     text: stat_text,
                     x: panel_x + panel_width - 80.0,
                     y: row_y + 2.0,
-                    color: GlyphonColor::rgb(53, 208, 127), // Success green
+                    color: theme.glyphon(theme.success),
                     bold: false,
                     max_width: 50.0,
                 });
@@ -705,7 +706,7 @@ pub fn build_changes_panel_labels(
                         text: "x".to_string(),
                         x: panel_x + panel_width - 21.0,
                         y: row_y + 2.0,
-                        color: GlyphonColor::rgb(0, 0, 0),
+                        color: theme.glyphon(theme.background_primary),
                         bold: true,
                         max_width: 14.0,
                     });
@@ -726,9 +727,9 @@ pub fn build_changes_panel_labels(
                 x: branch_btn_x + 6.0,
                 y: commit_y + 8.0,
                 color: if state.git_branch == "--" {
-                    GlyphonColor::rgb(135, 140, 155)
+                    theme.glyphon(theme.foreground_muted)
                 } else {
-                    GlyphonColor::rgb(0, 240, 255) // Retro electric cyan
+                    theme.glyphon(theme.accent_primary)
                 },
                 bold: true,
                 max_width: branch_btn_w - 12.0,
@@ -741,7 +742,7 @@ pub fn build_changes_panel_labels(
                     text: remote_text,
                     x: branch_btn_x + branch_btn_w + 6.0,
                     y: commit_y + 8.0,
-                    color: GlyphonColor::rgb(240, 190, 80), // Amber status
+                    color: theme.glyphon(theme.warning),
                     bold: true,
                     max_width: 50.0,
                 });
@@ -757,9 +758,9 @@ pub fn build_changes_panel_labels(
                 x: fetch_btn_x + 6.0,
                 y: commit_y + 8.0,
                 color: if state.git_branch == "--" {
-                    GlyphonColor::rgb(100, 105, 120)
+                    theme.glyphon(theme.foreground_muted)
                 } else {
-                    GlyphonColor::rgb(200, 210, 230)
+                    theme.glyphon(theme.foreground_primary)
                 },
                 bold: false,
                 max_width: 42.0,
@@ -769,9 +770,9 @@ pub fn build_changes_panel_labels(
                 x: pull_btn_x + 7.0,
                 y: commit_y + 8.0,
                 color: if state.git_branch == "--" {
-                    GlyphonColor::rgb(100, 105, 120)
+                    theme.glyphon(theme.foreground_muted)
                 } else {
-                    GlyphonColor::rgb(200, 210, 230)
+                    theme.glyphon(theme.foreground_primary)
                 },
                 bold: false,
                 max_width: 32.0,
@@ -783,7 +784,7 @@ pub fn build_changes_panel_labels(
                     text: "Enter commit message".to_string(),
                     x: panel_x + 18.0,
                     y: commit_y + 37.0,
-                    color: GlyphonColor::rgb(105, 110, 125),
+                    color: theme.glyphon(theme.foreground_muted),
                     bold: false,
                     max_width: panel_width - 40.0,
                 });
@@ -792,7 +793,7 @@ pub fn build_changes_panel_labels(
                     text: state.commit_message.clone(),
                     x: panel_x + 18.0,
                     y: commit_y + 37.0,
-                    color: GlyphonColor::rgb(240, 245, 255),
+                    color: theme.glyphon(theme.foreground_primary),
                     bold: false,
                     max_width: panel_width - 40.0,
                 });
@@ -803,7 +804,7 @@ pub fn build_changes_panel_labels(
                 text: "Commit Tracked".to_string(),
                 x: panel_x + panel_width - 110.0,
                 y: commit_y + 70.0,
-                color: GlyphonColor::rgb(220, 225, 240),
+                color: theme.glyphon(theme.foreground_primary),
                 bold: true,
                 max_width: 100.0,
             });
@@ -815,7 +816,7 @@ pub fn build_changes_panel_labels(
                 text: format!("Commit History ({} commits)", state.history.len()),
                 x: panel_x + 10.0,
                 y: subheader_y,
-                color: GlyphonColor::rgb(140, 145, 160),
+                color: theme.glyphon(theme.foreground_secondary),
                 bold: false,
                 max_width: panel_width - 20.0,
             });
@@ -839,7 +840,7 @@ pub fn build_changes_panel_labels(
                     text: commit.hash.clone(),
                     x: panel_x + 12.0,
                     y: row_y + 3.0,
-                    color: GlyphonColor::rgb(0, 240, 255), // Electric cyan
+                    color: theme.glyphon(theme.accent_primary),
                     bold: true,
                     max_width: 60.0,
                 });
@@ -849,7 +850,7 @@ pub fn build_changes_panel_labels(
                     text: meta_text,
                     x: panel_x + 76.0,
                     y: row_y + 3.0,
-                    color: GlyphonColor::rgb(130, 140, 160),
+                    color: theme.glyphon(theme.foreground_muted),
                     bold: false,
                     max_width: panel_width - 92.0,
                 });
@@ -859,7 +860,7 @@ pub fn build_changes_panel_labels(
                     text: commit.message.clone(),
                     x: panel_x + 12.0,
                     y: row_y + 22.0,
-                    color: GlyphonColor::rgb(220, 225, 240),
+                    color: theme.glyphon(theme.foreground_primary),
                     bold: false,
                     max_width: panel_width - 28.0,
                 });
@@ -885,9 +886,9 @@ pub fn build_changes_panel_labels(
                 x: pop_x + 8.0,
                 y: row_y,
                 color: if is_current {
-                    GlyphonColor::rgb(0, 240, 255)
+                    theme.glyphon(theme.accent_primary)
                 } else {
-                    GlyphonColor::rgb(220, 225, 240)
+                    theme.glyphon(theme.foreground_primary)
                 },
                 bold: is_current,
                 max_width: pop_w - 16.0,
@@ -1077,14 +1078,52 @@ mod tests {
             600.0,
             [0.0, 1.0, 0.5, 1.0],
             &state,
+            crate::theme::ThemeTokens::default(),
         );
         assert_ne!(quads.len(), 0);
     }
 
     #[test]
+    fn changes_panel_surfaces_and_labels_follow_active_theme_tokens() {
+        let state = populated_state(ChangesTab::Changes);
+        let pitch_black = crate::theme::Theme::pitch_black().tokens();
+        let dracula = crate::theme::Theme::dracula().tokens();
+        let dark_quads = assemble_changes_panel_quads(
+            0.0,
+            0.0,
+            300.0,
+            500.0,
+            pitch_black.rgba(pitch_black.accent_primary),
+            &state,
+            pitch_black,
+        );
+        let dracula_quads = assemble_changes_panel_quads(
+            0.0,
+            0.0,
+            300.0,
+            500.0,
+            dracula.rgba(dracula.accent_primary),
+            &state,
+            dracula,
+        );
+        assert_ne!(dark_quads[0].color, dracula_quads[0].color);
+
+        let dark_labels = build_changes_panel_labels(0.0, 0.0, 300.0, 500.0, &state, pitch_black);
+        let dracula_labels = build_changes_panel_labels(0.0, 0.0, 300.0, 500.0, &state, dracula);
+        assert_ne!(dark_labels[0].color, dracula_labels[0].color);
+    }
+
+    #[test]
     fn build_changes_panel_labels_contains_files_and_buttons() {
         let state = populated_state(ChangesTab::Changes);
-        let labels = build_changes_panel_labels(500.0, 36.0, CHANGES_PANEL_WIDTH, 600.0, &state);
+        let labels = build_changes_panel_labels(
+            500.0,
+            36.0,
+            CHANGES_PANEL_WIDTH,
+            600.0,
+            &state,
+            crate::theme::ThemeTokens::default(),
+        );
         assert_ne!(labels.len(), 0);
         assert!(labels.iter().any(|l| l.text.contains("Changes")));
         assert!(labels.iter().any(|l| l.text.contains("History")));
@@ -1096,7 +1135,14 @@ mod tests {
     #[test]
     fn build_changes_panel_history_labels_renders_commit_hashes() {
         let state = populated_state(ChangesTab::History);
-        let labels = build_changes_panel_labels(500.0, 36.0, CHANGES_PANEL_WIDTH, 600.0, &state);
+        let labels = build_changes_panel_labels(
+            500.0,
+            36.0,
+            CHANGES_PANEL_WIDTH,
+            600.0,
+            &state,
+            crate::theme::ThemeTokens::default(),
+        );
         assert_ne!(labels.len(), 0);
         assert!(labels.iter().any(|l| l.text.contains("abc1234")));
     }
@@ -1280,11 +1326,25 @@ mod tests {
         state.scroll_history(2, 10);
         assert_eq!(state.history_scroll_offset, 3);
 
-        let quads =
-            assemble_changes_panel_quads(500.0, 36.0, 300.0, 500.0, [0.0, 1.0, 0.5, 1.0], &state);
+        let quads = assemble_changes_panel_quads(
+            500.0,
+            36.0,
+            300.0,
+            500.0,
+            [0.0, 1.0, 0.5, 1.0],
+            &state,
+            crate::theme::ThemeTokens::default(),
+        );
         assert!(!quads.is_empty());
 
-        let labels = build_changes_panel_labels(500.0, 36.0, 300.0, 500.0, &state);
+        let labels = build_changes_panel_labels(
+            500.0,
+            36.0,
+            300.0,
+            500.0,
+            &state,
+            crate::theme::ThemeTokens::default(),
+        );
         assert!(!labels.is_empty());
         // First visible commit should be commit #3
         assert!(labels.iter().any(|l| l.text.contains("Commit #3")));

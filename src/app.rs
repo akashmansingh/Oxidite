@@ -3426,6 +3426,7 @@ impl App {
                 geo.content_h,
                 accent_color,
                 &self.changes_panel_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -3728,6 +3729,7 @@ impl App {
                 geo.changes_panel_w,
                 geo.content_h,
                 &self.changes_panel_state,
+                self.config.theme.tokens(),
             ));
         }
 
