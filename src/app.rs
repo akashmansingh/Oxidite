@@ -1993,6 +1993,15 @@ impl App {
         clippy::cast_precision_loss
     )]
     pub fn create_tab(&mut self, title: Option<String>) {
+        self.create_tab_in_directory(title, None);
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn create_tab_in_directory(&mut self, title: Option<String>, cwd: Option<&std::path::Path>) {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
 
@@ -2018,7 +2027,7 @@ impl App {
                 px_h: (rows as f32 * self.cell_metrics.cell_height) as u16,
             };
 
-            if let Ok((writer, reader)) = crate::pty::spawn(cmd, pty_size) {
+            if let Ok((writer, reader)) = crate::pty::spawn_in_directory(cmd, pty_size, cwd) {
                 let writer = Arc::new(Mutex::new(writer));
                 spawn_tab_pty_forwarder(tab_id, reader, Arc::clone(&writer), proxy.clone());
                 pty_writer = Some(writer);
@@ -2090,6 +2099,12 @@ impl App {
         if !self.workspace_manager.switch(index, &mut self.tabs) {
             return false;
         }
+        if self.tabs.is_empty() {
+            let root = self.workspace_manager.workspaces()[index]
+                .root_directory
+                .clone();
+            self.create_tab_in_directory(None, Some(&root));
+        }
         self.active_tab_index = self
             .workspace_tab_indices
             .get(index)
@@ -2157,8 +2172,37 @@ impl App {
         true
     }
 
-    /// Closes a workspace other than the last remaining workspace and stops its PTYs.
+    /// Closes sessions in a workspace while keeping the workspace registered for later reopening.
     pub fn close_workspace(&mut self, index: usize) -> bool {
+        if index >= self.workspace_manager.workspaces().len()
+            || self.workspace_manager.workspaces().len() <= 1
+        {
+            return false;
+        }
+        if index == self.workspace_manager.active_index() {
+            let replacement = if index + 1 < self.workspace_manager.workspaces().len() {
+                index + 1
+            } else {
+                index - 1
+            };
+            if !self.select_workspace(replacement) {
+                return false;
+            }
+        }
+        let Some(workspace) = self.workspace_manager.workspaces_mut().get_mut(index) else {
+            return false;
+        };
+        let Some(tabs) = workspace.sessions.as_mut() else {
+            return false;
+        };
+        Self::stop_workspace_tabs(std::mem::take(tabs));
+        self.workspace_tab_indices[index] = 0;
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Removes a workspace registration and stops its sessions without touching project files.
+    pub fn remove_workspace(&mut self, index: usize) -> bool {
         if index >= self.workspace_manager.workspaces().len()
             || self.workspace_manager.workspaces().len() <= 1
         {
@@ -2177,6 +2221,13 @@ impl App {
         let Some(tabs) = self.workspace_manager.remove_inactive(index) else {
             return false;
         };
+        Self::stop_workspace_tabs(tabs);
+        self.workspace_tab_indices.remove(index);
+        self.persist_workspace_state();
+        true
+    }
+
+    fn stop_workspace_tabs(tabs: Vec<Tab>) {
         for tab in tabs {
             for pane in tab.panes {
                 if let Some(writer) = pane.pty_writer
@@ -2186,23 +2237,30 @@ impl App {
                 }
             }
         }
-        self.workspace_tab_indices.remove(index);
-        self.persist_workspace_state();
-        true
     }
 
     /// Opens a confirmation before closing a workspace and terminating its sessions.
     pub fn request_close_workspace(&mut self, index: usize) {
+        self.request_workspace_confirmation(index, false);
+    }
+
+    /// Asks for confirmation before removing a workspace registration from Oxidite.
+    pub fn request_remove_workspace(&mut self, index: usize) {
+        self.request_workspace_confirmation(index, true);
+    }
+
+    fn request_workspace_confirmation(&mut self, index: usize, remove: bool) {
         let Some(workspace) = self.workspace_manager.workspaces().get(index) else {
             return;
         };
         if self.workspace_manager.workspaces().len() <= 1 {
             return;
         }
-        self.tab_close_confirm = Some(crate::tab::CloseConfirmState::for_workspace(
-            index,
-            workspace.name.clone(),
-        ));
+        self.tab_close_confirm = Some(if remove {
+            crate::tab::CloseConfirmState::for_remove_workspace(index, workspace.name.clone())
+        } else {
+            crate::tab::CloseConfirmState::for_workspace(index, workspace.name.clone())
+        });
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -2680,6 +2738,10 @@ impl App {
                 self.request_close_workspace(index);
                 None
             }
+            (ContextTarget::Workspace(index), Action::RemoveWorkspace) => {
+                self.request_remove_workspace(index);
+                None
+            }
             (ContextTarget::Session(index), Action::Open) => {
                 self.select_tab(index);
                 None
@@ -2730,7 +2792,11 @@ impl App {
 
     fn confirm_close_target(&mut self, confirm: &crate::tab::CloseConfirmState) {
         if let Some(workspace_index) = confirm.workspace_index {
-            self.close_workspace(workspace_index);
+            if confirm.remove_workspace {
+                self.remove_workspace(workspace_index);
+            } else {
+                self.close_workspace(workspace_index);
+            }
         } else {
             self.close_tab(confirm.tab_index);
         }
@@ -4544,8 +4610,13 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     None
                 };
-                self.context_menu =
-                    target.map(|target| crate::context_menu::ContextMenuState::new(target, x, y));
+                self.context_menu = target.map(|target| {
+                    let can_close_workspace =
+                        !matches!(target, crate::context_menu::ContextTarget::Workspace(_))
+                            || self.workspace_manager.workspaces().len() > 1;
+                    crate::context_menu::ContextMenuState::new(target, x, y)
+                        .with_workspace_close_allowed(can_close_workspace)
+                });
                 win.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -5824,7 +5895,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_close_waits_for_confirmation_then_unregisters_workspace() {
+    fn workspace_close_waits_for_confirmation_and_keeps_registration() {
         let mut app = App::new(None, Terminal::new(80, 24), None);
         app.create_workspace("Second".into(), std::env::temp_dir());
         app.request_close_workspace(1);
@@ -5835,8 +5906,38 @@ mod tests {
 
         app.tab_close_confirm = None;
         app.confirm_close_target(&confirm);
-        assert_eq!(app.workspace_manager.workspaces().len(), 1);
+        assert_eq!(app.workspace_manager.workspaces().len(), 2);
+        assert!(
+            app.workspace_manager.workspaces()[1]
+                .sessions
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+        );
         assert!(app.tab_close_confirm.is_none());
+
+        assert!(app.select_workspace(1));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "opening a closed workspace starts a fresh terminal"
+        );
+    }
+
+    #[test]
+    fn workspace_remove_confirmation_unregisters_without_deleting_directory() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        let root = std::env::temp_dir();
+        app.create_workspace("Second".into(), root.clone());
+        app.request_remove_workspace(1);
+        let confirm = app.tab_close_confirm.clone().expect("remove prompt opened");
+        assert!(confirm.remove_workspace);
+        assert_eq!(confirm.dialog_title(), "Remove Workspace?");
+        assert!(root.is_dir());
+
+        app.tab_close_confirm = None;
+        app.confirm_close_target(&confirm);
+        assert_eq!(app.workspace_manager.workspaces().len(), 1);
+        assert!(root.is_dir(), "remove only unregisters the directory");
     }
 
     #[test]

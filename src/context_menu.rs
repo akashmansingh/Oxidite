@@ -31,6 +31,8 @@ pub enum ContextAction {
     CloseSession,
     /// Ask for confirmation before unregistering and stopping a workspace's sessions.
     CloseWorkspace,
+    /// Ask for confirmation before removing its registration and stopping its sessions.
+    RemoveWorkspace,
 }
 
 /// Popup placement and target for a navigation context menu.
@@ -44,6 +46,8 @@ pub struct ContextMenuState {
     pub y: f32,
     /// Keyboard-selected action row.
     pub selected: usize,
+    /// Whether this workspace can be closed or removed without leaving Oxidite empty.
+    pub allow_workspace_close: bool,
 }
 
 /// Geometry for a viewport-clamped context menu.
@@ -59,6 +63,8 @@ pub struct ContextMenuLayout {
     pub height: f32,
     /// Height of each action row.
     pub row_height: f32,
+    /// Whether this workspace can be closed or removed.
+    pub allow_workspace_close: bool,
 }
 
 impl ContextMenuState {
@@ -70,13 +76,21 @@ impl ContextMenuState {
             x,
             y,
             selected: 0,
+            allow_workspace_close: true,
         }
+    }
+
+    /// Controls whether close/remove actions are offered for the last workspace.
+    #[must_use]
+    pub const fn with_workspace_close_allowed(mut self, allowed: bool) -> Self {
+        self.allow_workspace_close = allowed;
+        self
     }
 
     /// Moves keyboard focus through the available actions.
     #[must_use]
     pub fn move_selection(mut self, delta: isize) -> Self {
-        let count = items(self.target).len();
+        let count = items(self.target, self.allow_workspace_close).len();
         if count > 0 {
             let current = isize::try_from(self.selected).unwrap_or(0);
             let count = isize::try_from(count).unwrap_or(isize::MAX);
@@ -88,7 +102,7 @@ impl ContextMenuState {
     /// Returns the currently selected keyboard action.
     #[must_use]
     pub fn selected_action(self) -> Option<ContextAction> {
-        items(self.target)
+        items(self.target, self.allow_workspace_close)
             .get(self.selected)
             .map(|(action, _)| *action)
     }
@@ -98,7 +112,7 @@ impl ContextMenuState {
     #[allow(clippy::cast_precision_loss)]
     pub fn layout(self, width: f32, height: f32, scale: f32) -> ContextMenuLayout {
         let scale = scale.max(0.5);
-        let item_count = items(self.target).len();
+        let item_count = items(self.target, self.allow_workspace_close).len();
         let padding = (4.0 * scale).min(height.max(0.0) / 2.0);
         let row_height =
             (28.0 * scale).min(((height - 2.0 * padding).max(1.0) / item_count as f32).max(1.0));
@@ -112,6 +126,7 @@ impl ContextMenuState {
             width: menu_width,
             height: menu_height,
             row_height,
+            allow_workspace_close: self.allow_workspace_close,
         }
     }
 }
@@ -125,7 +140,9 @@ impl ContextMenuLayout {
             return None;
         }
         let index = ((y - self.y - 4.0) / self.row_height).floor() as usize;
-        items(target).get(index).map(|(action, _)| *action)
+        items(target, self.allow_workspace_close)
+            .get(index)
+            .map(|(action, _)| *action)
     }
 
     /// Builds themed popup surfaces with an optional hovered action row.
@@ -145,7 +162,7 @@ impl ContextMenuLayout {
             theme.rgba(theme.background_elevated),
         )
         .to_vec();
-        for (index, (action, _)) in items(target).iter().enumerate() {
+        for (index, (action, _)) in items(target, self.allow_workspace_close).iter().enumerate() {
             if hovered == Some(*action) {
                 quads.extend_from_slice(&build_quad_vertices(
                     self.x + 4.0,
@@ -170,7 +187,7 @@ impl ContextMenuLayout {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn labels(self, target: ContextTarget, theme: ThemeTokens) -> Vec<TabLabel> {
-        items(target)
+        items(target, self.allow_workspace_close)
             .iter()
             .enumerate()
             .map(|(index, (_, title))| TabLabel {
@@ -185,14 +202,24 @@ impl ContextMenuLayout {
     }
 }
 
-fn items(target: ContextTarget) -> &'static [(ContextAction, &'static str)] {
+fn items(
+    target: ContextTarget,
+    allow_workspace_close: bool,
+) -> &'static [(ContextAction, &'static str)] {
     match target {
-        ContextTarget::Workspace(_) => &[
+        ContextTarget::Workspace(_) if allow_workspace_close => &[
             (ContextAction::Open, "Open Workspace"),
             (ContextAction::NewTerminal, "New Terminal"),
             (ContextAction::Rename, "Rename Workspace"),
             (ContextAction::RevealDirectory, "Reveal Folder"),
             (ContextAction::CloseWorkspace, "Close Workspace"),
+            (ContextAction::RemoveWorkspace, "Remove Workspace"),
+        ],
+        ContextTarget::Workspace(_) => &[
+            (ContextAction::Open, "Open Workspace"),
+            (ContextAction::NewTerminal, "New Terminal"),
+            (ContextAction::Rename, "Rename Workspace"),
+            (ContextAction::RevealDirectory, "Reveal Folder"),
         ],
         ContextTarget::Session(_) => &[
             (ContextAction::Open, "Open Session"),
@@ -234,10 +261,11 @@ mod tests {
         let target = ContextTarget::Workspace(1);
         let menu = ContextMenuState::new(target, 10.0, 10.0).layout(800.0, 600.0, 1.0);
         let labels = menu.labels(target, ThemeTokens::default());
-        assert_eq!(labels.len(), 5);
+        assert_eq!(labels.len(), 6);
         assert!(labels.iter().any(|label| label.text == "Reveal Folder"));
         assert!(labels.iter().any(|label| label.text == "Rename Workspace"));
         assert!(labels.iter().any(|label| label.text == "Close Workspace"));
+        assert!(labels.iter().any(|label| label.text == "Remove Workspace"));
         assert!(
             menu.quads(target, Some(ContextAction::Open), ThemeTokens::default())
                 .len()
@@ -247,7 +275,16 @@ mod tests {
             ContextMenuState::new(target, 10.0, 10.0)
                 .move_selection(-1)
                 .selected_action(),
-            Some(ContextAction::CloseWorkspace)
+            Some(ContextAction::RemoveWorkspace)
+        );
+        let last_workspace =
+            ContextMenuState::new(target, 10.0, 10.0).with_workspace_close_allowed(false);
+        assert_eq!(
+            last_workspace
+                .layout(800.0, 600.0, 1.0)
+                .labels(target, ThemeTokens::default())
+                .len(),
+            4
         );
     }
 

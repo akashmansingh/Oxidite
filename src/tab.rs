@@ -1492,6 +1492,8 @@ pub struct CloseConfirmState {
     pub confirm_selected: bool,
     /// Workspace index when confirmation closes a workspace instead of one session.
     pub workspace_index: Option<usize>,
+    /// Whether confirmation removes workspace registration rather than only closing sessions.
+    pub remove_workspace: bool,
 }
 
 impl CloseConfirmState {
@@ -1503,6 +1505,7 @@ impl CloseConfirmState {
             title,
             confirm_selected: true,
             workspace_index: None,
+            remove_workspace: false,
         }
     }
 
@@ -1514,13 +1517,24 @@ impl CloseConfirmState {
             title,
             confirm_selected: true,
             workspace_index: Some(workspace_index),
+            remove_workspace: false,
         }
+    }
+
+    /// Creates a confirmation state for removing a workspace registration without deleting files.
+    #[must_use]
+    pub fn for_remove_workspace(workspace_index: usize, title: String) -> Self {
+        let mut state = Self::for_workspace(workspace_index, title);
+        state.remove_workspace = true;
+        state
     }
 
     /// Returns a title appropriate for the close target.
     #[must_use]
     pub const fn dialog_title(&self) -> &'static str {
-        if self.workspace_index.is_some() {
+        if self.remove_workspace {
+            "Remove Workspace?"
+        } else if self.workspace_index.is_some() {
             "Close Workspace?"
         } else {
             "Close Active Session?"
@@ -1690,7 +1704,9 @@ pub fn build_close_confirm_labels(
     });
 
     // Subtitle warning
-    let subtitle = if state.workspace_index.is_some() {
+    let subtitle = if state.remove_workspace {
+        format!("Remove workspace '{}' from Oxidite?", state.title)
+    } else if state.workspace_index.is_some() {
         format!(
             "Close workspace '{}' and its terminal sessions?",
             state.title
@@ -1708,7 +1724,10 @@ pub fn build_close_confirm_labels(
     });
 
     labels.push(TabLabel {
-        text: if state.workspace_index.is_some() {
+        text: if state.remove_workspace {
+            "This removes its registration and stops its sessions; project files stay on disk."
+                .to_string()
+        } else if state.workspace_index.is_some() {
             "This removes the workspace from Oxidite and stops its sessions; project files stay on disk.".to_string()
         } else {
             "Closing this session will terminate its child processes.".to_string()
