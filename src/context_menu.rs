@@ -21,6 +21,8 @@ pub enum ContextAction {
     NewTerminal,
     /// Rename the selected workspace or terminal session.
     Rename,
+    /// Start an independent terminal session in the selected session's directory.
+    DuplicateSession,
     /// Open a new right-side terminal pane in the selected session.
     SplitRight,
     /// Open a new lower terminal pane in the selected session.
@@ -224,6 +226,7 @@ fn items(
         ContextTarget::Session(_) => &[
             (ContextAction::Open, "Open Session"),
             (ContextAction::Rename, "Rename Session"),
+            (ContextAction::DuplicateSession, "Duplicate Session"),
             (ContextAction::SplitRight, "Split Right"),
             (ContextAction::SplitDown, "Split Down"),
             (ContextAction::RevealDirectory, "Reveal Working Directory"),
@@ -250,9 +253,14 @@ mod tests {
             menu.hit_test(
                 target,
                 menu.x + 8.0,
-                menu.y + 4.0 + 5.0 * menu.row_height + 1.0
+                menu.y + 4.0 + 6.0 * menu.row_height + 1.0
             ),
             Some(ContextAction::CloseSession)
+        );
+        assert!(
+            menu.labels(target, ThemeTokens::default())
+                .iter()
+                .any(|label| label.text == "Duplicate Session")
         );
     }
 

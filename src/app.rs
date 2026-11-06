@@ -2035,9 +2035,35 @@ impl App {
         }
 
         let tab_title = title.unwrap_or_else(|| format!("Tab {}", tab_id + 1));
-        let tab = Tab::new(tab_id, tab_title, new_terminal, pty_writer);
+        let mut tab = Tab::new(tab_id, tab_title, new_terminal, pty_writer);
+        tab.cwd = cwd.map(std::path::Path::to_path_buf);
+        tab.sync_to_active_pane();
         self.tabs.push(tab);
         self.select_tab(self.tabs.len() - 1);
+    }
+
+    /// Starts an independent configured-shell session using an existing session's directory.
+    pub fn duplicate_terminal_session(&mut self, index: usize) -> bool {
+        let Some(source) = self.tabs.get(index) else {
+            return false;
+        };
+        let title = format!("{} Copy", source.display_title());
+        let cwd = source
+            .detect_cwd()
+            .or_else(|| source.cwd.clone())
+            .unwrap_or_else(|| {
+                self.workspace_manager.workspaces()[self.workspace_manager.active_index()]
+                    .root_directory
+                    .clone()
+            });
+        self.create_tab_in_directory(Some(title.clone()), Some(&cwd));
+        if let Some(tab) = self.tabs.last_mut() {
+            tab.set_custom_title(Some(title));
+            tab.cwd = Some(cwd);
+            tab.sync_to_active_pane();
+        }
+        self.persist_workspace_state();
+        true
     }
 
     /// Creates a new workspace with an independent shell and terminal tab.
@@ -2766,6 +2792,10 @@ impl App {
                     self.tab_rename_state =
                         Some(crate::tab::TabRenameState::new(index, tab.display_title()));
                 }
+                None
+            }
+            (ContextTarget::Session(index), Action::DuplicateSession) => {
+                self.duplicate_terminal_session(index);
                 None
             }
             (ContextTarget::Session(index), Action::SplitRight | Action::SplitDown) => {
@@ -5957,6 +5987,22 @@ mod tests {
 
         assert_eq!(app.workspace_manager.active_index(), 0);
         assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_session_starts_a_distinct_tab_in_the_same_directory() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        let directory = std::env::temp_dir();
+        app.tabs[0].cwd = Some(directory.clone());
+        let original_id = app.tabs[0].id;
+
+        assert!(app.duplicate_terminal_session(0));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_ne!(app.tabs[1].id, original_id);
+        assert_eq!(app.tabs[1].cwd.as_ref(), Some(&directory));
+        assert_eq!(app.tabs[1].custom_title.as_deref(), Some("Tab 1 Copy"));
+        assert_eq!(app.active_tab_index, 1);
     }
 
     #[test]
