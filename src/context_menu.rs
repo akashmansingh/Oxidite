@@ -94,19 +94,17 @@ impl ContextMenuState {
     #[allow(clippy::cast_precision_loss)]
     pub fn layout(self, width: f32, height: f32, scale: f32) -> ContextMenuLayout {
         let scale = scale.max(0.5);
-        let row_height = 28.0 * scale;
-        let menu_width = 212.0 * scale;
         let item_count = items(self.target).len();
-        let menu_height = item_count as f32 * row_height + 8.0 * scale;
+        let padding = (4.0 * scale).min(height.max(0.0) / 2.0);
+        let row_height =
+            (28.0 * scale).min(((height - 2.0 * padding).max(1.0) / item_count as f32).max(1.0));
+        let menu_width = (212.0 * scale).min((width - 8.0 * scale).max(0.0));
+        let menu_height = (item_count as f32 * row_height + 2.0 * padding).min(height.max(0.0));
+        let x_max = (width - menu_width).max(0.0);
+        let y_max = (height - menu_height).max(0.0);
         ContextMenuLayout {
-            x: self.x.clamp(
-                4.0 * scale,
-                (width - menu_width - 4.0 * scale).max(4.0 * scale),
-            ),
-            y: self.y.clamp(
-                4.0 * scale,
-                (height - menu_height - 4.0 * scale).max(4.0 * scale),
-            ),
+            x: self.x.clamp((4.0 * scale).min(x_max), x_max),
+            y: self.y.clamp((4.0 * scale).min(y_max), y_max),
             width: menu_width,
             height: menu_height,
             row_height,
@@ -242,5 +240,15 @@ mod tests {
                 .selected_action(),
             Some(ContextAction::RevealDirectory)
         );
+    }
+
+    #[test]
+    fn menu_adapts_to_narrow_and_short_viewports() {
+        let target = ContextTarget::Session(0);
+        let layout = ContextMenuState::new(target, 90.0, 70.0).layout(100.0, 80.0, 1.0);
+        assert!(layout.x >= 0.0 && layout.x + layout.width <= 100.0);
+        assert!(layout.y >= 0.0 && layout.y + layout.height <= 80.0);
+        assert!(layout.width < 212.0);
+        assert!(layout.height <= 80.0);
     }
 }

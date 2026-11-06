@@ -2647,7 +2647,7 @@ impl App {
                 None
             }
             (ContextTarget::Workspace(index), Action::NewTerminal) => {
-                if self.select_workspace(index) {
+                if index == self.workspace_manager.active_index() || self.select_workspace(index) {
                     self.create_tab(None);
                 }
                 None
