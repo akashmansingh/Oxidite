@@ -52,6 +52,7 @@ async fn test_websocket_origin_rejection() {
         metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-security-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
     };
 
     let app = create_app(state);
@@ -105,6 +106,7 @@ async fn test_per_user_ownership_enforcement() {
         metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-security-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
     };
 
     let app = create_app(state);

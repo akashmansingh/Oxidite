@@ -54,6 +54,7 @@ async fn test_prometheus_metrics_and_readiness_endpoints() {
         metrics: metrics.clone(),
         node_id: "node-obs-1".into(),
         directory: Arc::new(part_dir.clone()),
+        devices: oxidite_server::devices::DeviceStore::default(),
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

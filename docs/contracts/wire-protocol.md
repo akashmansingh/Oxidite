@@ -15,10 +15,11 @@ This document defines the WebSocket wire protocol between the Oxidite browser cl
    ```rust
    ClientMsg::Hello {
        protocol_version: 1,
-       token: "<bearer-token>",
+       token: "<token>",
    }
    ```
-2. The server verifies `protocol_version == 1` and matches the token against the authorized session token.
+   The `token` field accepts either an opaque device token (`od1.<device-id>.<secret>`), an authenticated session token, or a one-time enrollment grant.
+2. The server verifies `protocol_version == 1` and authenticates the token in constant time. Malformed tokens are rejected generically without leaking device existence.
 3. If successful, the server replies with `ServerMsg::Welcome`:
    ```rust
    ServerMsg::Welcome {

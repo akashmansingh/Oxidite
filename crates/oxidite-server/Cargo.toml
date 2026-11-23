@@ -37,6 +37,7 @@ bytes = "1.7"
 rand = "0.8"
 futures-util = "0.3"
 mime_guess = "2.0"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

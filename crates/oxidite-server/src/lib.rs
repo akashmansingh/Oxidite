@@ -3,6 +3,7 @@
 #![allow(clippy::collapsible_if, clippy::useless_conversion)]
 
 pub mod auth;
+pub mod devices;
 pub mod metrics;
 pub mod routing;
 pub mod security;
@@ -50,6 +51,7 @@ pub struct AppState {
     pub metrics: metrics::MetricsCollector,
     pub node_id: String,
     pub directory: std::sync::Arc<dyn oxidite_directory::SessionDirectory>,
+    pub devices: devices::DeviceStore,
 }
 
 #[derive(Serialize)]
@@ -94,6 +96,10 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/:id/share", post(create_share_handler))
         .route("/api/shares/:token", delete(revoke_share_handler))
+        .route("/api/devices/enroll", post(enroll_device_handler))
+        .route("/api/devices/grant", post(issue_device_grant_handler))
+        .route("/api/devices", get(list_devices_handler))
+        .route("/api/devices/:id", delete(revoke_device_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(middleware::from_fn_with_state(
@@ -192,11 +198,13 @@ async fn create_share_handler(
     };
 
     let user_id = if let Some(h) = auth_header {
-        let token = h.strip_prefix("Bearer ").unwrap_or(h);
-        if token == state.token || token == "your-custom-token" || token == "oxidite-secret" {
-            "admin".to_string()
+        let token = h.strip_prefix("Bearer ").unwrap_or(h).trim();
+        if let Ok(principal) = state.devices.authenticate(token).await {
+            principal.user_id
         } else if let Some(uid) = state.auth.validate_token(token) {
             uid
+        } else if token == state.token && !token.is_empty() {
+            "admin".to_string()
         } else {
             return Err(StatusCode::UNAUTHORIZED);
         }
@@ -238,6 +246,160 @@ async fn revoke_share_handler(
     }
 }
 
+#[derive(Deserialize)]
+pub struct EnrollDeviceRequest {
+    pub grant: String,
+    pub label: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct EnrollDeviceResponse {
+    pub device_id: String,
+    pub user_id: String,
+    pub token: String,
+    pub label: String,
+}
+
+#[derive(Deserialize)]
+pub struct DeviceGrantRequest {
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct DeviceGrantResponse {
+    pub grant: String,
+    pub expires_in_secs: u64,
+}
+
+async fn enroll_device_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<EnrollDeviceRequest>,
+) -> Result<Json<EnrollDeviceResponse>, StatusCode> {
+    let label = payload
+        .label
+        .unwrap_or_else(|| "Browser Device".to_string());
+    match state.devices.enroll(&payload.grant, &label).await {
+        Ok(res) => {
+            let dev_id_str = res.device_id.to_string();
+            AuditLogger::record(AuditEvent::DeviceEnrolled {
+                device_id: &dev_id_str,
+                user: &res.user_id,
+            });
+            Ok(Json(EnrollDeviceResponse {
+                device_id: res.device_id.to_string(),
+                user_id: res.user_id,
+                token: res.token,
+                label: res.label,
+            }))
+        }
+        Err(_) => Err(StatusCode::UNAUTHORIZED),
+    }
+}
+
+async fn issue_device_grant_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<DeviceGrantRequest>,
+) -> Result<Json<DeviceGrantResponse>, StatusCode> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let user_id = if let Some(h) = auth_header {
+        let token = h.strip_prefix("Bearer ").unwrap_or(h).trim();
+        if let Ok(principal) = state.devices.authenticate(token).await {
+            principal.user_id
+        } else if let Some(uid) = state.auth.validate_token(token) {
+            uid
+        } else if token == state.token && !token.is_empty() {
+            "admin".to_string()
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let ttl_secs = payload.ttl_secs.unwrap_or(300);
+    match state
+        .devices
+        .issue_enrollment_grant(&user_id, Duration::from_secs(ttl_secs))
+        .await
+    {
+        Ok(grant) => Ok(Json(DeviceGrantResponse {
+            grant,
+            expires_in_secs: ttl_secs,
+        })),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn list_devices_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<devices::DeviceInfo>>, StatusCode> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let user_id = if let Some(h) = auth_header {
+        let token = h.strip_prefix("Bearer ").unwrap_or(h).trim();
+        if let Ok(principal) = state.devices.authenticate(token).await {
+            principal.user_id
+        } else if let Some(uid) = state.auth.validate_token(token) {
+            uid
+        } else if token == state.token && !token.is_empty() {
+            "admin".to_string()
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    match state.devices.list_for_user(&user_id).await {
+        Ok(devices) => Ok(Json(devices)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn revoke_device_handler(
+    State(state): State<AppState>,
+    Path(device_id_str): Path<String>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let user_id = if let Some(h) = auth_header {
+        let token = h.strip_prefix("Bearer ").unwrap_or(h).trim();
+        if let Ok(principal) = state.devices.authenticate(token).await {
+            principal.user_id
+        } else if let Some(uid) = state.auth.validate_token(token) {
+            uid
+        } else if token == state.token && !token.is_empty() {
+            "admin".to_string()
+        } else {
+            return StatusCode::UNAUTHORIZED;
+        }
+    } else {
+        return StatusCode::UNAUTHORIZED;
+    };
+
+    let device_id = match uuid::Uuid::parse_str(&device_id_str) {
+        Ok(id) => id,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+
+    match state.devices.revoke(&user_id, device_id).await {
+        Ok(()) => StatusCode::NO_CONTENT,
+        Err(devices::DeviceAuthError::NotFound) => StatusCode::NOT_FOUND,
+        Err(devices::DeviceAuthError::Unauthorized) => StatusCode::UNAUTHORIZED,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 async fn list_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -248,19 +410,17 @@ async fn list_sessions(
 
     let user_id = if let Some(h) = auth_header {
         let token = h.strip_prefix("Bearer ").unwrap_or(h).trim();
-        if token == state.token
-            || token == "your-custom-token"
-            || token == "oxidite-secret"
-            || token.is_empty()
-        {
-            "admin".to_string()
+        if let Ok(principal) = state.devices.authenticate(token).await {
+            principal.user_id
         } else if let Some(uid) = state.auth.validate_token(token) {
             uid
+        } else if token == state.token && !token.is_empty() {
+            "admin".to_string()
         } else {
             return Err(StatusCode::UNAUTHORIZED);
         }
     } else {
-        "admin".to_string()
+        return Err(StatusCode::UNAUTHORIZED);
     };
 
     let all_ids = state.manager.list();
@@ -381,11 +541,14 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                     }
 
                     // Authenticate token
-                    if token == state.token
-                        || token == "your-custom-token"
-                        || token == "oxidite-secret"
-                        || token.is_empty()
-                    {
+                    if let Ok(principal) = state.devices.authenticate(&token).await {
+                        let dev_id_str = principal.device_id.to_string();
+                        AuditLogger::record(AuditEvent::DeviceAuthenticated {
+                            device_id: &dev_id_str,
+                            user: &principal.user_id,
+                        });
+                        (principal.user_id, None)
+                    } else if token == state.token && !token.is_empty() {
                         ("admin".to_string(), None)
                     } else if token.starts_with("share_") {
                         if let Some((sid, mode)) = state.shares.validate_share(&token) {

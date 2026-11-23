@@ -56,11 +56,11 @@
 
 **Interfaces:** `DeviceStore::{issue_enrollment_grant,enroll,authenticate,revoke,list_for_user}` and `Principal { user_id, device_id, role }`; accepted token format `od1.<uuid>.<secret>`.
 
-- [ ] Verify compatible pinned `sqlx` SQLite version; write RED tests for independent devices, generic malformed rejection, owner isolation, revocation, and redacted audit data.
-- [ ] Run `cargo test -p oxidite-server --test device_auth`; confirm RED.
-- [ ] Implement additive SQLite records, Argon2id hashes, one-use grants, and principal authorization; remove static development-token bypasses in device mode.
-- [ ] Update contracts; rerun focused test; confirm GREEN.
-- [ ] Commit `feat(server): add durable device credentials and enrollment`.
+- [x] Verify compatible pinned `sqlx` SQLite version; write RED tests for independent devices, generic malformed rejection, owner isolation, revocation, and redacted audit data.
+- [x] Run `cargo test -p oxidite-server --test device_auth`; confirm RED.
+- [x] Implement additive SQLite records, Argon2id hashes, one-use grants, and principal authorization; remove static development-token bypasses in device mode.
+- [x] Update contracts; rerun focused test; confirm GREEN.
+- [x] Commit `feat(server): add durable device credentials and enrollment`.
 
 ### Task 4: Build browser vault and PIN unlock
 

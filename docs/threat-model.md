@@ -57,5 +57,12 @@ A browser-accessible terminal platform is inherently an endpoint capable of exec
 - Per-user session limits enforced on `Create`.
 
 ### 3.7 Audit Logging Invariant
-- All access events (`login`, `session_create`, `session_attach`, `session_terminate`, `security_violation`) are recorded through `AuditLogger`.
-- Keystrokes, passwords, terminal output bytes, tokens, and private keys NEVER reach logs or tracing subscribers.
+- All access events (`login`, `session_create`, `session_attach`, `session_terminate`, `security_violation`, `device_enrolled`, `device_authenticated`) are recorded through `AuditLogger`.
+- Keystrokes, passwords, terminal output bytes, tokens, secrets, and private keys NEVER reach logs or tracing subscribers.
+
+### 3.8 Durable Device Credentials & Revocation
+- Devices authenticate with versioned opaque credentials (`od1.<device-id>.<secret>`).
+- Credentials generate 256 bits of CSPRNG entropy; raw secrets are never persisted and are stored solely as Argon2id hashes in SQLite.
+- Enrollment requires single-use, short-lived grants; loopback startup tokens act strictly as one-time bootstrap administrator grants.
+- Rejection of invalid tokens executes dummy hash evaluations to guarantee constant-time responses without disclosing device existence.
+- Revocation invalidates credentials immediately on the local node.

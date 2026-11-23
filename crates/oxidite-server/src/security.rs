@@ -72,6 +72,14 @@ pub enum AuditEvent<'a> {
         session_id: &'a str,
         user: &'a str,
     },
+    DeviceEnrolled {
+        device_id: &'a str,
+        user: &'a str,
+    },
+    DeviceAuthenticated {
+        device_id: &'a str,
+        user: &'a str,
+    },
     SecurityViolation {
         reason: &'a str,
         remote_ip: &'a str,
@@ -107,6 +115,12 @@ impl AuditLogger {
             }
             AuditEvent::SessionTerminated { session_id, user } => {
                 info!(target: "audit", action = "terminate_session", session_id, user);
+            }
+            AuditEvent::DeviceEnrolled { device_id, user } => {
+                info!(target: "audit", action = "device_enrolled", device_id, user);
+            }
+            AuditEvent::DeviceAuthenticated { device_id, user } => {
+                info!(target: "audit", action = "device_authenticated", device_id, user);
             }
             AuditEvent::SecurityViolation { reason, remote_ip } => {
                 info!(target: "audit", action = "security_violation", reason, remote_ip);

@@ -23,6 +23,11 @@ async fn main() -> Result<()> {
     });
 
     let static_dir = std::env::var("OXIDITE_WEB_DIR").unwrap_or_else(|_| "web/dist".into());
+    let devices = oxidite_server::devices::DeviceStore::open("oxidite.db")
+        .await
+        .unwrap_or_else(|_| oxidite_server::devices::DeviceStore::default());
+    devices.register_bootstrap_grant(&token, "admin");
+
     let state = AppState {
         manager: SessionManager::new(),
         token,
@@ -35,6 +40,7 @@ async fn main() -> Result<()> {
         metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-gateway-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices,
     };
 
     let port = std::env::var("OXIDITE_PORT")
