@@ -172,6 +172,7 @@ pub enum ClientMsg {
     Ping {
         nonce: u64,
     },
+    TakeoverWriter,
     Detach,
     Kill,
 }
@@ -217,6 +218,11 @@ pub enum ServerMsg {
     },
     Pong {
         nonce: u64,
+    },
+    Presence {
+        session: SessionId,
+        writer_id: Option<String>,
+        viewers_count: usize,
     },
     Error {
         code: ErrorCode,
