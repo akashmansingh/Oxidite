@@ -53,6 +53,7 @@ async fn test_attach_replay_within_buffer() {
         .send(ActorCmd::Attach {
             mode: AttachMode::Writer,
             last_offset: Some(6),
+            client_id: None,
             resp: resp_tx,
         })
         .await
