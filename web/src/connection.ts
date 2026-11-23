@@ -91,6 +91,9 @@ export class Connection {
         const b = bytesOf(m.bytes), end = (m.offset as number) + b.length;
         this.offset = end;
         this.h.output(b, () => this.ackTo(end));
+        if (b.includes(0x1b) && new TextDecoder().decode(b).includes("\x1b[6n")) {
+          this.input(new TextEncoder().encode("\x1b[1;1R"));
+        }
         break;
       }
       case "State": this.h.state(m.state as SessionState); break;

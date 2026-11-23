@@ -295,6 +295,12 @@ impl SessionActor {
                 Some(event) = backend_events.recv(), if self.writer_unacked_bytes < self.high_watermark => {
                     match event {
                         BackendEvent::Output(bytes) => {
+                            // If ConPTY queries cursor position report (ESC [ 6 n),
+                            // reply immediately so PowerShell does not block on startup!
+                            if bytes.windows(4).any(|w| w == b"\x1b[6n") {
+                                let _ = self.backend.write(b"\x1b[1;1R").await;
+                            }
+
                             let start_offset = self.replay.head_offset();
                             self.replay.append(&bytes);
                             // Feed into VT parser / terminal
