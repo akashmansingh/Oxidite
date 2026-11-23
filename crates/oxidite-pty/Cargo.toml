@@ -1,0 +1,19 @@
+[package]
+name = "oxidite-pty"
+version = "0.1.0"
+edition = "2024"
+description = "Blocking PTY abstraction shared by Oxidite desktop and server"
+license = "MIT"
+
+[dependencies]
+portable-pty = "0.9"
+thiserror = "2.0"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"

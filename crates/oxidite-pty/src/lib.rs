@@ -197,6 +197,7 @@ impl PtyWriter {
 /// Runs a reader thread that forwards bytes as chunks over a channel.
 pub struct PtyReader {
     receiver: Receiver<Vec<u8>>,
+    #[allow(dead_code)]
     reader_thread: Option<JoinHandle<()>>,
 }
 
