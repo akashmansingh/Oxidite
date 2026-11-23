@@ -36,6 +36,7 @@ pub trait Backend: Send {
 }
 
 pub mod actor;
+pub mod durability;
 pub mod manager;
 pub mod pty_backend;
 pub mod replay;
