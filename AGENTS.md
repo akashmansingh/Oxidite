@@ -2,435 +2,549 @@
 
 ## Mission
 
-Build **Oxidite**, a cross-platform terminal emulator written entirely in Rust.
+Build **Oxidite**, a browser-based terminal platform backed by a Rust session server.
 
-Oxidite is the host window itself, like Windows Terminal or iTerm2. It is not a TUI app running inside another terminal.
+The browser is the client. The server owns the shells. Sessions live on the server, survive browser disconnects, connect to remote machines over SSH, keep those SSH connections healthy, and can be shared between users and spread across multiple server nodes.
 
-The system must spawn a real shell over a PTY, parse the VT/ANSI byte stream, maintain its own terminal grid state, render that grid in a GPU-backed window, translate keyboard and mouse input back into bytes, and support theme switching through TOML files.
+Oxidite started as a native GPU terminal emulator (Phases 0 to 8, complete). That desktop app is now frozen. Its VT parser, terminal grid, scrollback, and PTY code become the server-side engine that makes persistent, resumable sessions possible.
+
+The system must:
+
+1. Run a real shell (local PTY or SSH) inside a server-owned session.
+2. Stream session output to a browser over a resumable WebSocket protocol.
+3. Keep the session alive when the browser disconnects, and restore the exact screen when it returns.
+4. Open and maintain SSH connections with host-key verification, keepalives, failure detection, and reconnection.
+5. Support multiple clients on one session with a single ordered stream.
+6. Support multiple server nodes with session ownership, leases, and failover.
+7. Be secure by default, observable, and verified by failure-injection tests.
 
 ## Non-Goals
 
 Do not reduce the project to:
 
-- a TUI app built with `ratatui` / `crossterm`
-- a web, Electron, Tauri, or webview app
-- a wrapper around `alacritty_terminal`, `egui_term`, `wezterm-term`, or any crate that already implements the parser + grid for us
-- a program that launches or embeds another terminal
-- a fake shell (Oxidite never interprets commands; it hosts a real shell)
+- a wrapper around `ttyd`, `wetty`, `gotty`, Apache Guacamole, Teleport, or any existing web-terminal server
+- a program that shells out to the system `ssh` binary (SSH goes through `russh` so Oxidite controls authentication, host keys, keepalives, and reconnection)
+- a thin WebSocket pipe with no session state (the session, replay buffer, and screen snapshot are the product)
+- a rewrite or port of the desktop GPU renderer to the browser
+- a multi-tenant SaaS with billing, teams, or admin dashboards
+- a fake system: never fake connection state, metrics, session ownership, or failover results
 
-Allowed crates handle PTY spawning, byte tokenizing, windowing, glyph layout, and config parsing. The terminal state, escape-sequence semantics, input encoding, renderer, and themes are written in this repository.
+Allowed to delegate: browser rendering and key encoding to xterm.js; the SSH protocol to `russh`; HTTP and WebSocket plumbing to `axum`. Session lifecycle, the wire protocol, replay and snapshot logic, connection maintenance, ownership and leasing, and security policy are written in this repository.
 
 A human will study this code later. Every non-trivial piece must be readable and explainable.
 
+## Current Status
+
+|Phases|Scope|State|
+|---|---|---|
+|0 to 8|Native desktop terminal (PTY, parser, grid, renderer, input, config, themes, tabs, splits, workspaces, git/diff UI)|Complete, frozen|
+|9 to 17|Browser client, session server, SSH, connection maintenance, security, sharing, multi-node, durability|This document|
+
+Rules for the desktop app:
+
+- Do not add features to `oxidite-desktop`.
+- Fix only breakage caused by workspace refactors.
+- It must keep building and passing tests in CI.
+
 ## Core Pipeline
 
-```
-Shell process
-  -> PTY (portable-pty master)
-  -> Reader thread (raw bytes)
-  -> VT Parser (vte::Perform)
-  -> Terminal State (Grid, Cursor, Scrollback, Modes)
-  -> Renderer (wgpu + glyphon)
-  -> Window (winit)
+Server data flow:
 
-Window events (keyboard / mouse / resize / paste)
-  -> Input Encoder
-  -> PTY writer
-  -> Shell process
+```
+Backend (LocalPty | SSH channel)
+  -> backend reader (bounded channel, never unbounded)
+  -> Session actor (single owner of Terminal state)
+       ├─ VT parser -> Terminal (screen state, scrollback, modes)
+       ├─ Replay buffer (ring buffer, indexed by output byte offset)
+       └─ fan-out to attached clients
+  -> WebSocket (binary frames, MessagePack, resumable)
+  -> Browser (xterm.js)
+
+Browser input / resize
+  -> WebSocket
+  -> Session actor
+  -> Backend writer
+  -> Shell
 ```
 
-The PTY -> parse -> grid -> render architecture is fixed. Do not merge stages or skip one.
+Connection layers (each fails and recovers independently):
+
+```
+Browser  ⇄  Gateway node  ⇄  Target host
+   (A)            (B)
+(A) WebSocket: resumable with sequence numbers and snapshots
+(B) SSH connection: keepalives, failure detection, reconnect, optional tmux
+```
+
+The session actor is the only code that mutates `Terminal`. Do not let WebSocket handlers or backends touch terminal state directly.
+
+## Architectural Invariants
+
+1. **Session lifetime is separate from connection lifetime.** A session outlives its WebSocket and, where possible, its SSH connection.
+2. **Single owner per session.** One tokio task owns each session's `Terminal`, replay buffer, and backend. Everything else talks to it through messages.
+3. **Single sequencer.** The owning actor assigns every output byte its offset. No other component orders session events.
+4. **Bounded everything.** Every channel, buffer, queue, and log has a size limit and a defined overflow policy. No unbounded channels.
+5. **Never block the async runtime.** Blocking work (PTY reads, file IO, password hashing) runs on dedicated threads or `spawn_blocking`.
+6. **Every network operation has a timeout.**
+7. **Slow clients never stall a session.** Apply backpressure or resync from a snapshot; never buffer without limit.
+8. **Honest guarantees.** Do not claim a guarantee that a test does not prove. Document failure semantics in `docs/guarantees.md`.
+9. **Secrets never reach logs.** No keystrokes, passwords, private keys, tokens, or session output in logs or error messages.
+10. **No fake stubs.**
 
 ## Shared Source of Truth
 
-Read these before implementation. If a file does not exist yet, create it in Phase 0.
+Read these before implementation. Create any missing file in Phase 9.
 
-- `docs/plan.md` — overall architecture, phase checklist, and integration status
-- `docs/contracts/shared-contracts.md` — cross-module types, traits, and events
-- `docs/plans/pty.md` — PTY component plan
-- `docs/plans/parser.md` — parser component plan
-- `docs/plans/grid.md` — terminal state component plan
-- `docs/plans/renderer.md` — window and rendering component plan
-- `docs/plans/input.md` — input encoding component plan
-- `docs/plans/config.md` — config and theme component plan
+- `docs/plan.md` — architecture, phase checklist, integration status
+- `docs/contracts/shared-contracts.md` — cross-crate types and traits
+- `docs/contracts/wire-protocol.md` — WebSocket protocol specification
+- `docs/guarantees.md` — what is and is not guaranteed under each failure
+- `docs/threat-model.md` — assets, attackers, mitigations
+- `docs/plans/session.md`, `ssh.md`, `server.md`, `web.md`, `directory.md` — component plans
 - `docs/integration.md` — merge and integration checkpoints
 - `docs/runbooks/demo.md` — golden demo definition
+- `docs/runbooks/chaos.md` — failure-injection procedures
 - `docs/learn/phase-N.md` — plain-language notes written after each phase
+- `ARCHITECTURE.md`, `README.md`, `CLAUDE.md` — update as the architecture changes
 
-External references to follow when implementing behavior:
+External references:
 
-- xterm control sequences ("ctlseqs") — the spec for what escape codes mean
-- `vte` crate docs and source
-- `portable-pty` docs and the WezTerm repo examples
-- `winit`, `wgpu`, `glyphon` docs
-- Alacritty and WezTerm source — reference for behavior, never copy-paste
+- `russh` docs and examples (client, interactive PTY client)
+- Warpgate and Devolutions Gateway source — reference for how SSH gateways are built
+- `axum` WebSocket docs; `tokio` docs (channels, cancellation, timeouts)
+- xterm.js docs, including the flow-control guide
+- RFC 4254 (SSH connection protocol: channels, `pty-req`, `window-change`)
+- OpenSSH `ControlMaster`, `ServerAliveInterval` behavior
+- tmux man page (`new-session -A`, `attach-session`)
+- mosh paper (state synchronization) and Eternal Terminal docs
+- "Designing Data-Intensive Applications" chapters on leases, fencing, and replication
 
 ## Tech Stack
 
-| Concern | Crate |
+|Concern|Choice|
 |---|---|
-| PTY | `portable-pty` |
-| Escape-sequence tokenizer | `vte` |
-| Window + event loop | `winit` |
-| GPU | `wgpu` |
-| Text layout + glyphs | `glyphon` |
-| Unicode width | `unicode-width` |
-| Config | `serde`, `toml` |
-| Hot reload | `notify` |
-| Config paths | `dirs` |
-| Clipboard | `arboard` |
-| Errors | `thiserror` (modules), `anyhow` (main) |
-| Logging | `log`, `env_logger` |
-| Bitflags | `bitflags` |
+|Async runtime|`tokio`|
+|HTTP + WebSocket|`axum`|
+|Wire encoding|MessagePack via `rmp-serde` (chosen because browsers have mature MessagePack libraries)|
+|IDs|`uuid`|
+|SSH client|`russh` (enable exactly one crypto backend feature)|
+|Local PTY|`portable-pty` (blocking; bridge to tokio)|
+|VT parsing|`vte` (existing)|
+|Database|`sqlx` (SQLite first, Postgres for multi-node)|
+|TLS|`rustls`|
+|Password hashing|`argon2`|
+|Secrets in memory|`secrecy`, `zeroize`|
+|Observability|`tracing`, `tracing-subscriber`, Prometheus metrics exporter|
+|Rate limiting|`tower` middleware|
+|Errors|`thiserror` (libraries), `anyhow` (binaries)|
+|Frontend|TypeScript, Vite, `@xterm/xterm`, fit addon, WebGL addon, `@msgpack/msgpack`|
+|Desktop (frozen)|`winit`, `wgpu`, `glyphon`|
 
 Rules:
 
-- `winit`, `wgpu`, and `glyphon` versions must be mutually compatible. Check what `glyphon` requires before pinning.
+- Check current versions and compatibility before pinning. `russh` is pre-1.0 and requires a crypto backend feature.
+- Check current npm package names for xterm.js and its addons before installing.
 - Ask before adding any dependency not listed here.
-- Pin versions in `Cargo.toml`. Commit `Cargo.lock`.
+- Pin versions. Commit `Cargo.lock` and the frontend lockfile.
 
 ## Package Boundaries
 
 Any contributor may work anywhere in the repository. Keep changes coherent with these component boundaries, but do not treat them as exclusive ownership.
 
-- **PTY** (`src/pty.rs`): shell detection, spawn, reader thread, writer, resize, child exit handling.
-- **Parser** (`src/parser.rs`): `vte::Perform` implementation that translates sequences into calls on a `Handler` trait. Contains no grid logic.
-- **Terminal state** (`src/grid.rs`, `src/terminal.rs`): cells, cursor, scroll regions, scrollback, alternate screen, modes, title. Implements `Handler`.
-- **Renderer** (`src/renderer/`): window creation, GPU setup, font metrics, drawing grid + cursor + selection. Reads terminal state, never mutates it.
-- **Input** (`src/input.rs`): key, mouse, and paste events -> bytes for the PTY. Reads terminal modes, never mutates the grid.
-- **Config + Theme** (`src/config.rs`, `src/theme.rs`, `themes/`): TOML loading, defaults, built-in presets, hot reload, keybindings.
-- **App** (`src/main.rs`, `src/app.rs`): wires everything together and owns the event loop. Stays small.
+- **VT** (`crates/oxidite-vt`): parser, handler trait, terminal, grid, scrollback, snapshot serialization. No GUI, network, or async dependencies.
+- **PTY** (`crates/oxidite-pty`): blocking `portable-pty` abstraction shared by desktop and server.
+- **Theme** (`crates/oxidite-theme`): theme structs and built-in presets, serializable to JSON for the web client.
+- **Protocol** (`crates/oxidite-proto`): message types, framing, versioning. No IO.
+- **Session** (`crates/oxidite-session`): `Backend` trait, `LocalPty` backend, session actor, session manager, replay buffer, state machine, flow control.
+- **SSH** (`crates/oxidite-ssh`): `russh` wrapper, auth, host-key store, keepalive, reconnect, connection pool, tmux integration, `SshBackend`.
+- **Directory** (`crates/oxidite-directory`): `SessionDirectory` trait, in-memory and Postgres implementations, leases, fencing tokens.
+- **Server** (`crates/oxidite-server`, binary `oxidited`): axum app, WebSocket handler, auth, TLS, routing/proxying, audit log, metrics.
+- **Web** (`web/`): xterm.js client, protocol client, reconnect logic, connect forms, status UI.
+- **Desktop** (`crates/oxidite-desktop`): the frozen native app.
+
+Dependency direction (no cycles): `vt, pty, theme, proto` <- `session` <- `ssh, directory` <- `server`. The desktop crate depends only on `vt`, `pty`, and `theme`.
 
 ## Repository Layout
 
 ```
 oxidite/
 ├── AGENTS.md
-├── Cargo.toml
+├── Cargo.toml                    # workspace root
 ├── Cargo.lock
 ├── README.md
-├── rustfmt.toml
-├── .gitignore
-├── .github/workflows/ci.yml
+├── ARCHITECTURE.md
 ├── docs/
 │   ├── plan.md
+│   ├── guarantees.md
+│   ├── threat-model.md
 │   ├── integration.md
-│   ├── contracts/shared-contracts.md
-│   ├── plans/{pty,parser,grid,renderer,input,config}.md
-│   ├── runbooks/demo.md
+│   ├── contracts/{shared-contracts,wire-protocol}.md
+│   ├── plans/{session,ssh,server,web,directory}.md
+│   ├── runbooks/{demo,chaos}.md
 │   └── learn/phase-N.md
-├── themes/
-│   ├── dracula.toml
-│   ├── solarized-dark.toml
-│   ├── solarized-light.toml
-│   ├── gruvbox-dark.toml
-│   ├── nord.toml
-│   └── one-dark.toml
-├── tests/
-│   ├── fixtures/            # captured byte streams for parser/grid tests
-│   └── *.rs
-└── src/
-    ├── main.rs
-    ├── app.rs
-    ├── pty.rs
-    ├── parser.rs
-    ├── handler.rs           # the Handler trait (parser -> terminal contract)
-    ├── terminal.rs
-    ├── grid.rs
-    ├── input.rs
-    ├── config.rs
-    ├── theme.rs
-    └── renderer/
-        ├── mod.rs
-        ├── window.rs
-        ├── gpu.rs
-        ├── font.rs
-        └── draw.rs
+├── crates/
+│   ├── oxidite-vt/
+│   ├── oxidite-pty/
+│   ├── oxidite-theme/
+│   ├── oxidite-proto/
+│   ├── oxidite-session/
+│   ├── oxidite-ssh/
+│   ├── oxidite-directory/
+│   ├── oxidite-server/
+│   └── oxidite-desktop/
+├── web/
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── src/{main.ts,protocol.ts,connection.ts,terminal.ts,ui/}
+├── deploy/
+│   ├── Dockerfile
+│   └── docker-compose.yml        # gateway nodes, postgres, test sshd
+└── tests/
+    ├── chaos/                    # failure-injection scripts and tests
+    └── fixtures/
 ```
 
 ## Shared Contracts
 
-These are the starting contracts. Write them in `docs/contracts/shared-contracts.md` and as code stubs first. Any change to a contract goes through its own `contract/*` branch and merges before dependent work continues.
+These are starting contracts. Put them in `docs/contracts/shared-contracts.md` and as code stubs first. Any change goes through its own `contract/*` branch and merges before dependent work continues.
 
 ```rust
-// handler.rs — parser -> terminal contract
-pub trait Handler {
-    fn print(&mut self, c: char);
-    fn linefeed(&mut self);
-    fn carriage_return(&mut self);
-    fn backspace(&mut self);
-    fn tab(&mut self);
-    fn bell(&mut self);
-    fn move_cursor_to(&mut self, row: usize, col: usize);
-    fn move_cursor_by(&mut self, d_row: isize, d_col: isize);
-    fn erase_in_display(&mut self, mode: EraseMode);
-    fn erase_in_line(&mut self, mode: EraseMode);
-    fn set_sgr(&mut self, attr: SgrAttr);
-    fn set_mode(&mut self, mode: Mode, enabled: bool);
-    fn set_scroll_region(&mut self, top: usize, bottom: usize);
-    fn set_title(&mut self, title: String);
-    // extend as sequences are implemented
+// oxidite-proto
+pub type SessionId = uuid::Uuid;
+pub type Offset = u64;                 // cumulative output byte offset within a session
+
+pub struct TermSize { pub rows: u16, pub cols: u16 }
+
+pub enum ClientMsg {
+    Hello { protocol_version: u16, token: String },
+    Create { backend: BackendSpec, size: TermSize },
+    Attach { session: SessionId, last_offset: Option<Offset>, mode: AttachMode },
+    Input(Vec<u8>),
+    Resize(TermSize),
+    Ack { offset: Offset },
+    HostKeyDecision { accept: bool },
+    AuthResponse { answers: Vec<String> },
+    Ping { nonce: u64 },
+    Detach,
+    Kill,
 }
 
-// grid.rs — terminal state shapes
-pub enum Color { Default, Indexed(u8), Rgb(u8, u8, u8) }
-pub struct Cell { pub ch: char, pub fg: Color, pub bg: Color, pub attrs: Attrs, pub width: u8 }
-pub struct Cursor { pub row: usize, pub col: usize, pub visible: bool, pub shape: CursorShape }
-
-// pty.rs — PTY contract
-pub struct PtySize { pub rows: u16, pub cols: u16, pub px_w: u16, pub px_h: u16 }
-pub fn spawn(cmd: ShellCommand, size: PtySize) -> Result<(PtyWriter, PtyReader)>;
-// PtyWriter: write(&[u8]), resize(PtySize), kill()
-// PtyReader: runs on its own thread, forwards bytes as AppEvent::PtyOutput
-
-// app.rs — cross-thread events delivered via winit's EventLoopProxy
-pub enum AppEvent {
-    PtyOutput(Vec<u8>),
-    PtyExited(Option<i32>),
-    ConfigReloaded,
-    ThemeChanged(String),
+pub enum ServerMsg {
+    Welcome { server_version: String },
+    Created { session: SessionId },
+    Attached { session: SessionId, mode: AttachMode, start: ReplayStart },
+    Snapshot { offset: Offset, bytes: Vec<u8> },   // repaint escape sequences
+    Output { offset: Offset, bytes: Vec<u8> },     // offset = start of this chunk
+    State { session: SessionId, state: SessionState },
+    HostKeyPrompt { host: String, fingerprint: String, known: HostKeyStatus },
+    AuthPrompt { prompts: Vec<String> },
+    Title(String),
+    Exit { code: Option<i32> },
+    Pong { nonce: u64 },
+    Error { code: ErrorCode, message: String },
 }
 
-// input.rs — input contract
-pub fn encode_key(event: &KeyEvent, modes: &Modes) -> Option<Vec<u8>>;
+pub enum AttachMode { Writer, Viewer }
+pub enum ReplayStart { Replay { from: Offset }, Snapshot { at: Offset } }
 
-// theme.rs — theme contract
-pub struct Theme {
-    pub name: String,
-    pub foreground: Rgb, pub background: Rgb,
-    pub cursor: Rgb, pub selection_bg: Rgb,
-    pub ansi: [Rgb; 16],
+pub enum BackendSpec {
+    LocalPty { shell: Option<String>, cwd: Option<String> },
+    Ssh {
+        host: String, port: u16, user: String,
+        auth: AuthSpec, multiplexer: Multiplexer,
+    },
 }
+pub enum Multiplexer { None, Tmux }
+
+pub enum SessionState {
+    Starting,
+    Running,
+    Degraded,                       // keepalive misses, connection suspect
+    Reconnecting { attempt: u32 },
+    Detached,                       // running with no clients attached
+    Exited { code: Option<i32> },
+    Failed { reason: String },
+}
+
+// oxidite-session
+#[async_trait]
+pub trait Backend: Send {
+    async fn write(&mut self, bytes: &[u8]) -> Result<()>;
+    async fn resize(&mut self, size: TermSize) -> Result<()>;
+    fn events(&mut self) -> mpsc::Receiver<BackendEvent>;   // bounded
+    async fn kill(&mut self) -> Result<()>;
+}
+pub enum BackendEvent {
+    Output(Vec<u8>),
+    State(SessionState),
+    Exited(Option<i32>),
+}
+
+// oxidite-directory
+#[async_trait]
+pub trait SessionDirectory: Send + Sync {
+    async fn claim(&self, session: SessionId, node: NodeId, ttl: Duration) -> Result<Lease>;
+    async fn renew(&self, lease: &Lease, ttl: Duration) -> Result<Lease>;
+    async fn release(&self, lease: Lease) -> Result<()>;
+    async fn lookup(&self, session: SessionId) -> Result<Option<Owner>>;
+    async fn list_orphans(&self) -> Result<Vec<SessionId>>;
+}
+pub struct Lease { pub session: SessionId, pub node: NodeId, pub fencing_token: u64, pub expires_at: Instant }
 ```
 
-## Data Flow Boundary
+## Wire Protocol Rules
 
-```
-PTY reader thread (blocking read)
-  -> AppEvent::PtyOutput(bytes) via EventLoopProxy
-  -> main thread feeds bytes to Parser
-  -> Parser calls Handler on Terminal
-  -> Terminal marks damaged rows
-  -> Renderer redraws on RedrawRequested
+Full spec lives in `docs/contracts/wire-protocol.md`. Non-negotiable rules:
 
-Window KeyboardInput
-  -> Input::encode_key(event, terminal.modes)
-  -> PtyWriter::write(bytes)
-```
+- Binary WebSocket frames, MessagePack encoded.
+- The first client message must be `Hello` with a `protocol_version`. Reject mismatches with a clear error.
+- `Offset` is the cumulative byte offset of the session output stream. Acks and replay are expressed in offsets.
+- Server output frames are coalesced to at most 64 KiB.
+- **Replay buffer:** a per-session ring buffer, default 8 MiB. On `Attach` with a `last_offset` still inside the buffer, replay the missing bytes. Otherwise send a `Snapshot` (repaint bytes generated from `Terminal`) and continue from there.
+- **Snapshots are repaint escape sequences**, so the browser needs no special code path to apply them.
+- **Flow control:** the client sends `Ack { offset }` as it consumes data. The server stops reading from the backend when unacked bytes exceed a high watermark (default 1 MiB) and resumes below a low watermark (default 256 KiB).
+- **Attach is idempotent.** Repeating the same `Attach` produces the same result.
+- **Input is at-most-once.** After a reconnect, unsent input is dropped, never replayed. Replaying keystrokes can run commands the user did not intend.
+- Heartbeats: `Ping`/`Pong` both directions. Close connections that miss the configured number of heartbeats.
 
-Rules:
+## Failure Semantics
 
-- The UI thread never blocks on PTY reads.
-- Only the main thread mutates `Terminal`.
-- The renderer redraws on demand, not in a busy loop. Idle CPU should be near zero.
-- Resize flows window -> grid -> PTY, in that order, in one place.
+Document and test every row. `docs/guarantees.md` must match this table and be backed by tests.
 
-## v1 Terminal Feature Scope
+|Failure|What happens|Recovery|
+|---|---|---|
+|Browser tab closes or network drops|Session keeps running, state `Detached`|Client reattaches with `last_offset`; replay or snapshot|
+|Gateway-to-target TCP drops, **tmux in use**|SSH channel lost, remote shell survives|State `Reconnecting`; reconnect and reattach to tmux; terminal state reset and redrawn|
+|Gateway-to-target TCP drops, **no tmux**|Remote shell receives SIGHUP|State `Failed`; user starts a new session|
+|Gateway node crashes, SSH + tmux|Connection and local state lost; lease expires|Another node adopts the orphan: reconnect, tmux reattach, new snapshot|
+|Gateway node crashes, local PTY|Session and process lost|Session marked `Failed`; documented limitation|
+|Network partition between node and directory|Node cannot renew lease|Node stops accepting writes for affected sessions; fencing token prevents a stale owner from acting|
+|Slow client|Backpressure at high watermark; viewers resync from snapshot|No unbounded memory growth|
 
-Must work in v1:
+An SSH session cannot be resumed once its TCP connection dies. Surviving that requires a remote multiplexer (tmux first, a remote agent later). Never imply otherwise in code, docs, or UI.
 
-- printable text, UTF-8, wide characters (CJK, emoji), combining marks degrade gracefully
-- C0 controls: LF, CR, BS, HT, BEL
-- cursor movement and positioning, save/restore cursor
-- erase in display / line, insert/delete lines and characters
-- SGR: bold, dim, italic, underline, inverse, strikethrough, 16 / 256 / truecolor
-- scroll regions, scrollback buffer, alternate screen buffer (required for vim, htop, less)
-- modes: autowrap, cursor visibility, application cursor keys, bracketed paste, basic mouse reporting (SGR 1006)
-- OSC 0 / 2 window title
-- resize with correct PTY notification
-- selection, copy, paste
-- environment: `TERM=xterm-256color`, `COLORTERM=truecolor`
+## SSH Requirements
 
-Stretch (only after the golden demo passes): tabs, split panes, search, URL detection, font ligatures, inline images, shell integration marks.
+- Use `russh` for all SSH. Never spawn the system `ssh`.
+- Auth: password, public key, keyboard-interactive (prompts relayed to the browser). Agent forwarding is off by default.
+- Host keys: strict by default. Unknown host -> send `HostKeyPrompt`, store the fingerprint on acceptance. Changed key -> refuse the connection and report it clearly.
+- Keepalive: send periodic keepalive requests (default every 15 s). After a configurable number of misses (default 3), mark the session `Degraded`, then begin reconnecting.
+- Reconnect: exponential backoff with full jitter (default 1 s to 30 s), configurable max attempts, surfaced to the client as `Reconnecting { attempt }`.
+- Pooling: one SSH connection per (user, host), many channels, like OpenSSH `ControlMaster`.
+- Resize: forward browser resizes as SSH `window-change`.
+- tmux: default multiplexer for SSH sessions is `tmux new-session -A -s oxidite-<session-id>`. If tmux is missing, continue without it and surface a clear "no persistence" warning.
+- Credentials: encrypted at rest; held in memory with `secrecy`/`zeroize`; never logged.
+
+## Security Requirements
+
+A web terminal is a remote-code-execution endpoint. Treat every item as mandatory, and record the reasoning in `docs/threat-model.md`.
+
+- TLS required on any non-loopback bind.
+- Check the `Origin` header on the WebSocket upgrade (prevents cross-site WebSocket hijacking).
+- Authentication on every connection. Start with a generated bearer token bound to loopback; move to user accounts with Argon2, then optional OIDC or WebAuthn.
+- Per-user ownership check on every attach, kill, and list.
+- `LocalPty` backend disabled on non-loopback binds unless explicitly enabled. Never run local shells for multiple users without sandboxing.
+- Rate limit login and WebSocket connects.
+- Resource limits: max sessions per user, max replay buffer, max message size.
+- Audit log: who connected to what, when, from where. Never record keystrokes or output.
+- Security headers and CSP on the web app.
+- Share links (Phase 15) are scoped, read-only by default, expiring, and revocable.
 
 ## Build Phases
 
-Work through the phases in order. Each phase ends with a tag, a `docs/learn/phase-N.md`, and passing checks. Do not start a phase until the previous one meets its exit criteria. A phase with fewer than 8 commits is under-committed.
+Work through the phases in order. Each phase ends with a tag, a `docs/learn/phase-N.md`, and passing checks. A phase with fewer than 8 commits is under-committed. Phases 0 to 8 (the desktop terminal) are complete.
 
-### Phase 0 — Scaffold, docs, contracts
+### Phase 9 — Workspace split
 
-Exit: repo builds, CI is green, all docs and contract stubs exist.
-
-Commits:
-
-1. `chore: initialize cargo project`
-2. `chore: add .gitignore, rustfmt.toml, and clippy settings`
-3. `docs: add AGENTS.md`
-4. `docs: add plan.md with phase checklist`
-5. `docs(contracts): add shared-contracts.md`
-6. `docs(plans): add per-component plan files`
-7. `feat(contracts): add Handler trait and shared type stubs`
-8. `chore(ci): add GitHub Actions for fmt, clippy, and test`
-9. `docs(runbook): add golden demo definition`
-
-### Phase 1 — PTY (headless, no GUI)
-
-Exit: running the binary in a normal terminal gives a working passthrough shell: stdin -> PTY, PTY -> stdout, resize respected, clean exit.
+Exit: `cargo test --workspace` passes, the desktop app runs unchanged, and `oxidite-vt` compiles with no GUI dependencies.
 
 Commits:
 
-1. `chore(deps): add portable-pty and anyhow`
-2. `feat(pty): add ShellCommand and default shell detection`
-3. `feat(pty): spawn shell on a PTY with initial size`
-4. `feat(pty): set TERM and COLORTERM in the child environment`
-5. `feat(pty): add reader thread forwarding bytes over a channel`
-6. `feat(pty): add write path to the PTY master`
-7. `feat(pty): add resize support`
-8. `feat(pty): handle child exit and cleanup`
-9. `feat(main): add headless passthrough mode`
-10. `test(pty): spawn a command and assert its output`
-11. `docs(learn): add phase 1 notes`
+1. `chore(workspace): convert repository to a cargo workspace`
+2. `refactor(vt): extract handler trait into oxidite-vt`
+3. `refactor(vt): move parser, terminal, and grid into oxidite-vt`
+4. `refactor(vt): remove windowing and GPU dependencies from oxidite-vt`
+5. `refactor(pty): extract pty module into oxidite-pty`
+6. `refactor(theme): extract theme module into oxidite-theme`
+7. `refactor(desktop): move app, renderer, and UI modules into oxidite-desktop`
+8. `fix(desktop): repair imports so the desktop app builds`
+9. `test(vt): confirm existing parser and grid tests pass in the new crate`
+10. `chore(ci): run fmt, clippy, and test across the workspace`
+11. `docs(contracts): add shared contracts and wire protocol drafts`
+12. `docs: update ARCHITECTURE.md and README for the workspace`
+13. `docs(learn): add phase 9 notes`
 
-### Phase 2 — Parser
+### Phase 10 — Server skeleton, protocol, and a browser terminal
 
-Exit: raw PTY bytes produce a correct stream of `Handler` calls, verified by a logging handler and fixture tests.
-
-Commits:
-
-1. `chore(deps): add vte`
-2. `feat(parser): add Parser wrapper around vte::Parser`
-3. `feat(parser): add logging Handler for debugging`
-4. `feat(parser): handle print and C0 controls`
-5. `feat(parser): handle CSI cursor movement`
-6. `feat(parser): handle CSI erase in display and line`
-7. `feat(parser): handle SGR 16-color attributes`
-8. `feat(parser): handle SGR 256-color and truecolor`
-9. `feat(parser): handle SGR text styles`
-10. `feat(parser): handle DECSET / DECRST modes`
-11. `feat(parser): handle scroll region (DECSTBM)`
-12. `feat(parser): handle OSC title sequences`
-13. `feat(parser): handle ESC sequences (save/restore cursor, reverse index)`
-14. `feat(parser): handle insert/delete line and character`
-15. `test(parser): add byte-fixture tests for each sequence family`
-16. `test(parser): verify sequences split across reads`
-17. `docs(learn): add phase 2 notes`
-
-### Phase 3 — Terminal state (still headless)
-
-Exit: feeding captured byte streams produces a grid that matches expected snapshots, including alternate screen and scrollback.
+Exit: `oxidited` serves a web page; a local bash session runs in the browser with working colors, vim, and resize; loopback bind only; token required.
 
 Commits:
 
-1. `feat(grid): add Color, Attrs, and Cell types`
-2. `feat(grid): add Grid storage and indexing`
-3. `feat(grid): add put_char with autowrap`
-4. `feat(grid): add cursor movement with clamping`
-5. `feat(grid): add erase operations`
-6. `feat(grid): add scroll up/down`
-7. `feat(grid): add scroll regions`
-8. `feat(grid): add scrollback ring buffer`
-9. `feat(grid): add wide character handling`
-10. `feat(grid): add resize behavior`
-11. `feat(terminal): add Modes struct`
-12. `feat(terminal): add alternate screen buffer`
-13. `feat(terminal): implement Handler for Terminal`
-14. `feat(terminal): add damage tracking for dirty rows`
-15. `feat(main): add headless grid dump mode`
-16. `test(grid): add snapshot tests from fixtures`
-17. `docs(learn): add phase 3 notes`
+1. `chore(deps): add tokio, axum, rmp-serde, uuid, and tracing`
+2. `feat(proto): add ClientMsg and ServerMsg types`
+3. `feat(proto): add MessagePack framing with round-trip tests`
+4. `feat(session): add the Backend trait`
+5. `feat(session): add LocalPty backend with a blocking-thread bridge`
+6. `feat(session): add the session actor owning Terminal and backend`
+7. `feat(session): add SessionManager for create, get, list, and kill`
+8. `feat(server): add axum app with a health endpoint`
+9. `feat(server): add WebSocket upgrade and Hello handshake`
+10. `feat(server): add startup bearer token and loopback-only bind`
+11. `feat(server): route Create, Input, Resize, and Output through the session actor`
+12. `feat(web): scaffold Vite and TypeScript project`
+13. `feat(web): add xterm.js terminal with the fit addon`
+14. `feat(web): implement the protocol client`
+15. `feat(web): send input and resize, render output`
+16. `feat(server): serve the built web assets`
+17. `test(server): integration test driving a session over WebSocket`
+18. `docs(learn): add phase 10 notes`
 
-### Phase 4 — Window and basic rendering
+### Phase 11 — Detach and reattach
 
-Exit: a window opens, the shell runs, and live output appears as monospace text with colors. Ugly is acceptable.
-
-Commits:
-
-1. `chore(deps): add winit, wgpu, glyphon, pollster`
-2. `feat(window): create window and event loop`
-3. `feat(app): add AppEvent and EventLoopProxy plumbing`
-4. `feat(renderer): initialize wgpu surface and device`
-5. `feat(renderer): load monospace font and measure cell size`
-6. `feat(renderer): draw cell background quads`
-7. `feat(renderer): draw glyphs through glyphon`
-8. `feat(renderer): draw cursor`
-9. `feat(window): map window size to rows and cols`
-10. `feat(app): propagate resize to grid and PTY`
-11. `feat(app): wire PTY output into parser and request redraw`
-12. `docs(learn): add phase 4 notes`
-
-### Phase 5 — Input
-
-Exit: the shell is fully usable, including line editing, history, and vim.
+Exit: closing the browser tab during `seq 1 100000` and reopening it shows an identical screen with no gaps or duplicates; a slow client cannot grow server memory without bound.
 
 Commits:
 
-1. `feat(input): encode printable text`
-2. `feat(input): encode Enter, Tab, Backspace, Escape`
-3. `feat(input): encode Ctrl+letter`
-4. `feat(input): encode arrows, Home, End, PageUp, PageDown`
-5. `feat(input): honor application cursor key mode`
-6. `feat(input): encode function keys`
-7. `feat(input): encode Alt as ESC prefix`
-8. `feat(input): encode modified keys (CSI 1;mod)`
-9. `feat(input): add bracketed paste`
-10. `feat(input): add mouse reporting (SGR 1006)`
-11. `feat(input): add scrollback keybindings`
-12. `feat(input): add text selection with the mouse`
-13. `feat(input): add clipboard copy and paste`
-14. `test(input): table-driven tests for key encoding`
-15. `docs(learn): add phase 5 notes`
+1. `feat(session): track cumulative output offsets`
+2. `feat(session): add ring-buffer replay store with configurable capacity`
+3. `feat(proto): add Attach, Ack, and Detach handling`
+4. `feat(session): replay missing bytes on attach`
+5. `feat(vt): serialize screen state into repaint bytes`
+6. `feat(session): fall back to a snapshot when last_offset is outside the buffer`
+7. `feat(session): keep sessions running when detached, with idle timeout`
+8. `feat(session): add ack-based flow control with high and low watermarks`
+9. `feat(server): add ping and pong with dead-client detection`
+10. `feat(server): add REST endpoint to list sessions`
+11. `feat(web): reconnect with exponential backoff and resume from last offset`
+12. `feat(web): add connection status indicator`
+13. `perf(session): bound memory under slow clients`
+14. `test(session): property test that random disconnects converge to the same screen`
+15. `test(session): verify snapshot equals replayed state`
+16. `docs(guarantees): document attach and replay guarantees`
+17. `docs(learn): add phase 11 notes`
 
-### Phase 6 — Rendering polish
+### Phase 12 — SSH backend
 
-Exit: output looks like a real terminal and stays smooth under load.
-
-Commits:
-
-1. `feat(renderer): add glyph cache`
-2. `feat(renderer): add bold and italic font variants`
-3. `feat(renderer): draw underline and strikethrough`
-4. `feat(renderer): support inverse, dim, and hidden attributes`
-5. `feat(renderer): support the full 256-color palette and truecolor`
-6. `feat(renderer): add cursor shapes and blink timer`
-7. `feat(renderer): draw selection highlight`
-8. `feat(renderer): redraw only damaged regions`
-9. `feat(renderer): handle HiDPI scale factor`
-10. `feat(renderer): add font zoom keybindings`
-11. `feat(renderer): render wide characters and emoji`
-12. `feat(app): apply OSC title to the window`
-13. `feat(app): add visual bell`
-14. `perf(renderer): profile and fix large-output throughput`
-15. `docs(learn): add phase 6 notes`
-
-### Phase 7 — Config and themes
-
-Exit: themes switch live, config edits hot-reload, bad config never crashes the app.
+Exit: the browser connects to a containerized sshd, vim works, resize works, an unknown host key prompts, and a changed host key is refused.
 
 Commits:
 
-1. `feat(theme): add Theme struct and Rgb parsing`
-2. `feat(theme): add built-in dracula preset`
-3. `feat(theme): add built-in solarized-dark and solarized-light presets`
-4. `feat(theme): add built-in gruvbox, nord, and one-dark presets`
-5. `feat(config): resolve config directory per platform`
-6. `feat(config): load config.toml with serde defaults`
-7. `feat(config): load themes from the themes directory`
-8. `feat(config): add font, size, padding, shell, and scrollback options`
-9. `feat(config): add configurable keybindings`
-10. `feat(config): hot reload with notify`
-11. `feat(app): add theme cycle keybinding and live theme switching`
-12. `feat(config): fall back to defaults on invalid config and log the error`
-13. `test(config): add parsing and fallback tests`
-14. `docs: document the config and theme format`
-15. `docs(learn): add phase 7 notes`
+1. `chore(deps): add russh with a crypto backend feature`
+2. `feat(ssh): add SshConfig and auth method types`
+3. `feat(ssh): connect with password authentication`
+4. `feat(ssh): add public-key authentication`
+5. `feat(ssh): relay keyboard-interactive prompts to the client`
+6. `feat(ssh): open a channel and request a PTY and shell`
+7. `feat(ssh): forward resize as window-change`
+8. `feat(ssh): add known-hosts store with trust-on-first-use prompt`
+9. `feat(ssh): refuse changed host keys`
+10. `feat(session): add SshBackend implementing Backend`
+11. `feat(proto): add SSH backend spec, host-key prompt, and auth prompt messages`
+12. `feat(server): add encrypted-at-rest credential store`
+13. `feat(web): add SSH connect form and host-key confirmation dialog`
+14. `test(ssh): integration tests against a containerized sshd`
+15. `docs(learn): add phase 12 notes`
 
-### Phase 8 — Hardening and release
+### Phase 13 — Connection maintenance
 
-Exit: the golden demo passes on macOS, Linux, and Windows, and the project is presentable.
+Exit: killing the TCP connection mid-session shows `Reconnecting`, then resumes with the shell state intact when tmux is in use; without tmux the session ends in a clear `Failed` state.
 
 Commits:
 
-1. `test(parser): add property tests for arbitrary byte input`
-2. `test(parser): add a fuzz target`
-3. `perf: add a throughput benchmark (cat of a large file)`
-4. `fix(windows): handle ConPTY quirks`
-5. `fix(linux): handle X11 and Wayland differences`
-6. `chore(ci): add macOS, Linux, and Windows build matrix`
-7. `chore(ci): add release workflow`
-8. `docs: write README with install steps and screenshots`
-9. `docs: add architecture diagram`
-10. `chore: add LICENSE`
-11. `docs(learn): add final notes`
+1. `feat(session): add SessionState machine with explicit transitions and tests`
+2. `feat(ssh): send keepalive requests with configurable interval and miss count`
+3. `feat(ssh): detect a dead connection and enter Degraded`
+4. `feat(ssh): reconnect with exponential backoff and full jitter`
+5. `feat(ssh): add a connection pool keyed by user and host`
+6. `feat(ssh): start sessions inside tmux with new-session -A`
+7. `feat(ssh): detect a missing tmux and surface a no-persistence warning`
+8. `feat(session): reset terminal state when the backend reattaches`
+9. `feat(proto): publish State messages to attached clients`
+10. `feat(web): show Reconnecting, Degraded, and Failed states in the UI`
+11. `feat(session): add idle timeout and maximum lifetime policies`
+12. `test(chaos): drop TCP mid-session and assert reconnect plus tmux reattach`
+13. `test(chaos): without tmux, assert a clear Failed state and no silent hang`
+14. `docs(runbook): add chaos procedures and verify the failure table`
+15. `docs(learn): add phase 13 notes`
+
+### Phase 14 — Authentication and security hardening
+
+Exit: the threat model is written, every mandatory security item has a test or a documented reason, and non-loopback binds require TLS and real auth.
+
+Commits:
+
+1. `feat(server): add rustls TLS configuration`
+2. `feat(server): enforce an Origin allowlist on WebSocket upgrade`
+3. `feat(server): add user model with Argon2 password hashing`
+4. `feat(server): issue short-lived rotating session tokens`
+5. `feat(server): enforce per-user ownership on attach, kill, and list`
+6. `feat(server): rate limit login and WebSocket connects`
+7. `feat(server): add audit log without keystrokes or output`
+8. `feat(server): disable LocalPty on non-loopback binds by default`
+9. `feat(server): enforce session, buffer, and message size limits`
+10. `feat(server): add CSP and security headers`
+11. `feat(server): add optional OIDC login`
+12. `test(security): origin rejection, ownership checks, and rate limits`
+13. `docs: write the threat model`
+14. `docs(learn): add phase 14 notes`
+
+### Phase 15 — Shared sessions
+
+Exit: several browsers attach to one session; exactly one is the writer; all converge to the same screen; a slow viewer never blocks the session.
+
+Commits:
+
+1. `feat(session): add Writer and Viewer attach modes`
+2. `feat(session): enforce a single writer with takeover requests`
+3. `feat(session): fan out output to N clients with independent ack windows`
+4. `feat(session): resync slow viewers from a snapshot instead of blocking`
+5. `feat(proto): add presence messages`
+6. `feat(server): add scoped, expiring, revocable share tokens`
+7. `feat(web): add viewer mode and share-link UI`
+8. `test(session): N clients converge to an identical screen`
+9. `test(session): a stalled viewer does not delay the writer`
+10. `docs(learn): add phase 15 notes`
+
+### Phase 16 — Multi-node ownership and failover
+
+Exit: with two gateway nodes, killing the owner of an SSH+tmux session lets the other node adopt it and the client resume; partitioning lease renewals never produces two writers.
+
+Commits:
+
+1. `feat(directory): add the SessionDirectory trait and in-memory implementation`
+2. `feat(directory): add Postgres implementation with TTL leases`
+3. `feat(directory): add fencing tokens`
+4. `feat(server): add node identity and heartbeats`
+5. `feat(server): claim a lease on session create and renew it in the background`
+6. `feat(server): reject writes carrying a stale fencing token`
+7. `feat(server): proxy WebSocket traffic to the owning node`
+8. `feat(server): detect orphaned sessions when leases expire`
+9. `feat(session): adopt orphaned SSH sessions on another node`
+10. `feat(server): drain gracefully on shutdown and hand off leases`
+11. `test(chaos): kill the owner node and verify adoption and client resume`
+12. `test(chaos): partition lease renewals and verify no split-brain`
+13. `docs(guarantees): document the multi-node failure model`
+14. `docs(learn): add phase 16 notes`
+
+### Phase 17 — Durability, observability, and release
+
+Exit: the golden demo passes from `docker compose up`; chaos tests run in CI; the README states guarantees honestly.
+
+Commits:
+
+1. `feat(log): add an append-only, segmented per-session output log`
+2. `feat(log): add snapshot and compaction`
+3. `feat(log): add replay API and asciicast export`
+4. `feat(obs): add tracing spans per session`
+5. `feat(obs): add Prometheus metrics for sessions, reconnects, replay lag, and RTT`
+6. `feat(obs): add health and readiness endpoints`
+7. `feat(deploy): add Dockerfile and docker-compose with gateways, postgres, and a test sshd`
+8. `test(load): benchmark many concurrent sessions`
+9. `chore(ci): run workspace tests and containerized integration and chaos tests`
+10. `docs: rewrite README with architecture, security, and deployment`
+11. `docs: add architecture diagrams`
+12. `chore: add release workflow`
+13. `docs(learn): add final notes`
 
 ## Git Rules
 
@@ -443,48 +557,48 @@ Commits:
 ### Branches
 
 - Naming: `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, `test/<topic>`, `chore/<topic>`, `refactor/<topic>`, `perf/<topic>`, `contract/<topic>`.
-- One branch per feature, for example `feat/pty-spawn`, `feat/parser-sgr`, `feat/grid-scrollback`.
+- One branch per feature, for example `feat/session-replay-buffer`, `feat/ssh-keepalive`, `feat/directory-leases`.
 - Branches are short-lived. Merge and delete them once finished.
-- Contract changes get their own `contract/<topic>` branch and merge to `main` before any dependent branch continues.
+- Contract changes (protocol messages, `Backend`, `SessionDirectory`, `SessionState`) get their own `contract/<topic>` branch and merge to `main` before any dependent branch continues.
 
 ### Commits
 
-- Use Conventional Commits: `type(scope): summary`. Scope is the module (`pty`, `parser`, `grid`, `terminal`, `renderer`, `input`, `config`, `theme`, `app`, `ci`, `docs`).
+- Use Conventional Commits: `type(scope): summary`. Scope is the crate or area: `vt`, `pty`, `theme`, `proto`, `session`, `ssh`, `directory`, `server`, `web`, `desktop`, `log`, `obs`, `deploy`, `ci`, `docs`.
 - Summary is imperative, lowercase, under 72 characters.
-- Add a body when the reason is not obvious, especially for protocol behavior (cite the ctlseqs sequence name, e.g. `CSI Ps J (ED)`).
+- Add a body when the reason is not obvious, especially for protocol and failure-handling decisions. Cite the RFC or document being followed.
 - Commit frequently. Make at least one commit for each of:
-  - a new file
-  - a new public type or trait
-  - a new escape-sequence family
-  - a new keybinding group
-  - a new config option
-  - a new test file
-  - a docs update
+    - a new file or crate
+    - a new public type, trait, or message
+    - a new failure-handling behavior
+    - a new test file or chaos scenario
+    - a new config option
+    - a docs update
 - Keep a commit under roughly 150 changed lines and one concern.
 - Do not mix refactoring with feature work. Do not mix formatting changes with logic changes.
-- Every commit must pass `cargo check`. Do not leave broken intermediate commits.
+- Every commit must pass `cargo check --workspace`. Do not leave broken intermediate commits.
 - Commit tests with their feature or immediately after, as `test(scope): ...`.
-- Never commit `target/`, `.env`, editor settings, or machine-specific paths.
+- Never commit `target/`, `node_modules/`, `.env`, credentials, private keys, or machine-specific paths.
 
 ### Integration
 
 ```
 git switch main && git pull --ff-only
-git switch -c feat/pty-spawn
+git switch -c feat/session-replay-buffer
 
 # work in small steps, commit after each logical change
 
 git fetch origin
 git rebase origin/main
-cargo fmt --check && cargo clippy -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace
+(cd web && npm run lint && npm test)
 
-git push -u origin feat/pty-spawn
+git push -u origin feat/session-replay-buffer
 # open a PR; merge with a merge commit (no squash, history is the progress log)
 ```
 
 - Before opening a PR, rebase on the latest `main`.
 - Merge with merge commits. Do not squash; the commit trail is part of the deliverable.
-- Tag each finished phase: `git tag phase-1-pty`, `phase-2-parser`, `phase-3-grid`, `phase-4-window`, `phase-5-input`, `phase-6-polish`, `phase-7-config`, `phase-8-release`.
+- Tag each finished phase: `phase-9-workspace`, `phase-10-server`, `phase-11-reattach`, `phase-12-ssh`, `phase-13-resilience`, `phase-14-security`, `phase-15-sharing`, `phase-16-multinode`, `phase-17-release`.
 
 ### Destructive operations
 
@@ -498,60 +612,68 @@ Do not run these without explicit human approval:
 - `git rebase` or any history rewrite on `main` or on a branch others use
 - `git commit --amend` on a commit that is already pushed
 
+Also require approval before: dropping or migrating a database with real data, deleting stored credentials or host keys, and running chaos scripts against anything other than the local test environment.
+
 If unsure, create a backup branch first: `git branch backup/<name>`.
 
 ## Coding Standards
 
-- `cargo fmt` and `cargo clippy -- -D warnings` must pass.
-- No `unwrap()` / `expect()` outside tests and startup code in `main`. Use `Result` with `thiserror` types in modules and `anyhow` in `main`.
+- `cargo fmt` and `cargo clippy --workspace -- -D warnings` must pass.
+- No `unwrap()` / `expect()` outside tests and startup code in `main`. Use `Result` with `thiserror` types in libraries and `anyhow` in binaries.
 - No `unsafe` without a comment explaining why it is sound.
-- Never block the UI thread.
-- Avoid per-frame allocation in the render path.
-- Use `log` macros, not `println!`, except in the explicit headless debug modes.
+- Async rules: never block the runtime; every channel is bounded with a documented overflow policy; every network call has a timeout; document cancellation safety on any `select!` branch that owns state.
+- Use `tracing`, not `println!`. Attach `session_id` and `node_id` to spans. Never log secrets, keystrokes, or session output.
 - Keep modules under about 500 lines; split when they grow.
-- Public items get doc comments. Protocol-specific code gets comments explaining why, citing the relevant ctlseqs section.
-- Parser and grid logic is tested with byte fixtures in `tests/fixtures/` and snapshot-style assertions.
+- Public items get doc comments. Failure-handling code gets a comment stating which row of the failure table it implements.
+- Protocol and state-machine logic is covered by unit tests; recovery behavior is covered by chaos or integration tests in `tests/chaos/`.
+- Frontend: TypeScript strict mode, no `any` in protocol code, lint and tests must pass.
 
-Platforms: macOS, Linux (X11 and Wayland), Windows 10+ (ConPTY). Default shell: `$SHELL`, falling back to `/bin/sh`; on Windows, `pwsh.exe`, then `powershell.exe`, then `cmd.exe`.
+Platforms: server on Linux (primary) and macOS; local PTY on Windows is best-effort; the SSH backend is cross-platform; the web client targets current evergreen browsers.
 
 Performance targets:
 
-- `cat` of a very large file does not freeze the window
-- idle CPU usage is near zero
-- scrolling stays smooth
+- `seq 1 100000` through the browser completes without stalling the session
+- idle sessions use near-zero CPU
+- memory per session is bounded by configuration
+- reattach from the replay buffer is fast enough to feel instant
 
 ## Agent Working Agreement
 
 1. Identify the current phase from `docs/plan.md` and `git tag`. Do not skip phases or combine them.
-2. Read the relevant docs and contracts before writing code.
+2. Read the relevant docs and contracts before writing code. If a contract needs to change, make a `contract/*` branch first.
 3. State the plan first: list the commits you intend to make for this task.
 4. Implement the smallest slice, verify it, commit it, and repeat.
-5. After each task run `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test`, then show `git status` and `git log --oneline -n 15`.
+5. After each task run `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`, and the web checks when `web/` changed. Then show `git status` and `git log --oneline -n 15`.
 6. Tick the phase checklist in `docs/plan.md` as part of the relevant commit.
-7. At the end of every phase write `docs/learn/phase-N.md` in plain language: what the component does, the key concepts (PTY, CSI, SGR, alternate screen, and so on), what to read next, and where in the code to look. The human will study these later.
-8. If blocked, record the blocker in `docs/integration.md` and ask. Do not silently work around a contract.
-9. Ask before adding a dependency outside the tech stack table.
-10. When behavior is unclear, match what Alacritty or WezTerm does and note the reference in a comment.
+7. Never claim a guarantee that a test does not prove. When behavior is a limitation, write it in `docs/guarantees.md` instead of hiding it.
+8. For every recovery feature, write the failure-injection test before calling it done.
+9. At the end of every phase write `docs/learn/phase-N.md` in plain language: what was built, the key concepts (leases, fencing, backpressure, replay, host-key verification, and so on), why each design choice was made, what to read next, and where in the code to look. The human will study these later.
+10. If blocked, record the blocker in `docs/integration.md` and ask. Do not silently work around a contract.
+11. Ask before adding a dependency outside the tech stack table.
+12. Follow `SKILLS.md` for routine permissions. Pushing, publishing, handling real secrets, and other external side effects still need explicit approval.
+13. Do not add features to the frozen desktop app.
 
 ## Golden Demo
 
-The full definition lives in `docs/runbooks/demo.md`. The project is demo-ready when all of this works on a release build:
+The full definition lives in `docs/runbooks/demo.md`. The project is demo-ready when all of this works from `docker compose up`:
 
-1. `cargo run --release` opens a window with the user's shell prompt in the default theme.
-2. `ls --color=auto` (`ls -G` on macOS) shows correct colors.
-3. `vim` or `nvim` enters the alternate screen and restores the previous screen on exit.
-4. `htop` or `top` renders correctly and reflows when the window is resized.
-5. `seq 1 100000` completes without freezing, and scrollback works with Shift+PageUp.
-6. Mouse selection, copy, and paste work.
-7. The theme-cycle keybinding changes colors instantly, and editing a theme TOML hot-reloads it.
-8. `printf '\e[38;2;255;100;0mtruecolor\e[0m\n'` shows orange text, and `echo "日本語 🦀"` renders correctly.
-9. Exiting the shell closes the window or shows a clear "process exited" state.
+1. Open the web app and log in over TLS.
+2. Create a local session (loopback mode): a bash prompt appears with correct colors; `vim` and `htop` work; resizing reflows.
+3. Create an SSH session to the compose-provided sshd. The first connection shows a host-key prompt; accepting it connects.
+4. Run `seq 1 100000`, close the tab mid-run, reopen: the screen is identical with no gaps or duplicates.
+5. Run the chaos script that drops the SSH connection: the UI shows `Reconnecting`, then resumes inside the same tmux session with state intact.
+6. Repeat step 5 on a session without tmux: the UI shows a clear `Failed` state.
+7. Open the same session in a second browser as a viewer: output mirrors, only the writer can type, and a stalled viewer does not slow the writer.
+8. With two gateway nodes running: kill the node that owns an SSH+tmux session; the other node adopts it and the client resumes.
+9. The metrics endpoint shows active sessions, reconnect counts, and replay lag.
 
 ## Definition of Done
 
-- All eight phases are tagged and merged to `main`.
-- CI is green on macOS, Linux, and Windows.
-- The golden demo passes.
-- `README.md` explains what Oxidite is, how to build and run it, and how to write a theme.
+- All phases 9 to 17 are tagged and merged to `main`.
+- CI runs workspace tests plus containerized integration and chaos tests, and they pass.
+- The golden demo passes from `docker compose up`.
+- `docs/guarantees.md` matches the failure table and every row is backed by a test.
+- `docs/threat-model.md` exists and every mandatory security item has a test or a documented reason.
+- `README.md` explains the architecture, security model, deployment, and the honest limits (what is and is not guaranteed).
 - Every phase has a `docs/learn/phase-N.md`.
-- The Git history shows small, logical commits for every stage, file, and feature.
+- The Git history shows small, logical commits for every stage, crate, and feature.
