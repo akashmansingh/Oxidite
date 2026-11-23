@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod metrics;
+pub mod routing;
 pub mod security;
 pub mod share;
 pub mod tls;
@@ -265,26 +266,41 @@ async fn list_sessions(
 
 async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+    let static_dir = std::path::Path::new(&state.static_dir);
     let target = if path.is_empty() {
-        std::path::Path::new(&state.static_dir).join("index.html")
+        static_dir.join("index.html")
     } else {
-        std::path::Path::new(&state.static_dir).join(path)
+        match routing::resolve_static_path(static_dir, path) {
+            Some(target) => target,
+            None => return StatusCode::BAD_REQUEST.into_response(),
+        }
     };
 
     if target.exists() && target.is_file() {
         let mime = mime_guess::from_path(&target).first_or_octet_stream();
         match tokio::fs::read(&target).await {
             Ok(content) => {
-                return ([(header::CONTENT_TYPE, mime.as_ref())], content).into_response();
+                return (
+                    [
+                        (header::CONTENT_TYPE, mime.as_ref()),
+                        (header::CACHE_CONTROL, routing::cache_control(routing::classify_request_path(uri.path()))),
+                    ],
+                    content,
+                )
+                    .into_response();
             }
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
     }
 
-    let index_path = std::path::Path::new(&state.static_dir).join("index.html");
+    let index_path = static_dir.join("index.html");
     if index_path.exists() {
         if let Ok(content) = tokio::fs::read(&index_path).await {
-            return Html(content).into_response();
+            return (
+                [(header::CACHE_CONTROL, routing::cache_control(routing::RouteClass::Html))],
+                Html(content),
+            )
+                .into_response();
         }
     }
 
