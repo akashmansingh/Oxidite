@@ -13,9 +13,17 @@ pub const MIN_SPLIT_RATIO: f32 = 0.10;
 pub const MAX_SPLIT_RATIO: f32 = 0.90;
 /// Thickness of the divider line separating adjacent split panes in physical pixels.
 pub const PANE_DIVIDER_SIZE: f32 = 2.0;
+/// Desired minimum pixel width for each pane when the parent has enough room.
+pub const MIN_PANE_WIDTH_PX: f32 = 240.0;
+/// Desired minimum pixel height for each pane when the parent has enough room.
+pub const MIN_PANE_HEIGHT_PX: f32 = 120.0;
+/// Minimum terminal grid width used when deciding whether a new side-by-side pane fits.
+pub const MIN_PANE_COLS: usize = 24;
+/// Minimum terminal grid height used when deciding whether a new stacked pane fits.
+pub const MIN_PANE_ROWS: usize = 6;
 
 /// Direction to split a terminal pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitDirection {
     /// Horizontal split divider (splits top and bottom).
     Horizontal,
@@ -116,7 +124,7 @@ impl SplitDivider {
 }
 
 /// A node within the binary split pane tree.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PaneNode {
     /// A single terminal pane leaf.
     Leaf(usize),
@@ -136,6 +144,17 @@ pub enum PaneNode {
 }
 
 impl PaneNode {
+    /// Returns the highest split-node ID, or zero when this subtree has no splits.
+    #[must_use]
+    pub fn max_split_id(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 0,
+            Self::Split {
+                id, first, second, ..
+            } => (*id).max(first.max_split_id()).max(second.max_split_id()),
+        }
+    }
+
     /// Returns a list of all pane IDs contained in this subtree in depth-first order.
     #[must_use]
     pub fn all_leaf_ids(&self) -> Vec<usize> {
@@ -327,7 +346,13 @@ impl PaneNode {
             } => match direction {
                 SplitDirection::Vertical => {
                     let total_avail = (rect.width - divider_size).max(0.0);
-                    let w1 = (total_avail * *ratio).round();
+                    let min_ratio = if total_avail > 0.0 {
+                        (MIN_PANE_WIDTH_PX / total_avail).min(0.5)
+                    } else {
+                        0.5
+                    };
+                    let ratio = ratio.clamp(min_ratio, 1.0 - min_ratio);
+                    let w1 = (total_avail * ratio).round();
                     let w2 = (total_avail - w1).max(0.0);
                     let div_x = rect.x + w1;
 
@@ -380,7 +405,13 @@ impl PaneNode {
                 }
                 SplitDirection::Horizontal => {
                     let total_avail = (rect.height - divider_size).max(0.0);
-                    let h1 = (total_avail * *ratio).round();
+                    let min_ratio = if total_avail > 0.0 {
+                        (MIN_PANE_HEIGHT_PX / total_avail).min(0.5)
+                    } else {
+                        0.5
+                    };
+                    let ratio = ratio.clamp(min_ratio, 1.0 - min_ratio);
+                    let h1 = (total_avail * ratio).round();
                     let h2 = (total_avail - h1).max(0.0);
                     let div_y = rect.y + h1;
 
@@ -737,6 +768,27 @@ mod tests {
         assert_eq!(tree.next_pane(2), 3);
         assert_eq!(tree.next_pane(3), 1);
         assert_eq!(tree.prev_pane(1), 3);
+    }
+
+    #[test]
+    fn split_layout_clamps_dividers_to_minimum_usable_pane_sizes() {
+        let mut tree = PaneTree::new(1);
+        assert!(tree.split(1, 2, SplitDirection::Vertical));
+        if let PaneNode::Split { ratio, .. } = &mut tree.root {
+            *ratio = 0.1;
+        }
+        let container = PaneRect::new(0.0, 0.0, 800.0, 480.0, 80, 24);
+        let (layouts, _) = tree.compute_layout(container, 10.0, 20.0, 0.0, 0.0);
+        assert!(layouts[0].1.width >= MIN_PANE_WIDTH_PX);
+        assert!(layouts[1].1.width >= MIN_PANE_WIDTH_PX);
+
+        let tiny = PaneRect::new(0.0, 0.0, 100.0, 100.0, 10, 5);
+        let (layouts, _) = tree.compute_layout(tiny, 10.0, 20.0, 0.0, 0.0);
+        assert!(
+            layouts
+                .iter()
+                .all(|(_, rect)| rect.width > 0.0 && rect.cols > 0)
+        );
     }
 
     #[test]

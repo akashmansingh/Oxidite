@@ -48,6 +48,8 @@ impl PaddingChoice {
 pub struct SettingsModalState {
     pub is_open: bool,
     pub active_theme: String,
+    /// Active application's shared semantic UI palette.
+    pub theme_tokens: crate::theme::ThemeTokens,
     pub font_size: f32,
     pub font_family: String,
     pub zoom_pct: usize,
@@ -62,6 +64,7 @@ impl Default for SettingsModalState {
         Self {
             is_open: false,
             active_theme: "pitch-black".to_string(),
+            theme_tokens: crate::theme::ThemeTokens::default(),
             font_size: 14.0,
             font_family: "monospace".to_string(),
             zoom_pct: 100,
@@ -269,7 +272,7 @@ pub fn assemble_settings_modal_quads(
     screen_w: f32,
     screen_h: f32,
     state: &SettingsModalState,
-    accent_color: [f32; 4],
+    _accent_color: [f32; 4],
 ) -> Vec<QuadVertex> {
     if !state.is_open {
         return Vec::new();
@@ -278,6 +281,8 @@ pub fn assemble_settings_modal_quads(
     let mut quads = Vec::new();
     let layout = SettingsLayout::compute(screen_w, screen_h);
     let (mx, my, mw, mh) = layout.modal_rect;
+    let theme = state.theme_tokens;
+    let accent_color = theme.accent_primary.to_rgba_array(1.0);
 
     // 1. Semi-transparent dark background backdrop
     quads.extend_from_slice(&build_quad_vertices(
@@ -294,7 +299,7 @@ pub fn assemble_settings_modal_quads(
         my,
         mw,
         mh,
-        [0.028, 0.032, 0.042, 0.98],
+        theme.background_elevated.to_rgba_array(0.98),
     ));
 
     // Outer border (1px #1d212a)
@@ -303,28 +308,28 @@ pub fn assemble_settings_modal_quads(
         my,
         mw,
         1.0,
-        [0.15, 0.17, 0.22, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         mx,
         my + mh - 1.0,
         mw,
         1.0,
-        [0.15, 0.17, 0.22, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         mx,
         my,
         1.0,
         mh,
-        [0.15, 0.17, 0.22, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         mx + mw - 1.0,
         my,
         1.0,
         mh,
-        [0.15, 0.17, 0.22, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // Header top accent strip (2px)
@@ -336,7 +341,7 @@ pub fn assemble_settings_modal_quads(
         my + 44.0,
         mw,
         1.0,
-        [0.11, 0.13, 0.18, 0.9],
+        theme.border_subtle.to_rgba_array(0.9),
     ));
 
     // Close button box
@@ -346,7 +351,7 @@ pub fn assemble_settings_modal_quads(
         cb.1,
         cb.2,
         cb.3,
-        [0.08, 0.10, 0.14, 0.9],
+        theme.background_secondary.to_rgba_array(0.9),
     ));
 
     // 3. Theme chips
@@ -360,7 +365,7 @@ pub fn assemble_settings_modal_quads(
                 0.9,
             ]
         } else {
-            [0.06, 0.07, 0.10, 0.85]
+            theme.background_secondary.to_rgba_array(0.85)
         };
         quads.extend_from_slice(&build_quad_vertices(*cx, *cy, *cw, *ch, bg_color));
 
@@ -377,7 +382,7 @@ pub fn assemble_settings_modal_quads(
         fdec.1,
         fdec.2,
         fdec.3,
-        [0.08, 0.10, 0.14, 0.9],
+        theme.background_secondary.to_rgba_array(0.9),
     ));
     let finc = layout.font_inc_rect;
     quads.extend_from_slice(&build_quad_vertices(
@@ -385,7 +390,7 @@ pub fn assemble_settings_modal_quads(
         finc.1,
         finc.2,
         finc.3,
-        [0.08, 0.10, 0.14, 0.9],
+        theme.background_secondary.to_rgba_array(0.9),
     ));
     let freset = layout.font_reset_rect;
     quads.extend_from_slice(&build_quad_vertices(
@@ -393,7 +398,7 @@ pub fn assemble_settings_modal_quads(
         freset.1,
         freset.2,
         freset.3,
-        [0.08, 0.10, 0.14, 0.9],
+        theme.background_secondary.to_rgba_array(0.9),
     ));
 
     // 5. Cursor Shape chips
@@ -406,7 +411,7 @@ pub fn assemble_settings_modal_quads(
                 0.9,
             ]
         } else {
-            [0.06, 0.07, 0.10, 0.85]
+            theme.background_secondary.to_rgba_array(0.85)
         };
         q.extend_from_slice(&build_quad_vertices(rect.0, rect.1, rect.2, rect.3, bg));
         if active {
@@ -469,6 +474,7 @@ pub fn assemble_settings_modal_quads(
     let (px, py, pw, ph) = layout.preview_rect;
     let preview_theme = crate::theme::Theme::preset_by_name(&state.active_theme)
         .unwrap_or_else(crate::theme::Theme::pitch_black);
+    let preview_tokens = preview_theme.tokens();
     let theme_bg = preview_theme.background.to_rgba_array(1.0);
     let theme_cursor = preview_theme.cursor.to_rgba_array(1.0);
 
@@ -481,28 +487,28 @@ pub fn assemble_settings_modal_quads(
         py,
         pw,
         1.0,
-        [0.18, 0.22, 0.30, 0.9],
+        preview_tokens.border_default.to_rgba_array(0.9),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         px,
         py + ph - 1.0,
         pw,
         1.0,
-        [0.18, 0.22, 0.30, 0.9],
+        preview_tokens.border_default.to_rgba_array(0.9),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         px,
         py,
         1.0,
         ph,
-        [0.18, 0.22, 0.30, 0.9],
+        preview_tokens.border_default.to_rgba_array(0.9),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         px + pw - 1.0,
         py,
         1.0,
         ph,
-        [0.18, 0.22, 0.30, 0.9],
+        preview_tokens.border_default.to_rgba_array(0.9),
     ));
 
     // Chrome top bar (height 20px)
@@ -511,14 +517,14 @@ pub fn assemble_settings_modal_quads(
         py,
         pw,
         20.0,
-        [0.08, 0.09, 0.13, 0.95],
+        preview_tokens.background_tertiary.to_rgba_array(0.95),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         px,
         py + 19.0,
         pw,
         1.0,
-        [0.18, 0.22, 0.30, 0.8],
+        preview_tokens.border_default.to_rgba_array(0.8),
     ));
 
     // Chrome window control dots
@@ -590,6 +596,7 @@ pub fn build_settings_modal_labels(
     }
 
     let mut labels = Vec::new();
+    let theme = state.theme_tokens;
     let layout = SettingsLayout::compute(screen_w, screen_h);
     let (mx, my, mw, _) = layout.modal_rect;
 
@@ -598,7 +605,7 @@ pub fn build_settings_modal_labels(
         text: "Oxidite Settings & Appearance".to_string(),
         x: mx + 18.0,
         y: my + 14.0,
-        color: GlyphonColor::rgb(240, 245, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: mw - 70.0,
     });
@@ -608,7 +615,7 @@ pub fn build_settings_modal_labels(
         text: "x".to_string(),
         x: layout.close_btn_rect.0 + 8.0,
         y: layout.close_btn_rect.1 + 4.0,
-        color: GlyphonColor::rgb(180, 185, 200),
+        color: theme.glyphon(theme.foreground_secondary),
         bold: true,
         max_width: 20.0,
     });
@@ -618,7 +625,7 @@ pub fn build_settings_modal_labels(
         text: "COLOR THEMES (CLICK TO SWITCH)".to_string(),
         x: mx + 18.0,
         y: my + 48.0,
-        color: GlyphonColor::rgb(120, 140, 180),
+        color: theme.glyphon(theme.accent_secondary),
         bold: true,
         max_width: mw - 36.0,
     });
@@ -642,9 +649,9 @@ pub fn build_settings_modal_labels(
                 x: cx + 6.0,
                 y: cy + 5.0,
                 color: if is_active {
-                    GlyphonColor::rgb(255, 255, 255)
+                    theme.glyphon(theme.foreground_primary)
                 } else {
-                    GlyphonColor::rgb(180, 190, 210)
+                    theme.glyphon(theme.foreground_secondary)
                 },
                 bold: is_active,
                 max_width: cw - 10.0,
@@ -657,7 +664,7 @@ pub fn build_settings_modal_labels(
         text: "FONT SIZE & FAMILY".to_string(),
         x: mx + 18.0,
         y: my + 188.0,
-        color: GlyphonColor::rgb(120, 140, 180),
+        color: theme.glyphon(theme.accent_secondary),
         bold: true,
         max_width: mw - 36.0,
     });
@@ -667,7 +674,7 @@ pub fn build_settings_modal_labels(
         text: format!("SIZE: {:.1} pt  ({}%)", state.font_size, state.zoom_pct),
         x: mx + 18.0,
         y: font_y + 5.0,
-        color: GlyphonColor::rgb(220, 225, 240),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 140.0,
     });
@@ -675,7 +682,7 @@ pub fn build_settings_modal_labels(
         text: "-".to_string(),
         x: layout.font_dec_rect.0 + 10.0,
         y: font_y + 5.0,
-        color: GlyphonColor::rgb(240, 245, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 20.0,
     });
@@ -683,7 +690,7 @@ pub fn build_settings_modal_labels(
         text: "+".to_string(),
         x: layout.font_inc_rect.0 + 9.0,
         y: font_y + 5.0,
-        color: GlyphonColor::rgb(240, 245, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 20.0,
     });
@@ -691,7 +698,7 @@ pub fn build_settings_modal_labels(
         text: "Reset".to_string(),
         x: layout.font_reset_rect.0 + 6.0,
         y: font_y + 5.0,
-        color: GlyphonColor::rgb(180, 190, 210),
+        color: theme.glyphon(theme.foreground_secondary),
         bold: false,
         max_width: 36.0,
     });
@@ -707,9 +714,9 @@ pub fn build_settings_modal_labels(
             x: cx + 4.0,
             y: cy + 5.0,
             color: if is_active {
-                GlyphonColor::rgb(255, 255, 255)
+                theme.glyphon(theme.foreground_primary)
             } else {
-                GlyphonColor::rgb(170, 180, 200)
+                theme.glyphon(theme.foreground_secondary)
             },
             bold: is_active,
             max_width: cw - 6.0,
@@ -721,7 +728,7 @@ pub fn build_settings_modal_labels(
         text: "CURSOR SHAPE & BLINK".to_string(),
         x: mx + 18.0,
         y: my + 244.0,
-        color: GlyphonColor::rgb(120, 140, 180),
+        color: theme.glyphon(theme.accent_secondary),
         bold: true,
         max_width: mw - 36.0,
     });
@@ -733,9 +740,9 @@ pub fn build_settings_modal_labels(
                 x: rect.0 + 8.0,
                 y: rect.1 + 5.0,
                 color: if active {
-                    GlyphonColor::rgb(255, 255, 255)
+                    theme.glyphon(theme.foreground_primary)
                 } else {
-                    GlyphonColor::rgb(170, 180, 200)
+                    theme.glyphon(theme.foreground_secondary)
                 },
                 bold: active,
                 max_width: rect.2 - 12.0,
@@ -776,7 +783,7 @@ pub fn build_settings_modal_labels(
         text: "PADDING & STATUS BAR".to_string(),
         x: mx + 18.0,
         y: my + 300.0,
-        color: GlyphonColor::rgb(120, 140, 180),
+        color: theme.glyphon(theme.accent_secondary),
         bold: true,
         max_width: mw - 36.0,
     });
@@ -816,7 +823,7 @@ pub fn build_settings_modal_labels(
         text: "LIVE TERMINAL PREVIEW".to_string(),
         x: mx + 18.0,
         y: my + 356.0,
-        color: GlyphonColor::rgb(120, 140, 180),
+        color: theme.glyphon(theme.accent_secondary),
         bold: true,
         max_width: mw - 36.0,
     });
@@ -830,7 +837,9 @@ pub fn build_settings_modal_labels(
         text: preview_title,
         x: px + 48.0,
         y: py + 4.0,
-        color: GlyphonColor::rgb(175, 185, 205),
+        color: state
+            .theme_tokens
+            .glyphon(state.theme_tokens.foreground_secondary),
         bold: true,
         max_width: pw - 56.0,
     });
@@ -843,16 +852,12 @@ pub fn build_settings_modal_labels(
         preview_theme.foreground.g,
         preview_theme.foreground.b,
     );
-    let green_col = GlyphonColor::rgb(
-        preview_theme.ansi[2].r,
-        preview_theme.ansi[2].g,
-        preview_theme.ansi[2].b,
-    );
-    let cyan_col = GlyphonColor::rgb(
-        preview_theme.ansi[6].r,
-        preview_theme.ansi[6].g,
-        preview_theme.ansi[6].b,
-    );
+    let green_col = preview_theme
+        .tokens()
+        .glyphon(preview_theme.tokens().success);
+    let cyan_col = preview_theme
+        .tokens()
+        .glyphon(preview_theme.tokens().accent_primary);
 
     // Line 1: prompt & command
     labels.push(TabLabel {
@@ -897,7 +902,9 @@ pub fn build_settings_modal_labels(
         text: "Palette:".to_string(),
         x: px + 10.0,
         y: py + ph - 18.0,
-        color: GlyphonColor::rgb(140, 150, 170),
+        color: state
+            .theme_tokens
+            .glyphon(state.theme_tokens.foreground_muted),
         bold: false,
         max_width: 50.0,
     });

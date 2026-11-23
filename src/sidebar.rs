@@ -31,6 +31,8 @@ pub enum ChatStatus {
 pub struct WorkspaceEntry {
     /// Name of repository or workspace folder (e.g. "Oxidite").
     pub name: String,
+    /// Workspace root directory shown below the name.
+    pub root_directory: String,
     /// Current git branch (e.g. "main").
     pub branch: String,
     /// Number of active terminal sessions or agents.
@@ -65,12 +67,315 @@ pub enum SidebarAction {
     CloseTab(usize),
     /// Create a new session.
     NewSession,
+    /// Create a new workspace.
+    NewWorkspace,
     /// Toggle the sidebar collapsed/expanded.
     ToggleSidebar,
     /// Select a workspace at index.
     SelectWorkspace(usize),
     /// Select an agent chat session at index.
     SelectChat(usize),
+    /// Open the requested Git source-control view in the main workspace.
+    SelectSourceControl(crate::changes_panel::ChangesTab),
+    /// Open a changed file in the main diff workspace.
+    SelectChangedFile(usize),
+    /// Open a commit diff in the main diff workspace.
+    SelectCommit(usize),
+    /// Open or close the repository branch picker.
+    ToggleBranchPicker,
+    /// Check out a branch from the branch picker by index.
+    SwitchBranch(usize),
+}
+
+/// Builds concise labels for the active workspace, terminal, Git, or AI navigation view.
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+pub fn build_navigation_labels(
+    state: &SidebarState,
+    mode: crate::shell::SidebarMode,
+    changes: &crate::changes_panel::ChangesPanelState,
+    sidebar_y: f32,
+    sidebar_width: f32,
+    theme: crate::theme::ThemeTokens,
+) -> Vec<TabLabel> {
+    let mut labels = Vec::new();
+    let heading = match mode {
+        crate::shell::SidebarMode::Workspaces => "WORKSPACES",
+        crate::shell::SidebarMode::Terminals => "TERMINAL SESSIONS",
+        crate::shell::SidebarMode::SourceControl => "SOURCE CONTROL",
+        crate::shell::SidebarMode::Conversations => "AI CONVERSATIONS",
+        crate::shell::SidebarMode::Notifications => "NOTIFICATIONS",
+        crate::shell::SidebarMode::Settings => "SETTINGS",
+    };
+    let mut add =
+        |text: String, x: f32, y: f32, _legacy_color: GlyphonColor, bold: bool, max_width: f32| {
+            labels.push(TabLabel {
+                text,
+                x,
+                y,
+                color: theme.glyphon(if bold {
+                    theme.foreground_primary
+                } else {
+                    theme.foreground_secondary
+                }),
+                bold,
+                max_width,
+            });
+        };
+    add(
+        heading.to_string(),
+        14.0,
+        sidebar_y + 8.0,
+        GlyphonColor::rgb(146, 149, 161),
+        true,
+        sidebar_width - 28.0,
+    );
+
+    let active = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.is_active);
+    match mode {
+        crate::shell::SidebarMode::Workspaces => {
+            for (index, workspace) in state.workspaces.iter().enumerate() {
+                let y = sidebar_y + 34.0 + index as f32 * 44.0;
+                add(
+                    format!(
+                        "{} {}",
+                        if workspace.is_active { "▾" } else { "▸" },
+                        workspace.name
+                    ),
+                    14.0,
+                    y,
+                    if workspace.is_active {
+                        GlyphonColor::rgb(229, 231, 235)
+                    } else {
+                        GlyphonColor::rgb(161, 165, 176)
+                    },
+                    workspace.is_active,
+                    sidebar_width - 24.0,
+                );
+                add(
+                    workspace.root_directory.clone(),
+                    30.0,
+                    y + 17.0,
+                    GlyphonColor::rgb(104, 109, 121),
+                    false,
+                    sidebar_width - 42.0,
+                );
+                if workspace.is_active {
+                    add(
+                        format!("⎇  {}", workspace.branch),
+                        30.0,
+                        y + 31.0,
+                        GlyphonColor::rgb(98, 169, 245),
+                        false,
+                        sidebar_width - 42.0,
+                    );
+                }
+            }
+            let y = sidebar_y + 50.0 + state.workspaces.len() as f32 * 44.0;
+            add(
+                "+  New workspace".into(),
+                14.0,
+                y,
+                GlyphonColor::rgb(53, 201, 138),
+                false,
+                sidebar_width - 28.0,
+            );
+        }
+        crate::shell::SidebarMode::Terminals => {
+            if let Some(workspace) = active {
+                add(
+                    workspace.name.clone(),
+                    14.0,
+                    sidebar_y + 34.0,
+                    GlyphonColor::rgb(229, 231, 235),
+                    true,
+                    sidebar_width - 28.0,
+                );
+            }
+            for (index, title) in state.tab_titles.iter().enumerate() {
+                let y = sidebar_y + 62.0 + index as f32 * SIDEBAR_ITEM_HEIGHT;
+                add(
+                    format!(
+                        "{}  {title}",
+                        if index == state.active_tab_index {
+                            "●"
+                        } else {
+                            "○"
+                        }
+                    ),
+                    18.0,
+                    y,
+                    if index == state.active_tab_index {
+                        GlyphonColor::rgb(229, 231, 235)
+                    } else {
+                        GlyphonColor::rgb(161, 165, 176)
+                    },
+                    index == state.active_tab_index,
+                    sidebar_width - 32.0,
+                );
+            }
+            add(
+                "+  New terminal".into(),
+                14.0,
+                sidebar_y + 68.0 + state.tab_titles.len() as f32 * SIDEBAR_ITEM_HEIGHT,
+                GlyphonColor::rgb(53, 201, 138),
+                false,
+                sidebar_width - 28.0,
+            );
+        }
+        crate::shell::SidebarMode::SourceControl => {
+            add(
+                format!(
+                    "⎇  {}",
+                    state.git_branch.as_deref().unwrap_or("No repository")
+                ),
+                14.0,
+                sidebar_y + 34.0,
+                GlyphonColor::rgb(98, 169, 245),
+                true,
+                sidebar_width - 28.0,
+            );
+            add(
+                format!("CHANGES ({})", changes.changed_files.len()),
+                14.0,
+                sidebar_y + 62.0,
+                GlyphonColor::rgb(229, 231, 235),
+                true,
+                sidebar_width - 28.0,
+            );
+            let rows = source_file_rows(changes, sidebar_y);
+            for (title, y) in rows.headers {
+                add(
+                    title,
+                    16.0,
+                    y,
+                    GlyphonColor::rgb(146, 149, 161),
+                    true,
+                    sidebar_width - 28.0,
+                );
+            }
+            for (index, y) in rows.files {
+                if let Some(file) = changes.changed_files.get(index) {
+                    let status = file.kind.marker();
+                    let path = if file.path_info == "." {
+                        file.filename.clone()
+                    } else {
+                        format!("{}/{}", file.path_info, file.filename)
+                    };
+                    add(
+                        format!("{status}  {path}"),
+                        16.0,
+                        y,
+                        if file.staged {
+                            GlyphonColor::rgb(53, 201, 138)
+                        } else {
+                            GlyphonColor::rgb(229, 231, 235)
+                        },
+                        false,
+                        sidebar_width - 28.0,
+                    );
+                }
+            }
+            add(
+                format!("COMMIT HISTORY ({})", changes.history.len()),
+                14.0,
+                rows.history_y,
+                GlyphonColor::rgb(229, 231, 235),
+                true,
+                sidebar_width - 28.0,
+            );
+            for (index, commit) in changes.history.iter().take(12).enumerate() {
+                let y =
+                    rows.history_y + 22.0 + index as f32 * crate::changes_panel::COMMIT_ROW_HEIGHT;
+                add(
+                    commit.message.clone(),
+                    16.0,
+                    y,
+                    GlyphonColor::rgb(190, 194, 204),
+                    false,
+                    sidebar_width - 30.0,
+                );
+                add(
+                    format!(
+                        "{}  ·  {}  ·  {}",
+                        commit.hash, commit.author, commit.relative_time
+                    ),
+                    16.0,
+                    y + 14.0,
+                    GlyphonColor::rgb(104, 109, 121),
+                    false,
+                    sidebar_width - 30.0,
+                );
+            }
+            if changes.branch_picker_open {
+                for (index, branch) in changes.branch_list.iter().take(8).enumerate() {
+                    add(
+                        format!("  {branch}"),
+                        18.0,
+                        sidebar_y + 64.0 + index as f32 * 22.0,
+                        GlyphonColor::rgb(146, 149, 161),
+                        branch == &changes.git_branch,
+                        sidebar_width - 36.0,
+                    );
+                }
+            }
+        }
+        crate::shell::SidebarMode::Conversations => {
+            add(
+                "AI AGENT SESSIONS".into(),
+                14.0,
+                sidebar_y + 34.0,
+                GlyphonColor::rgb(229, 231, 235),
+                true,
+                sidebar_width - 28.0,
+            );
+            if state.chats.is_empty() {
+                add(
+                    "No active agent terminals".into(),
+                    14.0,
+                    sidebar_y + 62.0,
+                    GlyphonColor::rgb(104, 109, 121),
+                    false,
+                    sidebar_width - 28.0,
+                );
+            } else {
+                for (index, chat) in state.chats.iter().enumerate() {
+                    add(
+                        chat.title.clone(),
+                        14.0,
+                        sidebar_y + 62.0 + index as f32 * CHAT_ROW_HEIGHT,
+                        GlyphonColor::rgb(190, 194, 204),
+                        false,
+                        sidebar_width - 28.0,
+                    );
+                }
+            }
+        }
+        crate::shell::SidebarMode::Notifications => {
+            add(
+                "No notifications".into(),
+                14.0,
+                sidebar_y + 36.0,
+                GlyphonColor::rgb(104, 109, 121),
+                false,
+                sidebar_width - 28.0,
+            );
+        }
+        crate::shell::SidebarMode::Settings => {
+            add(
+                "Appearance and preferences are open in Settings".into(),
+                14.0,
+                sidebar_y + 36.0,
+                GlyphonColor::rgb(146, 149, 161),
+                false,
+                sidebar_width - 28.0,
+            );
+        }
+    }
+    labels
 }
 
 /// State representation required to layout and render the sidebar.
@@ -90,41 +395,27 @@ pub struct SidebarState {
     pub workspaces: Vec<WorkspaceEntry>,
     /// Agent chat sessions listed in lower section.
     pub chats: Vec<ChatEntry>,
+    /// Active Git view, displayed as a sidebar navigation item.
+    pub source_control_tab: crate::changes_panel::ChangesTab,
+    /// Number of repository changes for the sidebar badge.
+    pub changed_file_count: usize,
+    /// Number of commits available in the current history list.
+    pub commit_count: usize,
 }
 
 impl Default for SidebarState {
     fn default() -> Self {
         Self {
             workspace_name: "Oxidite".to_string(),
-            git_branch: Some("main".to_string()),
-            git_status: Some("modified".to_string()),
-            tab_titles: vec!["Tab 1".to_string()],
+            git_branch: None,
+            git_status: None,
+            tab_titles: Vec::new(),
             active_tab_index: 0,
-            workspaces: vec![WorkspaceEntry {
-                name: "Oxidite (Rust)".to_string(),
-                branch: "main".to_string(),
-                sessions_count: 1,
-                modified_count: 2,
-                diff_stat: Some((171, 1)),
-                is_active: true,
-            }],
-            chats: vec![
-                ChatEntry {
-                    title: "Implement pitch black UI".to_string(),
-                    status: ChatStatus::Working,
-                    model: "Claude 3.7".to_string(),
-                },
-                ChatEntry {
-                    title: "Review service worker".to_string(),
-                    status: ChatStatus::Done,
-                    model: "Claude 3.7".to_string(),
-                },
-                ChatEntry {
-                    title: "Wasm compilation error".to_string(),
-                    status: ChatStatus::Idle,
-                    model: "Claude 3.7".to_string(),
-                },
-            ],
+            workspaces: Vec::new(),
+            chats: Vec::new(),
+            source_control_tab: crate::changes_panel::ChangesTab::Changes,
+            changed_file_count: 0,
+            commit_count: 0,
         }
     }
 }
@@ -144,16 +435,17 @@ pub fn detect_git_branch(cwd: &Path) -> Option<String> {
     }
 }
 
-/// Builds the quads for rendering the sidebar: pure pitch-black background (#000000), 1px border (#181a20),
-/// active workspace and session highlight cards, and dividers.
+/// Builds the navigation surface, active-session treatment, and subtle dividers.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn assemble_sidebar_quads(
     sidebar_y: f32,
     sidebar_height: f32,
-    accent_color: [f32; 4],
+    sidebar_width: f32,
+    _accent_color: [f32; 4],
     active_tab_index: usize,
     tab_count: usize,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
 
@@ -161,27 +453,27 @@ pub fn assemble_sidebar_quads(
     quads.extend_from_slice(&build_quad_vertices(
         0.0,
         sidebar_y,
-        SIDEBAR_WIDTH,
+        sidebar_width,
         sidebar_height,
-        [0.0, 0.0, 0.0, 1.0],
+        theme.background_secondary.to_rgba_array(1.0),
     ));
 
     // 2. Right vertical border dividing sidebar from terminal grid / agent pane (#181a20)
     quads.extend_from_slice(&build_quad_vertices(
-        SIDEBAR_WIDTH - 1.0,
+        sidebar_width - 1.0,
         sidebar_y,
         1.0,
         sidebar_height,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // 3. Workspace header bottom divider line (#181a20)
     quads.extend_from_slice(&build_quad_vertices(
         0.0,
         sidebar_y + SIDEBAR_HEADER_HEIGHT - 1.0,
-        SIDEBAR_WIDTH,
+        sidebar_width,
         1.0,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // 4. Active tab session item highlight & left indicator strip
@@ -195,9 +487,9 @@ pub fn assemble_sidebar_quads(
             quads.extend_from_slice(&build_quad_vertices(
                 6.0,
                 item_y,
-                SIDEBAR_WIDTH - 12.0,
+                sidebar_width - 12.0,
                 SIDEBAR_ITEM_HEIGHT - 4.0,
-                [0.045, 0.048, 0.065, 0.95],
+                theme.focus_background.to_rgba_array(0.95),
             ));
 
             // Left neon phosphor indicator bar (2.5px wide)
@@ -206,7 +498,7 @@ pub fn assemble_sidebar_quads(
                 item_y,
                 2.5,
                 SIDEBAR_ITEM_HEIGHT - 4.0,
-                accent_color,
+                theme.accent_primary.to_rgba_array(1.0),
             ));
         }
     }
@@ -214,10 +506,49 @@ pub fn assemble_sidebar_quads(
     quads
 }
 
+/// Draws the expanded branch list inside the source-control navigation sidebar.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn assemble_branch_picker_quads(
+    sidebar_y: f32,
+    sidebar_width: f32,
+    changes: &crate::changes_panel::ChangesPanelState,
+    theme: crate::theme::ThemeTokens,
+) -> Vec<QuadVertex> {
+    if !changes.branch_picker_open || changes.branch_list.is_empty() {
+        return Vec::new();
+    }
+    let rows = changes.branch_list.len().min(8);
+    let x = 8.0;
+    let y = sidebar_y + 58.0;
+    let width = (sidebar_width - 16.0).max(0.0);
+    let height = rows as f32 * 22.0 + 8.0;
+    let mut quads = build_quad_vertices(
+        x,
+        y,
+        width,
+        height,
+        theme.background_elevated.to_rgba_array(1.0),
+    )
+    .to_vec();
+    quads.extend_from_slice(&build_quad_vertices(
+        x,
+        y,
+        width,
+        1.0,
+        theme.border_default.to_rgba_array(1.0),
+    ));
+    quads
+}
+
 /// Builds formatted text labels for the sidebar workspace header, branch, sessions, and chats.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
-pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabel> {
+pub fn build_sidebar_labels(
+    state: &SidebarState,
+    sidebar_y: f32,
+    sidebar_width: f32,
+) -> Vec<TabLabel> {
     let mut labels = Vec::new();
 
     // 1. Workspace Section Header
@@ -227,7 +558,15 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         y: sidebar_y + 6.0,
         color: GlyphonColor::rgb(105, 110, 125),
         bold: true,
-        max_width: SIDEBAR_WIDTH - 24.0,
+        max_width: sidebar_width - 24.0,
+    });
+    labels.push(TabLabel {
+        text: "+".to_string(),
+        x: sidebar_width - 24.0,
+        y: sidebar_y + 5.0,
+        color: GlyphonColor::rgb(53, 201, 138),
+        bold: true,
+        max_width: 14.0,
     });
 
     // 2. Active Workspace Name & Branch
@@ -242,11 +581,53 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         y: sidebar_y + 20.0,
         color: GlyphonColor::rgb(220, 225, 240),
         bold: true,
-        max_width: SIDEBAR_WIDTH - 24.0,
+        max_width: sidebar_width - 24.0,
     });
 
-    // 3. Sessions Section Header
-    let sessions_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 6.0;
+    // 3. Workspace rows
+    let workspace_start_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0;
+    for (idx, workspace) in state.workspaces.iter().enumerate() {
+        let row_y = workspace_start_y + idx as f32 * WORKSPACE_ROW_HEIGHT;
+        if row_y + WORKSPACE_ROW_HEIGHT > sidebar_y + 220.0 {
+            break;
+        }
+        labels.push(TabLabel {
+            text: if workspace.is_active { "●" } else { "○" }.to_string(),
+            x: 12.0,
+            y: row_y + 3.0,
+            color: if workspace.is_active {
+                GlyphonColor::rgb(53, 201, 138)
+            } else {
+                GlyphonColor::rgb(104, 109, 121)
+            },
+            bold: workspace.is_active,
+            max_width: 16.0,
+        });
+        labels.push(TabLabel {
+            text: workspace.name.clone(),
+            x: 30.0,
+            y: row_y + 3.0,
+            color: if workspace.is_active {
+                GlyphonColor::rgb(229, 231, 235)
+            } else {
+                GlyphonColor::rgb(146, 149, 161)
+            },
+            bold: workspace.is_active,
+            max_width: sidebar_width - 42.0,
+        });
+        labels.push(TabLabel {
+            text: format!("{} · {}", workspace.branch, workspace.root_directory),
+            x: 30.0,
+            y: row_y + 17.0,
+            color: GlyphonColor::rgb(104, 109, 121),
+            bold: false,
+            max_width: sidebar_width - 42.0,
+        });
+    }
+
+    // 4. Sessions Section Header
+    let sessions_y =
+        workspace_start_y + state.workspaces.len().min(5) as f32 * WORKSPACE_ROW_HEIGHT + 4.0;
     let sessions_header = format!("SESSIONS ({} active)", state.tab_titles.len());
     labels.push(TabLabel {
         text: sessions_header,
@@ -254,7 +635,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
         y: sessions_y,
         color: GlyphonColor::rgb(105, 110, 125),
         bold: true,
-        max_width: SIDEBAR_WIDTH - 24.0,
+        max_width: sidebar_width - 24.0,
     });
 
     // 4. Session Items
@@ -291,20 +672,71 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
             y: item_y + 2.0,
             color: text_color,
             bold: is_active,
-            max_width: SIDEBAR_WIDTH - 40.0,
+            max_width: sidebar_width - 40.0,
         });
     }
 
-    // 5. Chats Section (if configured)
+    // 5. Source Control navigation. These rows select the real Git-backed views.
+    let source_y = last_y + 12.0;
+    labels.push(TabLabel {
+        text: "SOURCE CONTROL".to_string(),
+        x: 12.0,
+        y: source_y,
+        color: GlyphonColor::rgb(105, 110, 125),
+        bold: true,
+        max_width: sidebar_width - 24.0,
+    });
+    for (row, (tab, text)) in [
+        (
+            crate::changes_panel::ChangesTab::Changes,
+            format!("Changes ({})", state.changed_file_count),
+        ),
+        (
+            crate::changes_panel::ChangesTab::History,
+            format!("Commit History ({})", state.commit_count),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row_y = source_y + 18.0 + row as f32 * SIDEBAR_ITEM_HEIGHT;
+        labels.push(TabLabel {
+            text: if state.source_control_tab == tab {
+                "•"
+            } else {
+                " "
+            }
+            .to_string(),
+            x: 14.0,
+            y: row_y + 2.0,
+            color: GlyphonColor::rgb(98, 169, 245),
+            bold: true,
+            max_width: 14.0,
+        });
+        labels.push(TabLabel {
+            text,
+            x: 30.0,
+            y: row_y + 2.0,
+            color: if state.source_control_tab == tab {
+                GlyphonColor::rgb(229, 231, 235)
+            } else {
+                GlyphonColor::rgb(146, 149, 161)
+            },
+            bold: state.source_control_tab == tab,
+            max_width: sidebar_width - 42.0,
+        });
+    }
+
+    // 6. Chats Section (if configured)
     if !state.chats.is_empty() {
-        let chats_header_y = last_y + 12.0;
+        let chats_header_y = source_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT + 8.0;
         labels.push(TabLabel {
             text: format!("CHATS ({} active)", state.chats.len()),
             x: 12.0,
             y: chats_header_y,
             color: GlyphonColor::rgb(105, 110, 125),
             bold: true,
-            max_width: SIDEBAR_WIDTH - 24.0,
+            max_width: sidebar_width - 24.0,
         });
 
         for (c_idx, chat) in state.chats.iter().enumerate() {
@@ -332,7 +764,7 @@ pub fn build_sidebar_labels(state: &SidebarState, sidebar_y: f32) -> Vec<TabLabe
                 y: row_y + 2.0,
                 color: GlyphonColor::rgb(210, 215, 230),
                 bold: chat.status == ChatStatus::Working,
-                max_width: SIDEBAR_WIDTH - 42.0,
+                max_width: sidebar_width - 42.0,
             });
         }
     }
@@ -352,14 +784,29 @@ pub fn hit_test_sidebar(
     y: f32,
     sidebar_y: f32,
     sidebar_height: f32,
+    sidebar_width: f32,
     tab_count: usize,
+    workspace_count: usize,
 ) -> SidebarAction {
-    if x < 0.0 || x > SIDEBAR_WIDTH || y < sidebar_y || y > sidebar_y + sidebar_height {
+    if x < 0.0 || x > sidebar_width || y < sidebar_y || y > sidebar_y + sidebar_height {
         return SidebarAction::None;
+    }
+    if y < sidebar_y + SIDEBAR_HEADER_HEIGHT && x >= sidebar_width - 32.0 {
+        return SidebarAction::NewWorkspace;
+    }
+
+    let workspace_start_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0;
+    let workspace_end_y =
+        workspace_start_y + (workspace_count.min(5) as f32 * WORKSPACE_ROW_HEIGHT);
+    if y >= workspace_start_y && y < workspace_end_y {
+        let index = ((y - workspace_start_y) / WORKSPACE_ROW_HEIGHT) as usize;
+        if index < workspace_count.min(5) {
+            return SidebarAction::SelectWorkspace(index);
+        }
     }
 
     // Check if clicked inside sessions list
-    let list_start_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 24.0;
+    let list_start_y = workspace_end_y + 4.0 + 18.0;
     let list_end_y = list_start_y + (tab_count as f32 * SIDEBAR_ITEM_HEIGHT);
     if y >= list_start_y && y < list_end_y {
         let relative_y = y - list_start_y;
@@ -369,14 +816,162 @@ pub fn hit_test_sidebar(
         }
     }
 
+    let source_header_y = list_end_y + 12.0;
+    if y >= source_header_y + 18.0 && y < source_header_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT {
+        let row = ((y - source_header_y - 18.0) / SIDEBAR_ITEM_HEIGHT) as usize;
+        return if row == 0 {
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::Changes)
+        } else {
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::History)
+        };
+    }
+
     // Check if clicked inside chats section below sessions list
-    let chats_start_y = list_end_y + 30.0;
+    let chats_start_y = source_header_y + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT + 8.0 + 18.0;
     if y >= chats_start_y {
         let relative_y = y - chats_start_y;
         let chat_idx = (relative_y / CHAT_ROW_HEIGHT) as usize;
         return SidebarAction::SelectChat(chat_idx);
     }
 
+    SidebarAction::None
+}
+
+/// Hit-tests the compact Git navigation rows using their rendered row positions.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn hit_test_source_control(
+    y: f32,
+    sidebar_y: f32,
+    changes: &crate::changes_panel::ChangesPanelState,
+) -> SidebarAction {
+    if y >= sidebar_y + 34.0 && y < sidebar_y + 60.0 {
+        return SidebarAction::ToggleBranchPicker;
+    }
+    if changes.branch_picker_open {
+        let start = sidebar_y + 60.0;
+        let index = ((y - start) / 22.0) as usize;
+        if y >= start && y < start + changes.branch_list.len().min(8) as f32 * 22.0 {
+            return SidebarAction::SwitchBranch(index);
+        }
+    }
+    let rows = source_file_rows(changes, sidebar_y);
+    for (file_index, row_y) in &rows.files {
+        if y >= *row_y && y < *row_y + SIDEBAR_ITEM_HEIGHT {
+            return SidebarAction::SelectChangedFile(*file_index);
+        }
+    }
+    if y >= rows.history_y + 22.0 {
+        let commit_index =
+            ((y - rows.history_y - 22.0) / crate::changes_panel::COMMIT_ROW_HEIGHT) as usize;
+        if commit_index < changes.history.len().min(12) {
+            return SidebarAction::SelectCommit(commit_index);
+        }
+    }
+    SidebarAction::None
+}
+
+struct SourceControlRows {
+    files: Vec<(usize, f32)>,
+    headers: Vec<(String, f32)>,
+    history_y: f32,
+}
+
+fn source_file_rows(
+    changes: &crate::changes_panel::ChangesPanelState,
+    sidebar_y: f32,
+) -> SourceControlRows {
+    use crate::changes_panel::ChangeKind;
+    let groups = [
+        (ChangeKind::Modified, "MODIFIED"),
+        (ChangeKind::Added, "ADDED"),
+        (ChangeKind::Deleted, "DELETED"),
+        (ChangeKind::Renamed, "RENAMED"),
+        (ChangeKind::Untracked, "UNTRACKED"),
+    ];
+    let mut rows = Vec::new();
+    let mut headers = Vec::new();
+    let mut y = sidebar_y + 86.0;
+    for (kind, title) in groups {
+        let matching: Vec<usize> = changes
+            .changed_files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.kind == kind)
+            .take(24usize.saturating_sub(rows.len()))
+            .map(|(index, _)| index)
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+        headers.push((format!("{title} ({})", matching.len()), y));
+        y += 18.0;
+        for index in matching {
+            rows.push((index, y));
+            y += SIDEBAR_ITEM_HEIGHT;
+        }
+    }
+    SourceControlRows {
+        files: rows,
+        headers,
+        history_y: y + 8.0,
+    }
+}
+
+/// Hit-tests the mode-specific navigation rows that are rendered by `build_navigation_labels`.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn hit_test_navigation(
+    mode: crate::shell::SidebarMode,
+    y: f32,
+    sidebar_y: f32,
+    workspace_count: usize,
+    tab_count: usize,
+    changes: &crate::changes_panel::ChangesPanelState,
+) -> SidebarAction {
+    match mode {
+        crate::shell::SidebarMode::Workspaces => {
+            let new_y = sidebar_y + 50.0 + workspace_count as f32 * 44.0;
+            if y >= new_y && y < new_y + SIDEBAR_ITEM_HEIGHT {
+                return SidebarAction::NewWorkspace;
+            }
+            let start = sidebar_y + 34.0;
+            if y >= start {
+                let index = ((y - start) / 44.0) as usize;
+                if index < workspace_count {
+                    return SidebarAction::SelectWorkspace(index);
+                }
+            }
+        }
+        crate::shell::SidebarMode::Terminals => {
+            let start = sidebar_y + 62.0;
+            if y >= start && y < start + tab_count as f32 * SIDEBAR_ITEM_HEIGHT {
+                return SidebarAction::SelectTab(((y - start) / SIDEBAR_ITEM_HEIGHT) as usize);
+            }
+            let new_y = sidebar_y + 68.0 + tab_count as f32 * SIDEBAR_ITEM_HEIGHT;
+            if y >= new_y && y < new_y + SIDEBAR_ITEM_HEIGHT {
+                return SidebarAction::NewSession;
+            }
+        }
+        crate::shell::SidebarMode::SourceControl => {
+            return hit_test_source_control(y, sidebar_y, changes);
+        }
+        crate::shell::SidebarMode::Conversations => {
+            let start = sidebar_y + 58.0;
+            if y >= start && y < start + tab_count as f32 * CHAT_ROW_HEIGHT {
+                return SidebarAction::SelectChat(((y - start) / CHAT_ROW_HEIGHT) as usize);
+            }
+        }
+        crate::shell::SidebarMode::Notifications | crate::shell::SidebarMode::Settings => {}
+    }
     SidebarAction::None
 }
 
@@ -393,7 +988,15 @@ mod tests {
 
     #[test]
     fn assemble_sidebar_quads_generates_quads() {
-        let quads = assemble_sidebar_quads(36.0, 500.0, [0.0, 1.0, 0.5, 1.0], 0, 2);
+        let quads = assemble_sidebar_quads(
+            36.0,
+            500.0,
+            240.0,
+            [0.0, 1.0, 0.5, 1.0],
+            0,
+            2,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         // 3 base quads (bg, right border, header divider) + 2 quads for active tab = 5 quads * 6 = 30 vertices
         assert_eq!(quads.len(), 30);
     }
@@ -406,22 +1009,48 @@ mod tests {
 
         // Click outside width
         assert_eq!(
-            hit_test_sidebar(300.0, 100.0, sidebar_y, sidebar_height, tab_count),
+            hit_test_sidebar(300.0, 100.0, sidebar_y, sidebar_height, 240.0, tab_count, 0),
             SidebarAction::None
         );
 
         // Click item 0
-        let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 24.0 + 5.0;
+        let item0_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + 18.0 + 5.0;
         assert_eq!(
-            hit_test_sidebar(50.0, item0_y, sidebar_y, sidebar_height, tab_count),
+            hit_test_sidebar(
+                50.0,
+                item0_y,
+                sidebar_y,
+                sidebar_height,
+                240.0,
+                tab_count,
+                0
+            ),
             SidebarAction::SelectTab(0)
         );
 
         // Click item 1
         let item1_y = item0_y + SIDEBAR_ITEM_HEIGHT;
         assert_eq!(
-            hit_test_sidebar(50.0, item1_y, sidebar_y, sidebar_height, tab_count),
+            hit_test_sidebar(
+                50.0,
+                item1_y,
+                sidebar_y,
+                sidebar_height,
+                240.0,
+                tab_count,
+                0
+            ),
             SidebarAction::SelectTab(1)
+        );
+    }
+
+    #[test]
+    fn hit_test_sidebar_detects_workspace_selection() {
+        let sidebar_y = 36.0;
+        let workspace_y = sidebar_y + SIDEBAR_HEADER_HEIGHT + 5.0;
+        assert_eq!(
+            hit_test_sidebar(50.0, workspace_y, sidebar_y, 500.0, 240.0, 1, 2),
+            SidebarAction::SelectWorkspace(0)
         );
     }
 
@@ -435,12 +1064,200 @@ mod tests {
             active_tab_index: 0,
             workspaces: Vec::new(),
             chats: Vec::new(),
+            source_control_tab: crate::changes_panel::ChangesTab::Changes,
+            changed_file_count: 3,
+            commit_count: 5,
         };
-        let labels = build_sidebar_labels(&state, 36.0);
-        assert_eq!(labels.len(), 7);
+        let labels = build_sidebar_labels(&state, 36.0, 240.0);
         assert_eq!(labels[0].text, "WORKSPACES");
-        assert!(labels[1].text.contains("Oxidite"));
-        assert!(labels[1].text.contains("main"));
-        assert!(labels[2].text.contains("SESSIONS"));
+        assert_eq!(labels[1].text, "+");
+        assert!(labels[2].text.contains("Oxidite"));
+        assert!(labels[2].text.contains("main"));
+        assert!(labels[3].text.contains("SESSIONS"));
+        assert!(labels.iter().any(|label| label.text == "Changes (3)"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == "Commit History (5)")
+        );
+    }
+
+    #[test]
+    fn workspace_rows_show_real_branch_and_root_path() {
+        let mut state = SidebarState::default();
+        state.workspaces.push(WorkspaceEntry {
+            name: "Oxidite".to_string(),
+            root_directory: "C:/work/Oxidite".to_string(),
+            branch: "feat/layout".to_string(),
+            sessions_count: 1,
+            modified_count: 0,
+            diff_stat: None,
+            is_active: true,
+        });
+        let labels = build_sidebar_labels(&state, 36.0, 240.0);
+        assert!(labels.iter().any(|label| label.text == "Oxidite"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text == "feat/layout · C:/work/Oxidite")
+        );
+    }
+
+    #[test]
+    fn hit_test_sidebar_routes_source_control_navigation() {
+        let sidebar_y = 36.0;
+        let workspace_end = sidebar_y + SIDEBAR_HEADER_HEIGHT + 4.0 + WORKSPACE_ROW_HEIGHT;
+        let sessions_end = workspace_end + 4.0 + 18.0 + 2.0 * SIDEBAR_ITEM_HEIGHT;
+        let changes_y = sessions_end + 12.0 + 18.0 + 5.0;
+        let history_y = changes_y + SIDEBAR_ITEM_HEIGHT;
+        assert_eq!(
+            hit_test_sidebar(60.0, changes_y, sidebar_y, 500.0, 240.0, 2, 1),
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::Changes)
+        );
+        assert_eq!(
+            hit_test_sidebar(60.0, history_y, sidebar_y, 500.0, 240.0, 2, 1),
+            SidebarAction::SelectSourceControl(crate::changes_panel::ChangesTab::History)
+        );
+    }
+
+    #[test]
+    fn source_control_branch_picker_routes_toggle_and_checkout_rows() {
+        let mut changes = crate::changes_panel::ChangesPanelState::default();
+        assert_eq!(
+            hit_test_source_control(44.0, 10.0, &changes),
+            SidebarAction::ToggleBranchPicker
+        );
+        changes.branch_picker_open = true;
+        changes.branch_list = vec!["main".into(), "feature/ui".into()];
+        assert_eq!(
+            hit_test_source_control(72.0, 10.0, &changes),
+            SidebarAction::SwitchBranch(0)
+        );
+        assert_eq!(
+            hit_test_source_control(94.0, 10.0, &changes),
+            SidebarAction::SwitchBranch(1)
+        );
+    }
+
+    #[test]
+    fn branch_picker_surface_uses_theme_and_respects_sidebar_width() {
+        let mut changes = crate::changes_panel::ChangesPanelState::default();
+        changes.branch_picker_open = true;
+        changes.branch_list = vec!["main".into()];
+        let theme = crate::theme::Theme::nord().tokens();
+        let quads = assemble_branch_picker_quads(40.0, 220.0, &changes, theme);
+        assert_eq!(quads[0].color, theme.rgba(theme.background_elevated));
+        assert!(quads.iter().all(|vertex| vertex.position[0] <= 228.0));
+    }
+
+    #[test]
+    fn source_control_navigation_uses_real_status_groups_and_commit_data() {
+        let state = SidebarState {
+            workspace_name: "demo".into(),
+            git_branch: Some("feature/ui".into()),
+            ..SidebarState::default()
+        };
+        let changes = crate::changes_panel::ChangesPanelState {
+            changed_files: vec![
+                crate::changes_panel::ChangedFile {
+                    filename: "main.rs".into(),
+                    path_info: "src".into(),
+                    additions: 2,
+                    deletions: 1,
+                    staged: false,
+                    kind: crate::changes_panel::ChangeKind::Modified,
+                },
+                crate::changes_panel::ChangedFile {
+                    filename: "new.txt".into(),
+                    path_info: ".".into(),
+                    additions: 1,
+                    deletions: 0,
+                    staged: false,
+                    kind: crate::changes_panel::ChangeKind::Untracked,
+                },
+            ],
+            history: vec![crate::git::GitCommit {
+                hash: "d34db33".into(),
+                author: "Akash".into(),
+                relative_time: "1h ago".into(),
+                message: "feat: add shell navigation".into(),
+            }],
+            ..crate::changes_panel::ChangesPanelState::default()
+        };
+        let labels = build_navigation_labels(
+            &state,
+            crate::shell::SidebarMode::SourceControl,
+            &changes,
+            40.0,
+            250.0,
+            crate::theme::Theme::default_dark().tokens(),
+        );
+        assert!(labels.iter().any(|label| label.text == "MODIFIED (1)"));
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.text.contains("src/main.rs"))
+        );
+        assert!(labels.iter().any(|label| label.text == "UNTRACKED (1)"));
+        assert!(labels.iter().any(|label| label.text.contains("d34db33")));
+
+        let rows = source_file_rows(&changes, 40.0);
+        assert_eq!(
+            hit_test_source_control(rows.files[0].1 + 2.0, 40.0, &changes),
+            SidebarAction::SelectChangedFile(0)
+        );
+        assert_eq!(
+            hit_test_source_control(rows.history_y + 24.0, 40.0, &changes),
+            SidebarAction::SelectCommit(0)
+        );
+    }
+
+    #[test]
+    fn mode_navigation_selects_workspace_session_and_new_actions() {
+        let changes = crate::changes_panel::ChangesPanelState::default();
+        assert_eq!(
+            hit_test_navigation(
+                crate::shell::SidebarMode::Workspaces,
+                80.0,
+                40.0,
+                1,
+                1,
+                &changes
+            ),
+            SidebarAction::SelectWorkspace(0)
+        );
+        assert_eq!(
+            hit_test_navigation(
+                crate::shell::SidebarMode::Terminals,
+                105.0,
+                40.0,
+                1,
+                1,
+                &changes
+            ),
+            SidebarAction::SelectTab(0)
+        );
+        assert_eq!(
+            hit_test_navigation(
+                crate::shell::SidebarMode::Terminals,
+                140.0,
+                40.0,
+                1,
+                1,
+                &changes
+            ),
+            SidebarAction::NewSession
+        );
+        assert_eq!(
+            hit_test_navigation(
+                crate::shell::SidebarMode::Conversations,
+                100.0,
+                40.0,
+                1,
+                2,
+                &changes
+            ),
+            SidebarAction::SelectChat(0)
+        );
     }
 }

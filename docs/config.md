@@ -71,7 +71,7 @@ scroll_page_up = "Shift+PageUp"
 scroll_page_down = "Shift+PageDown"
 
 # Interactive theme cycling
-cycle_theme = "Ctrl+Shift+T"
+cycle_theme = "Ctrl+Shift+Y"
 ```
 
 ---
@@ -86,7 +86,7 @@ Examples:
 - `"Ctrl+Shift+C"`
 - `"Ctrl+="`
 - `"Shift+PageUp"`
-- `"Ctrl+Shift+T"`
+- `"Ctrl+Shift+Y"`
 
 ---
 

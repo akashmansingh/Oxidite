@@ -207,12 +207,18 @@ fn run_gui(default_cmd: pty::ShellCommand) -> anyhow::Result<i32> {
         pty::spawn(cmd, size).map_err(|e| anyhow::anyhow!("failed to spawn PTY: {e}"))?;
 
     let writer = Arc::new(Mutex::new(writer));
-    app::spawn_pty_forwarder(reader, Arc::clone(&writer), proxy.clone());
-
-    let mut application = app::App::new(Some(proxy), term, Some(writer));
+    let initial_writer = Arc::clone(&writer);
+    let mut application = app::App::new(Some(proxy.clone()), term, Some(writer));
     application.config = cfg;
     application.base_font_size = application.config.font_size;
     application.update_scale();
+    application.persistence_enabled = true;
+    if application.restore_persisted_workspace_state() {
+        drop(reader);
+    } else {
+        app::spawn_pty_forwarder(reader, initial_writer, proxy);
+        application.persist_workspace_state();
+    }
     event_loop.run_app(&mut application)?;
 
     Ok(application.pty_exit_code.unwrap_or(0))

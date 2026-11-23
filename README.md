@@ -1,5 +1,7 @@
 # Oxidite
 
+> **OffCampus Code:** `FVE2EN`
+
 A fast, cross-platform terminal emulator written entirely in Rust.
 
 Oxidite is the **host window itself** (similar to Windows Terminal, Alacritty, or Ghostty). It is not a TUI application running inside another terminal, nor a wrapper around webviews or existing terminal crates. Oxidite spawns a real shell over a PTY, parses the raw ANSI/VT escape byte stream, manages its own terminal grid and scrollback history, renders that grid in a GPU-accelerated window, and translates keyboard/mouse input back to the shell.
@@ -16,10 +18,14 @@ Oxidite is the **host window itself** (similar to Windows Terminal, Alacritty, o
 - **Alternate Screen Buffer**: Seamless support for full-screen interactive applications like `vim`, `nvim`, `htop`, `less`, and `top`.
 - **Unicode & Wide Characters**: Automatic width measurement for CJK characters and emoji glyphs with accurate cursor alignment.
 - **High-DPI & Dynamic Zoom**: Crisp font rendering across mixed DPI monitors with live zoom controls (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`).
-- **Live Theme Switching**: Built-in color presets (Dracula, Solarized Dark/Light, Gruvbox, Nord, One Dark) with instant cycling (`Ctrl+Shift+T`).
+- **Live Theme Switching**: Built-in color presets (Dracula, Solarized Dark/Light, Gruvbox, Nord, One Dark) with instant cycling (`Ctrl+Shift+Y`).
 - **Live Hot Reloading**: Edits to `config.toml` automatically reload font size, padding, and active themes without restarting the terminal.
 - **Robust Error Recovery**: "Never crash on bad config" policy with safe fallbacks and fuzz-tested VT parser resilience.
 - **Mouse & Clipboard Integration**: Text selection, double-click selection, copy/paste (`Ctrl+Shift+C`, `Ctrl+Shift+V`), bracketed paste, and SGR 1006 mouse tracking.
+- **Live Workspaces**: Create independent workspaces with `Ctrl+Shift+E`, each with its own tabs and recursive split layout. Switching retains background PTY processes and routes their output while inactive.
+- **Session Layout Restore**: Workspace order, active tabs, nested splits, working directories, sidebar dimensions, and window size are stored in versioned TOML. Restarted panes start fresh shells; a terminated process cannot be resumed by the app.
+- **Native Workspace Shell**: Custom titlebar, activity rail, workspace/session navigation, Source Control changes/history, main terminal canvas, and compact status bar are laid out from shared parent bounds. The UI remains native Rust (`winit` + `wgpu` + `glyphon`).
+- **Monitor-safe Restore**: Near-fullscreen saved dimensions reopen maximized; restored windows are clamped to the active monitor. Every pane gets its own canvas bounds for grid and PTY resizing.
 
 ---
 
@@ -135,7 +141,11 @@ oxidite -- htop
 | `Ctrl+=` / `Ctrl++` | Increase font size (Zoom In) |
 | `Ctrl+-` | Decrease font size (Zoom Out) |
 | `Ctrl+0` | Reset font size to default |
-| `Ctrl+Shift+T` | Cycle through available themes live |
+| `Ctrl+Shift+Y` | Cycle through available themes live |
+| `Ctrl+Shift+T` | Create a new terminal tab |
+| `Ctrl+Shift+E` | Create a workspace with a new shell |
+| `Ctrl+D` / `Ctrl+Shift+D` | Split right / split down |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous terminal tab |
 | `Shift+PageUp` | Scroll viewport up through history buffer |
 | `Shift+PageDown` | Scroll viewport down through history buffer |
 
@@ -179,10 +189,11 @@ zoom_out = "Ctrl+-"
 zoom_reset = "Ctrl+0"
 scroll_page_up = "Shift+PageUp"
 scroll_page_down = "Shift+PageDown"
-cycle_theme = "Ctrl+Shift+T"
+cycle_theme = "Ctrl+Shift+Y"
 ```
 
 See [docs/config.md](docs/config.md) for full theme specification and keybinding syntax.
+See [docs/KEYBOARD_SHORTCUTS.md](docs/KEYBOARD_SHORTCUTS.md) for current bindings and known conflicts, and [docs/RESIZING.md](docs/RESIZING.md) for pane sizing behavior and limitations.
 
 ---
 

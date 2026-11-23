@@ -70,7 +70,7 @@ Oxidite uses the cross-platform `notify` crate to watch the directory containing
 
 ### 4. Live Theme Switching
 
-Pressing `Ctrl+Shift+T` (or the configured `cycle_theme` keybinding) cycles through all available built-in and shipped themes in real-time. The active theme immediately refreshes the cell palette, background quad colors, cursor highlights, and text styles, triggering a redraw pass across the current screen buffer.
+Pressing `Ctrl+Shift+Y` (or the configured `cycle_theme` keybinding) cycles through all available built-in and shipped themes in real-time. The active theme immediately refreshes the cell palette, background quad colors, cursor highlights, and text styles, triggering a redraw pass across the current screen buffer. `Ctrl+Shift+T` creates a terminal tab in the current application shell.
 
 ---
 

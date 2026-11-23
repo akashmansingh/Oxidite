@@ -248,6 +248,17 @@ pub fn query_git_status(cwd: &Path) -> Vec<ChangedFile> {
             };
 
             let is_staged = index_status != b' ' && index_status != b'?';
+            let kind = if index_status == b'?' && worktree_status == b'?' {
+                crate::changes_panel::ChangeKind::Untracked
+            } else if index_status == b'R' || worktree_status == b'R' {
+                crate::changes_panel::ChangeKind::Renamed
+            } else if index_status == b'D' || worktree_status == b'D' {
+                crate::changes_panel::ChangeKind::Deleted
+            } else if index_status == b'A' || worktree_status == b'A' {
+                crate::changes_panel::ChangeKind::Added
+            } else {
+                crate::changes_panel::ChangeKind::Modified
+            };
             let (mut additions, deletions) =
                 numstat_map.get(target_path).copied().unwrap_or((0, 0));
 
@@ -265,13 +276,9 @@ pub fn query_git_status(cwd: &Path) -> Vec<ChangedFile> {
                 additions,
                 deletions,
                 staged: is_staged,
+                kind,
             });
         }
-    }
-
-    // If working tree is clean, display the files touched in the latest commit
-    if files.is_empty() {
-        files = query_latest_commit_files(cwd);
     }
 
     files
@@ -316,56 +323,6 @@ fn parse_numstat_into(output: &str, map: &mut HashMap<String, (usize, usize)>) {
             entry.1 += dels;
         }
     }
-}
-
-/// Queries files touched in the latest commit when working tree is clean.
-fn query_latest_commit_files(cwd: &Path) -> Vec<ChangedFile> {
-    let mut files = Vec::new();
-
-    let output = Command::new("git")
-        .args(["show", "--numstat", "--pretty=format:", "HEAD"])
-        .current_dir(cwd)
-        .output();
-
-    if let Ok(out) = output
-        && out.status.success()
-    {
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                let additions = parts[0].parse::<usize>().unwrap_or(0);
-                let deletions = parts[1].parse::<usize>().unwrap_or(0);
-                let full_path = parts[2];
-                let path_buf = PathBuf::from(full_path);
-                let filename = path_buf
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(full_path)
-                    .to_string();
-                let parent = path_buf
-                    .parent()
-                    .and_then(|p| p.to_str())
-                    .unwrap_or("")
-                    .replace('\\', "/");
-                let path_info = if parent.is_empty() {
-                    ".".to_string()
-                } else {
-                    parent
-                };
-
-                files.push(ChangedFile {
-                    filename,
-                    path_info,
-                    additions,
-                    deletions,
-                    staged: true, // committed
-                });
-            }
-        }
-    }
-
-    files
 }
 
 /// Queries commit history log up to `limit` entries.

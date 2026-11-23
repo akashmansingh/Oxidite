@@ -1,7 +1,6 @@
 //! Status bar component providing layout geometry, badges, and quad rendering.
 
 use crate::renderer::draw::{QuadVertex, TabLabel, build_quad_vertices};
-use glyphon::Color as GlyphonColor;
 
 /// Fixed height of the bottom status bar in logical pixels.
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -66,6 +65,7 @@ pub fn assemble_status_bar_quads(
     status_bar_height: f32,
     accent_color: [f32; 4],
     state: &StatusBarState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     let bar_y = (window_height - status_bar_height).max(0.0);
@@ -76,7 +76,7 @@ pub fn assemble_status_bar_quads(
         bar_y,
         window_width,
         status_bar_height,
-        [0.0, 0.0, 0.0, 1.0],
+        theme.background_secondary.to_rgba_array(1.0),
     ));
 
     // 2. Top 1px border line (#181a20)
@@ -85,7 +85,7 @@ pub fn assemble_status_bar_quads(
         bar_y,
         window_width,
         1.0,
-        [0.095, 0.105, 0.13, 1.0],
+        theme.border_default.to_rgba_array(1.0),
     ));
 
     // 3. Mode badge pill background and border
@@ -97,7 +97,7 @@ pub fn assemble_status_bar_quads(
             0.9,
         ]
     } else {
-        [0.05, 0.055, 0.075, 0.9]
+        theme.background_elevated.to_rgba_array(0.9)
     };
 
     let badge_h = (status_bar_height - 6.0).max(18.0);
@@ -113,14 +113,14 @@ pub fn assemble_status_bar_quads(
         bar_y + 3.0,
         68.0,
         1.0,
-        [0.18, 0.20, 0.26, 0.7],
+        theme.border_subtle.to_rgba_array(0.7),
     ));
     quads.extend_from_slice(&build_quad_vertices(
         6.0,
         bar_y + 3.0 + badge_h - 1.0,
         68.0,
         1.0,
-        [0.18, 0.20, 0.26, 0.7],
+        theme.border_subtle.to_rgba_array(0.7),
     ));
 
     // 4. Interactive Settings pill button background and crisp 1px border
@@ -135,12 +135,12 @@ pub fn assemble_status_bar_quads(
                 0.95,
             ]
         } else {
-            [0.08, 0.09, 0.12, 0.95]
+            theme.background_elevated.to_rgba_array(0.95)
         };
         let border_color = if state.settings_open {
             accent_color
         } else {
-            [0.22, 0.25, 0.32, 0.9]
+            theme.border_default.to_rgba_array(0.9)
         };
 
         // Background
@@ -181,6 +181,7 @@ pub fn build_status_bar_labels(
     window_width: f32,
     window_height: f32,
     status_bar_height: f32,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let mut labels = Vec::new();
     let bar_y = (window_height - status_bar_height).max(0.0);
@@ -188,9 +189,9 @@ pub fn build_status_bar_labels(
 
     // Mode badge text ("NORMAL" or "ALT-BUF")
     let (mode_text, mode_color) = if state.is_alt_screen {
-        ("ALT-BUF", GlyphonColor::rgb(210, 160, 255))
+        ("ALT-BUF", theme.glyphon(theme.info))
     } else {
-        ("NORMAL", GlyphonColor::rgb(61, 220, 151))
+        ("NORMAL", theme.glyphon(theme.success))
     };
 
     labels.push(TabLabel {
@@ -208,7 +209,7 @@ pub fn build_status_bar_labels(
         text: shell_label,
         x: 82.0,
         y: text_y,
-        color: GlyphonColor::rgb(138, 144, 162),
+        color: theme.glyphon(theme.foreground_secondary),
         bold: false,
         max_width: 140.0,
     });
@@ -219,7 +220,7 @@ pub fn build_status_bar_labels(
             text: format!("Branch: {branch}"),
             x: 160.0,
             y: text_y,
-            color: GlyphonColor::rgb(0, 240, 255), // Retro electric cyan
+            color: theme.glyphon(theme.accent_primary),
             bold: false,
             max_width: 150.0,
         });
@@ -242,7 +243,7 @@ pub fn build_status_bar_labels(
             text: pos_info,
             x: pos_x,
             y: text_y,
-            color: GlyphonColor::rgb(155, 160, 175),
+            color: theme.glyphon(theme.foreground_muted),
             bold: false,
             max_width: pos_w + 10.0,
         });
@@ -252,7 +253,7 @@ pub fn build_status_bar_labels(
             text: "[ Settings ]".to_string(),
             x: btn_x + 8.0,
             y: btn_y + ((btn_h - 14.0) / 2.0).max(2.0),
-            color: GlyphonColor::rgb(240, 245, 255),
+            color: theme.glyphon(theme.foreground_primary),
             bold: true,
             max_width: btn_w - 10.0,
         });
@@ -263,7 +264,7 @@ pub fn build_status_bar_labels(
             text: tab_info,
             x: btn_x + btn_w + 10.0,
             y: text_y,
-            color: GlyphonColor::rgb(140, 145, 160),
+            color: theme.glyphon(theme.foreground_muted),
             bold: false,
             max_width: 40.0,
         });
@@ -322,6 +323,7 @@ mod tests {
             STATUS_BAR_HEIGHT,
             [0.4, 0.6, 1.0, 1.0],
             &state,
+            crate::theme::Theme::default_dark().tokens(),
         );
         assert!(!quads.is_empty());
 
@@ -332,6 +334,7 @@ mod tests {
             STATUS_BAR_HEIGHT,
             [0.4, 0.6, 1.0, 1.0],
             &state,
+            crate::theme::Theme::default_dark().tokens(),
         );
         assert!(!narrow_quads.is_empty());
     }
@@ -351,7 +354,13 @@ mod tests {
             settings_open: false,
         };
 
-        let labels = build_status_bar_labels(&state, 800.0, 600.0, STATUS_BAR_HEIGHT);
+        let labels = build_status_bar_labels(
+            &state,
+            800.0,
+            600.0,
+            STATUS_BAR_HEIGHT,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert_eq!(labels.len(), 5);
         assert_eq!(labels[0].text, "NORMAL");
         assert_eq!(labels[1].text, "pwsh");
@@ -364,7 +373,13 @@ mod tests {
     #[test]
     fn build_status_bar_labels_narrow_window_skips_right_info() {
         let state = StatusBarState::default();
-        let labels = build_status_bar_labels(&state, 300.0, 600.0, STATUS_BAR_HEIGHT);
+        let labels = build_status_bar_labels(
+            &state,
+            300.0,
+            600.0,
+            STATUS_BAR_HEIGHT,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert_eq!(labels.len(), 2);
     }
 
@@ -374,7 +389,13 @@ mod tests {
             git_branch: Some("feat/ui".to_string()),
             ..StatusBarState::default()
         };
-        let labels = build_status_bar_labels(&state, 800.0, 600.0, STATUS_BAR_HEIGHT);
+        let labels = build_status_bar_labels(
+            &state,
+            800.0,
+            600.0,
+            STATUS_BAR_HEIGHT,
+            crate::theme::Theme::default_dark().tokens(),
+        );
         assert_eq!(labels.len(), 6);
         assert_eq!(labels[2].text, "Branch: feat/ui");
     }

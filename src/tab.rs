@@ -727,20 +727,20 @@ pub struct TabRect {
 /// Rectangle dimensions `(x, y, width, height)` for an action button in the chrome.
 pub type ButtonRect = (f32, f32, f32, f32);
 
-/// Computes layout rectangles for all tabs, plus button, and sidebar toggle button given total window width.
+/// Computes layout rectangles for all tabs, plus button, and the retired sidebar button slot.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn compute_tab_layouts(
     count: usize,
     window_width: f32,
 ) -> (Vec<TabRect>, ButtonRect, ButtonRect) {
-    let sidebar_btn = (6.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
-    let default_plus = (32.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
+    let sidebar_btn = (0.0, 0.0, 0.0, 0.0);
+    let default_plus = (12.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
     if count == 0 {
         return (Vec::new(), default_plus, sidebar_btn);
     }
 
-    let start_x = sidebar_btn.0 + sidebar_btn.2 + 8.0;
+    let start_x = 12.0;
     let available_w = (window_width - start_x - 48.0).max(TAB_MIN_WIDTH);
     let tab_w = (available_w / count as f32).clamp(TAB_MIN_WIDTH, TAB_PREFERRED_WIDTH);
     let tab_h = TAB_BAR_HEIGHT - 6.0;
@@ -777,14 +777,13 @@ pub struct ChromeButtons {
     pub max_btn: ButtonRect,
 }
 
-/// Computes positions for all right-aligned upper ribbon controls:
-/// `[⚙ Settings]`, `[◫ Split]`, `[⛶ Fullscreen]`, `[⤢ Maximize]`.
+/// Computes positions for the remaining terminal tab action: split terminal.
 #[must_use]
 pub fn compute_chrome_buttons_extended(window_width: f32) -> ChromeButtons {
-    let max_btn = (window_width - 26.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
-    let fullscreen_btn = (window_width - 52.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
-    let split_btn = (window_width - 78.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
-    let settings_btn = (window_width - 104.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
+    let max_btn = (0.0, 0.0, 0.0, 0.0);
+    let fullscreen_btn = (0.0, 0.0, 0.0, 0.0);
+    let split_btn = (window_width - 32.0, 7.0, TAB_BUTTON_SIZE, TAB_BUTTON_SIZE);
+    let settings_btn = (0.0, 0.0, 0.0, 0.0);
     ChromeButtons {
         settings_btn,
         split_btn,
@@ -807,28 +806,14 @@ pub fn hit_test(x: f32, y: f32, count: usize, window_width: f32) -> TabBarAction
         return TabBarAction::None;
     }
 
-    let (layouts, plus_btn, sidebar_btn) = compute_tab_layouts(count, window_width);
+    let (layouts, plus_btn, _) = compute_tab_layouts(count, window_width);
     let chrome = compute_chrome_buttons_extended(window_width);
 
     let in_box = |r: ButtonRect| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3;
 
-    // Check right-aligned chrome buttons
-    if in_box(chrome.settings_btn) {
-        return TabBarAction::OpenSettings;
-    }
+    // Only split remains in the tab strip; window and sidebar actions live in the shell.
     if in_box(chrome.split_btn) {
         return TabBarAction::ToggleSplit;
-    }
-    if in_box(chrome.fullscreen_btn) {
-        return TabBarAction::ToggleFullscreen;
-    }
-    if in_box(chrome.max_btn) {
-        return TabBarAction::ToggleMaximize;
-    }
-
-    // Check sidebar toggle button [◨]
-    if in_box(sidebar_btn) {
-        return TabBarAction::ToggleSidebar;
     }
 
     // Check plus button [+]
@@ -871,6 +856,7 @@ pub fn assemble_tab_bar_quads(
         window_width,
         accent_color,
         [0.0, 0.0, 0.0, 1.0],
+        crate::theme::Theme::default_dark().tokens(),
     )
 }
 
@@ -881,52 +867,17 @@ pub fn assemble_tab_bar_quads_themed(
     tab_count: usize,
     active_index: usize,
     window_width: f32,
-    accent_color: [f32; 4],
-    bg_color: [f32; 4],
+    _accent_color: [f32; 4],
+    _bg_color: [f32; 4],
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
-    let (layouts, plus_btn, sidebar_btn) = compute_tab_layouts(tab_count, window_width);
+    let (layouts, plus_btn, _) = compute_tab_layouts(tab_count, window_width);
     let chrome = compute_chrome_buttons_extended(window_width);
 
-    let is_light = (0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2]) > 0.51;
-
-    let bar_bg = if is_light {
-        [
-            bg_color[0] * 0.90,
-            bg_color[1] * 0.90,
-            bg_color[2] * 0.90,
-            1.0,
-        ]
-    } else {
-        [
-            (bg_color[0] * 0.85).max(0.0),
-            (bg_color[1] * 0.85).max(0.0),
-            (bg_color[2] * 0.85).max(0.0),
-            1.0,
-        ]
-    };
-
-    let border_color = if is_light {
-        [0.72, 0.75, 0.78, 1.0]
-    } else {
-        [0.12, 0.14, 0.19, 1.0]
-    };
-
-    let btn_bg = if is_light {
-        [
-            bg_color[0] * 0.94,
-            bg_color[1] * 0.94,
-            bg_color[2] * 0.94,
-            0.95,
-        ]
-    } else {
-        [
-            (bg_color[0] + 0.06).min(1.0),
-            (bg_color[1] + 0.065).min(1.0),
-            (bg_color[2] + 0.09).min(1.0),
-            0.9,
-        ]
-    };
+    let bar_bg = theme.background_secondary.to_rgba_array(1.0);
+    let border_color = theme.border_default.to_rgba_array(1.0);
+    let btn_bg = theme.background_elevated.to_rgba_array(0.95);
 
     // 1. Tab bar background
     quads.extend_from_slice(&build_quad_vertices(
@@ -946,82 +897,17 @@ pub fn assemble_tab_bar_quads_themed(
         border_color,
     ));
 
-    // 3. Sidebar toggle button quad [◨]
-    quads.extend_from_slice(&build_quad_vertices(
-        sidebar_btn.0,
-        sidebar_btn.1,
-        sidebar_btn.2,
-        sidebar_btn.3,
-        btn_bg,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        sidebar_btn.0,
-        sidebar_btn.1,
-        sidebar_btn.2,
-        1.0,
-        border_color,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        sidebar_btn.0,
-        sidebar_btn.1 + sidebar_btn.3 - 1.0,
-        sidebar_btn.2,
-        1.0,
-        border_color,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        sidebar_btn.0,
-        sidebar_btn.1,
-        1.0,
-        sidebar_btn.3,
-        border_color,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        sidebar_btn.0 + sidebar_btn.2 - 1.0,
-        sidebar_btn.1,
-        1.0,
-        sidebar_btn.3,
-        border_color,
-    ));
-
     for (idx, layout) in layouts.iter().enumerate() {
         let is_active = idx == active_index;
-        let (tab_bg, tab_border) = if is_active {
-            if is_light {
-                (
-                    [bg_color[0], bg_color[1], bg_color[2], 1.0],
-                    [0.65, 0.68, 0.72, 1.0],
-                )
-            } else {
-                (
-                    [
-                        (bg_color[0] + 0.08).min(1.0),
-                        (bg_color[1] + 0.085).min(1.0),
-                        (bg_color[2] + 0.11).min(1.0),
-                        1.0,
-                    ],
-                    [0.22, 0.28, 0.40, 0.85],
-                )
-            }
-        } else if is_light {
-            (
-                [
-                    bg_color[0] * 0.95,
-                    bg_color[1] * 0.95,
-                    bg_color[2] * 0.95,
-                    1.0,
-                ],
-                [0.78, 0.80, 0.84, 0.5],
-            )
+        let tab_bg = if is_active {
+            theme.background_primary.to_rgba_array(1.0)
         } else {
-            (
-                [
-                    (bg_color[0] + 0.02).min(1.0),
-                    (bg_color[1] + 0.022).min(1.0),
-                    (bg_color[2] + 0.035).min(1.0),
-                    0.8,
-                ],
-                [0.14, 0.16, 0.22, 0.5],
-            )
+            theme.background_secondary.to_rgba_array(1.0)
+        };
+        let tab_border = if is_active {
+            theme.border_active.to_rgba_array(1.0)
+        } else {
+            theme.border_subtle.to_rgba_array(0.65)
         };
 
         // Tab body quad
@@ -1063,7 +949,7 @@ pub fn assemble_tab_bar_quads_themed(
                 layout.y,
                 layout.width,
                 2.5,
-                accent_color,
+                theme.accent_primary.to_rgba_array(1.0),
             ));
         }
 
@@ -1073,11 +959,7 @@ pub fn assemble_tab_bar_quads_themed(
             layout.close_btn_y,
             layout.close_btn_size,
             layout.close_btn_size,
-            if is_light {
-                [0.85, 0.85, 0.88, 0.6]
-            } else {
-                [0.16, 0.18, 0.24, 0.6]
-            },
+            theme.hover_background.to_rgba_array(0.6),
         ));
     }
 
@@ -1114,51 +996,7 @@ pub fn assemble_tab_bar_quads_themed(
         border_color,
     ));
 
-    // Right-aligned upper ribbon buttons: unified segmented pill toolbar
-    let toolbar_x = chrome.settings_btn.0 - 4.0;
-    let toolbar_w = (chrome.max_btn.0 + chrome.max_btn.2) - toolbar_x + 4.0;
-    let toolbar_y = chrome.settings_btn.1 - 2.0;
-    let toolbar_h = chrome.settings_btn.3 + 4.0;
-    let track_bg = if is_light {
-        [0.84, 0.86, 0.90, 0.95]
-    } else {
-        [0.07, 0.08, 0.11, 0.95]
-    };
-    // Toolbar capsule track background
-    quads.extend_from_slice(&build_quad_vertices(
-        toolbar_x, toolbar_y, toolbar_w, toolbar_h, track_bg,
-    ));
-    // 1px border around toolbar capsule
-    quads.extend_from_slice(&build_quad_vertices(
-        toolbar_x,
-        toolbar_y,
-        toolbar_w,
-        1.0,
-        border_color,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        toolbar_x,
-        toolbar_y + toolbar_h - 1.0,
-        toolbar_w,
-        1.0,
-        border_color,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        toolbar_x,
-        toolbar_y,
-        1.0,
-        toolbar_h,
-        border_color,
-    ));
-    quads.extend_from_slice(&build_quad_vertices(
-        toolbar_x + toolbar_w - 1.0,
-        toolbar_y,
-        1.0,
-        toolbar_h,
-        border_color,
-    ));
-
-    // Right-aligned upper ribbon buttons: Settings [⚙], Split [◫], Fullscreen [⛶], Maximize [⤢]
+    // Split action is the only toolbar control retained in this contextual tab strip.
     let push_ribbon_btn = |quads: &mut Vec<QuadVertex>, rect: ButtonRect| {
         quads.extend_from_slice(&build_quad_vertices(rect.0, rect.1, rect.2, rect.3, btn_bg));
         quads.extend_from_slice(&build_quad_vertices(
@@ -1191,10 +1029,7 @@ pub fn assemble_tab_bar_quads_themed(
         ));
     };
 
-    push_ribbon_btn(&mut quads, chrome.settings_btn);
     push_ribbon_btn(&mut quads, chrome.split_btn);
-    push_ribbon_btn(&mut quads, chrome.fullscreen_btn);
-    push_ribbon_btn(&mut quads, chrome.max_btn);
 
     quads
 }
@@ -1340,6 +1175,8 @@ pub struct TabRenameState {
     pub input_text: String,
     /// Character cursor position within `input_text`.
     pub cursor_pos: usize,
+    /// Whether this modal is renaming a workspace instead of a terminal session.
+    pub workspace_index: Option<usize>,
 }
 
 impl TabRenameState {
@@ -1352,6 +1189,25 @@ impl TabRenameState {
             tab_index,
             input_text,
             cursor_pos,
+            workspace_index: None,
+        }
+    }
+
+    /// Creates a rename modal state for a registered workspace.
+    #[must_use]
+    pub fn for_workspace(workspace_index: usize, current_name: &str) -> Self {
+        let mut state = Self::new(workspace_index, current_name);
+        state.workspace_index = Some(workspace_index);
+        state
+    }
+
+    /// Returns the entity name displayed in the modal heading.
+    #[must_use]
+    pub const fn dialog_title(&self) -> &'static str {
+        if self.workspace_index.is_some() {
+            "Rename Workspace"
+        } else {
+            "Rename Session"
         }
     }
 
@@ -1431,7 +1287,8 @@ pub enum TabRenameAction {
 pub fn assemble_tab_rename_quads(
     window_width: f32,
     window_height: f32,
-    accent_color: [f32; 4],
+    _accent_color: [f32; 4],
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     let card_w = 400.0_f32;
@@ -1445,7 +1302,11 @@ pub fn assemble_tab_rename_quads(
         0.0,
         window_width,
         window_height,
-        [0.0, 0.0, 0.0, 0.65],
+        {
+            let mut color = theme.rgba(theme.background_primary);
+            color[3] = 0.65;
+            color
+        },
     ));
 
     // 2. Card border (accent)
@@ -1454,7 +1315,7 @@ pub fn assemble_tab_rename_quads(
         card_y - 1.0,
         card_w + 2.0,
         card_h + 2.0,
-        accent_color,
+        theme.rgba(theme.border_active),
     ));
 
     // 3. Card background (#0b0c10)
@@ -1463,7 +1324,7 @@ pub fn assemble_tab_rename_quads(
         card_y,
         card_w,
         card_h,
-        [0.045, 0.048, 0.065, 0.98],
+        theme.rgba(theme.background_elevated),
     ));
 
     // 4. Text input box border
@@ -1472,7 +1333,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 44.0,
         card_w - 38.0,
         34.0,
-        [0.22, 0.25, 0.35, 0.8],
+        theme.rgba(theme.border_default),
     ));
 
     // 5. Text input box background (#040507)
@@ -1481,7 +1342,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 45.0,
         card_w - 40.0,
         32.0,
-        [0.02, 0.025, 0.035, 1.0],
+        theme.rgba(theme.background_primary),
     ));
 
     // 6. Save button background
@@ -1490,7 +1351,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 92.0,
         80.0,
         28.0,
-        [0.18, 0.42, 0.78, 0.9],
+        theme.rgba(theme.accent_primary),
     ));
 
     // 7. Cancel button background
@@ -1499,7 +1360,7 @@ pub fn assemble_tab_rename_quads(
         card_y + 92.0,
         75.0,
         28.0,
-        [0.14, 0.15, 0.20, 0.8],
+        theme.rgba(theme.background_tertiary),
     ));
 
     quads
@@ -1552,6 +1413,7 @@ pub fn build_tab_rename_labels(
     window_width: f32,
     window_height: f32,
     show_cursor: bool,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let card_w = 400.0_f32;
     let card_h = 140.0_f32;
@@ -1562,10 +1424,10 @@ pub fn build_tab_rename_labels(
 
     // Dialog title
     labels.push(TabLabel {
-        text: "Rename Tab".to_string(),
+        text: state.dialog_title().to_string(),
         x: card_x + 20.0,
         y: card_y + 14.0,
-        color: glyphon::Color::rgb(240, 242, 250),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: card_w - 40.0,
     });
@@ -1591,7 +1453,7 @@ pub fn build_tab_rename_labels(
         text: input_display,
         x: card_x + 28.0,
         y: card_y + 51.0,
-        color: glyphon::Color::rgb(220, 225, 240),
+        color: theme.glyphon(theme.foreground_primary),
         bold: false,
         max_width: card_w - 56.0,
     });
@@ -1601,7 +1463,7 @@ pub fn build_tab_rename_labels(
         text: "Save".to_string(),
         x: card_x + card_w - 168.0,
         y: card_y + 97.0,
-        color: glyphon::Color::rgb(255, 255, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 60.0,
     });
@@ -1611,7 +1473,7 @@ pub fn build_tab_rename_labels(
         text: "Cancel".to_string(),
         x: card_x + card_w - 82.0,
         y: card_y + 97.0,
-        color: glyphon::Color::rgb(180, 185, 200),
+        color: theme.glyphon(theme.foreground_secondary),
         bold: false,
         max_width: 60.0,
     });
@@ -1628,6 +1490,10 @@ pub struct CloseConfirmState {
     pub title: String,
     /// Whether the user has selected the Confirm [Close Tab] button vs [Cancel].
     pub confirm_selected: bool,
+    /// Workspace index when confirmation closes a workspace instead of one session.
+    pub workspace_index: Option<usize>,
+    /// Whether confirmation removes workspace registration rather than only closing sessions.
+    pub remove_workspace: bool,
 }
 
 impl CloseConfirmState {
@@ -1638,6 +1504,40 @@ impl CloseConfirmState {
             tab_index,
             title,
             confirm_selected: true,
+            workspace_index: None,
+            remove_workspace: false,
+        }
+    }
+
+    /// Creates a confirmation state for closing a registered workspace and its live sessions.
+    #[must_use]
+    pub fn for_workspace(workspace_index: usize, title: String) -> Self {
+        Self {
+            tab_index: 0,
+            title,
+            confirm_selected: true,
+            workspace_index: Some(workspace_index),
+            remove_workspace: false,
+        }
+    }
+
+    /// Creates a confirmation state for removing a workspace registration without deleting files.
+    #[must_use]
+    pub fn for_remove_workspace(workspace_index: usize, title: String) -> Self {
+        let mut state = Self::for_workspace(workspace_index, title);
+        state.remove_workspace = true;
+        state
+    }
+
+    /// Returns a title appropriate for the close target.
+    #[must_use]
+    pub const fn dialog_title(&self) -> &'static str {
+        if self.remove_workspace {
+            "Remove Workspace?"
+        } else if self.workspace_index.is_some() {
+            "Close Workspace?"
+        } else {
+            "Close Active Session?"
         }
     }
 
@@ -1665,6 +1565,7 @@ pub fn assemble_close_confirm_quads(
     window_height: f32,
     confirm_selected: bool,
     _accent_color: [f32; 4],
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     let card_w = 440.0_f32;
@@ -1678,7 +1579,11 @@ pub fn assemble_close_confirm_quads(
         0.0,
         window_width,
         window_height,
-        [0.0, 0.0, 0.0, 0.65],
+        {
+            let mut color = theme.rgba(theme.background_primary);
+            color[3] = 0.65;
+            color
+        },
     ));
 
     // 2. Card border
@@ -1687,7 +1592,7 @@ pub fn assemble_close_confirm_quads(
         card_y - 1.0,
         card_w + 2.0,
         card_h + 2.0,
-        [0.25, 0.28, 0.38, 0.9],
+        theme.rgba(theme.border_default),
     ));
 
     // 3. Card body (#0b0c10)
@@ -1696,7 +1601,7 @@ pub fn assemble_close_confirm_quads(
         card_y,
         card_w,
         card_h,
-        [0.045, 0.048, 0.065, 0.98],
+        theme.rgba(theme.background_elevated),
     ));
 
     // 4. Header warning accent line (coral red)
@@ -1705,14 +1610,14 @@ pub fn assemble_close_confirm_quads(
         card_y,
         card_w,
         3.0,
-        [0.92, 0.35, 0.35, 1.0],
+        theme.rgba(theme.error),
     ));
 
     // 5. Close Tab button: card_x + card_w - 235.0, card_y + 110.0, 115.0, 32.0
     let close_bg = if confirm_selected {
-        [0.85, 0.22, 0.25, 0.95] // Highlighted vibrant red
+        theme.rgba(theme.error)
     } else {
-        [0.18, 0.19, 0.26, 0.8]
+        theme.rgba(theme.background_tertiary)
     };
     quads.extend_from_slice(&build_quad_vertices(
         card_x + card_w - 235.0,
@@ -1724,9 +1629,9 @@ pub fn assemble_close_confirm_quads(
 
     // 6. Cancel button: card_x + card_w - 105.0, card_y + 110.0, 85.0, 32.0
     let cancel_bg = if confirm_selected {
-        [0.14, 0.15, 0.20, 0.8]
+        theme.rgba(theme.background_tertiary)
     } else {
-        [0.28, 0.32, 0.44, 0.95] // Highlighted gray
+        theme.rgba(theme.focus_background)
     };
     quads.extend_from_slice(&build_quad_vertices(
         card_x + card_w - 105.0,
@@ -1779,6 +1684,7 @@ pub fn build_close_confirm_labels(
     state: &CloseConfirmState,
     window_width: f32,
     window_height: f32,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let card_w = 440.0_f32;
     let card_h = 160.0_f32;
@@ -1789,40 +1695,62 @@ pub fn build_close_confirm_labels(
 
     // Dialog title
     labels.push(TabLabel {
-        text: "Close Active Tab?".to_string(),
+        text: state.dialog_title().to_string(),
         x: card_x + 20.0,
         y: card_y + 16.0,
-        color: glyphon::Color::rgb(250, 100, 100),
+        color: theme.glyphon(theme.error),
         bold: true,
         max_width: card_w - 40.0,
     });
 
     // Subtitle warning
-    let subtitle = format!("A terminal process is still running in '{}'.", state.title);
+    let subtitle = if state.remove_workspace {
+        format!("Remove workspace '{}' from Oxidite?", state.title)
+    } else if state.workspace_index.is_some() {
+        format!(
+            "Close workspace '{}' and its terminal sessions?",
+            state.title
+        )
+    } else {
+        format!("A terminal process is still running in '{}'.", state.title)
+    };
     labels.push(TabLabel {
         text: subtitle,
         x: card_x + 20.0,
         y: card_y + 46.0,
-        color: glyphon::Color::rgb(210, 215, 230),
+        color: theme.glyphon(theme.foreground_primary),
         bold: false,
         max_width: card_w - 40.0,
     });
 
     labels.push(TabLabel {
-        text: "Closing this tab will terminate all child processes.".to_string(),
+        text: if state.remove_workspace {
+            "This removes its registration and stops its sessions; project files stay on disk."
+                .to_string()
+        } else if state.workspace_index.is_some() {
+            "This closes its terminal sessions but keeps the workspace registered; project files stay on disk.".to_string()
+        } else {
+            "Closing this session will terminate its child processes.".to_string()
+        },
         x: card_x + 20.0,
         y: card_y + 68.0,
-        color: glyphon::Color::rgb(140, 145, 160),
+        color: theme.glyphon(theme.foreground_muted),
         bold: false,
         max_width: card_w - 40.0,
     });
 
     // Close button label
     labels.push(TabLabel {
-        text: "Close Tab".to_string(),
+        text: if state.remove_workspace {
+            "Remove Workspace".to_string()
+        } else if state.workspace_index.is_some() {
+            "Close Workspace".to_string()
+        } else {
+            "Close Tab".to_string()
+        },
         x: card_x + card_w - 212.0,
         y: card_y + 117.0,
-        color: glyphon::Color::rgb(255, 255, 255),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 90.0,
     });
@@ -1832,7 +1760,7 @@ pub fn build_close_confirm_labels(
         text: "Cancel".to_string(),
         x: card_x + card_w - 88.0,
         y: card_y + 117.0,
-        color: glyphon::Color::rgb(220, 225, 240),
+        color: theme.glyphon(theme.foreground_primary),
         bold: true,
         max_width: 70.0,
     });
@@ -1848,8 +1776,8 @@ mod tests {
     fn compute_tab_layouts_scales_with_count() {
         let (layouts, plus_btn, sidebar_btn) = compute_tab_layouts(3, 800.0);
         assert_eq!(layouts.len(), 3);
-        assert_eq!(sidebar_btn.0, 6.0);
-        assert!(layouts[0].x > sidebar_btn.0);
+        assert_eq!(sidebar_btn.2, 0.0);
+        assert!(layouts[0].x > 0.0);
         assert!(layouts[1].x > layouts[0].x);
         assert!(layouts[2].x > layouts[1].x);
         assert!(plus_btn.0 > layouts[2].x + layouts[2].width);
@@ -1857,38 +1785,38 @@ mod tests {
 
     #[test]
     fn hit_test_detects_tab_selection_close_and_new_tab() {
-        let (layouts, plus_btn, sidebar_btn) = compute_tab_layouts(2, 800.0);
+        let (layouts, plus_btn, _) = compute_tab_layouts(2, 800.0);
         let chrome = compute_chrome_buttons_extended(800.0);
 
-        // Click sidebar toggle button
-        let toggle_action = hit_test(sidebar_btn.0 + 2.0, sidebar_btn.1 + 2.0, 2, 800.0);
-        assert_eq!(toggle_action, TabBarAction::ToggleSidebar);
-
-        // Click settings button
-        let settings_action = hit_test(
-            chrome.settings_btn.0 + 2.0,
-            chrome.settings_btn.1 + 2.0,
-            2,
-            800.0,
+        // Shell controls are not duplicated in the terminal tab strip.
+        assert_eq!(hit_test(2.0, 9.0, 2, 800.0), TabBarAction::None);
+        assert_eq!(
+            hit_test(
+                chrome.settings_btn.0 + 2.0,
+                chrome.settings_btn.1 + 2.0,
+                2,
+                800.0
+            ),
+            TabBarAction::None
         );
-        assert_eq!(settings_action, TabBarAction::OpenSettings);
 
         // Click split button
         let split_action = hit_test(chrome.split_btn.0 + 2.0, chrome.split_btn.1 + 2.0, 2, 800.0);
         assert_eq!(split_action, TabBarAction::ToggleSplit);
 
-        // Click fullscreen button
-        let fs_action = hit_test(
-            chrome.fullscreen_btn.0 + 2.0,
-            chrome.fullscreen_btn.1 + 2.0,
-            2,
-            800.0,
+        assert_eq!(
+            hit_test(
+                chrome.fullscreen_btn.0 + 2.0,
+                chrome.fullscreen_btn.1 + 2.0,
+                2,
+                800.0
+            ),
+            TabBarAction::None
         );
-        assert_eq!(fs_action, TabBarAction::ToggleFullscreen);
-
-        // Click maximize button
-        let max_action = hit_test(chrome.max_btn.0 + 2.0, chrome.max_btn.1 + 2.0, 2, 800.0);
-        assert_eq!(max_action, TabBarAction::ToggleMaximize);
+        assert_eq!(
+            hit_test(chrome.max_btn.0 + 2.0, chrome.max_btn.1 + 2.0, 2, 800.0),
+            TabBarAction::None
+        );
 
         // Click inside tab 0 body
         let action = hit_test(layouts[0].x + 10.0, layouts[0].y + 5.0, 2, 800.0);
@@ -1916,6 +1844,17 @@ mod tests {
     fn assemble_tab_bar_quads_generates_correct_quad_count() {
         let quads = assemble_tab_bar_quads(2, 0, 800.0, [0.4, 0.6, 1.0, 1.0]);
         assert!(!quads.is_empty());
+    }
+
+    #[test]
+    fn themed_tab_strip_uses_shared_semantic_surfaces() {
+        let theme = crate::theme::Theme::dracula().tokens();
+        let quads = assemble_tab_bar_quads_themed(1, 0, 800.0, [0.0; 4], [0.0; 4], theme);
+        assert!(
+            quads[..6]
+                .iter()
+                .all(|vertex| vertex.color == theme.background_secondary.to_rgba_array(1.0))
+        );
     }
 
     #[test]
@@ -2049,6 +1988,7 @@ mod tests {
     #[test]
     fn test_tab_rename_state_and_dialog() {
         let mut rename = TabRenameState::new(0, "Tab 1");
+        assert_eq!(rename.dialog_title(), "Rename Session");
         assert_eq!(rename.input_text, "Tab 1");
         assert_eq!(rename.cursor_pos, 5);
 
@@ -2082,10 +2022,15 @@ mod tests {
         assert_eq!(hit_cancel, Some(TabRenameAction::Cancel));
 
         // Quads and labels
-        let quads = assemble_tab_rename_quads(800.0, 600.0, [0.2, 0.6, 1.0, 1.0]);
+        let theme = crate::theme::ThemeTokens::default();
+        let quads = assemble_tab_rename_quads(800.0, 600.0, [0.2, 0.6, 1.0, 1.0], theme);
         assert!(!quads.is_empty());
-        let labels = build_tab_rename_labels(&rename, 800.0, 600.0, true);
+        let labels = build_tab_rename_labels(&rename, 800.0, 600.0, true, theme);
         assert_eq!(labels.len(), 4);
+        assert_eq!(
+            TabRenameState::for_workspace(2, "Oxidite").dialog_title(),
+            "Rename Workspace"
+        );
     }
 
     #[test]
@@ -2109,10 +2054,29 @@ mod tests {
         assert_eq!(hit_cancel, Some(CloseConfirmAction::Cancel));
 
         // Quads and labels
-        let quads = assemble_close_confirm_quads(800.0, 600.0, true, [0.9, 0.3, 0.3, 1.0]);
+        let theme = crate::theme::ThemeTokens::default();
+        let quads = assemble_close_confirm_quads(800.0, 600.0, true, [0.9, 0.3, 0.3, 1.0], theme);
         assert!(!quads.is_empty());
-        let labels = build_close_confirm_labels(&confirm, 800.0, 600.0);
+        let labels = build_close_confirm_labels(&confirm, 800.0, 600.0, theme);
         assert_eq!(labels.len(), 5);
+    }
+
+    #[test]
+    fn workspace_close_and_remove_confirmations_describe_distinct_effects() {
+        let theme = crate::theme::ThemeTokens::default();
+        let close = CloseConfirmState::for_workspace(1, "Oxidite".into());
+        let close_labels = build_close_confirm_labels(&close, 800.0, 600.0, theme);
+        assert_eq!(close_labels[3].text, "Close Workspace");
+        assert!(
+            close_labels[2]
+                .text
+                .contains("keeps the workspace registered")
+        );
+
+        let remove = CloseConfirmState::for_remove_workspace(1, "Oxidite".into());
+        let remove_labels = build_close_confirm_labels(&remove, 800.0, 600.0, theme);
+        assert_eq!(remove_labels[3].text, "Remove Workspace");
+        assert!(remove_labels[2].text.contains("removes its registration"));
     }
 
     #[test]

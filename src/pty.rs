@@ -243,6 +243,15 @@ impl PtyReader {
 
 /// Spawns a shell on a PTY with the given size.
 pub fn spawn(cmd: ShellCommand, size: PtySize) -> Result<(PtyWriter, PtyReader), PtyError> {
+    spawn_in_directory(cmd, size, None)
+}
+
+/// Spawns a shell on a PTY with an optional initial working directory.
+pub fn spawn_in_directory(
+    cmd: ShellCommand,
+    size: PtySize,
+    cwd: Option<&std::path::Path>,
+) -> Result<(PtyWriter, PtyReader), PtyError> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(size.into())
@@ -250,6 +259,9 @@ pub fn spawn(cmd: ShellCommand, size: PtySize) -> Result<(PtyWriter, PtyReader),
 
     let mut builder = CommandBuilder::new(cmd.program);
     builder.args(cmd.args);
+    if let Some(cwd) = cwd {
+        builder.cwd(cwd);
+    }
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
     builder.env("TERM_PROGRAM", "Oxidite");

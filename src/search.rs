@@ -2,7 +2,6 @@
 
 use crate::grid::Grid;
 use crate::renderer::draw::{QuadVertex, TabLabel, build_quad_vertices};
-use glyphon::Color as GlyphonColor;
 
 /// A single search match location on the terminal grid or in scrollback history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +301,7 @@ pub fn build_search_highlight_vertices(
     cell_height: f32,
     x_offset: f32,
     y_offset: f32,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut vertices = Vec::new();
     if !search.is_open || search.matches.is_empty() {
@@ -312,9 +312,11 @@ pub fn build_search_highlight_vertices(
     let display_offset = grid.display_offset();
 
     // Normal match highlight: warm amber/yellow tint
-    let normal_color = [0.95, 0.78, 0.22, 0.38];
+    let mut normal_color = theme.rgba(theme.selection_background);
+    normal_color[3] = 0.38;
     // Active focused match highlight: bright solid orange/gold
-    let active_color = [1.0, 0.58, 0.0, 0.82];
+    let mut active_color = theme.rgba(theme.warning);
+    active_color[3] = 0.82;
 
     for (idx, m) in search.matches.iter().enumerate() {
         let is_current = search.current_match_idx == Some(idx);
@@ -365,6 +367,7 @@ pub fn assemble_search_bar_quads(
     pane_w: f32,
     accent_color: [f32; 4],
     search: &SearchState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<QuadVertex> {
     let mut quads = Vec::new();
     if !search.is_open {
@@ -376,6 +379,11 @@ pub fn assemble_search_bar_quads(
     let bar_h = SEARCH_BAR_HEIGHT;
     let bar_x = pane_x + pane_w - bar_w - 16.0;
     let bar_y = pane_y + 8.0;
+    let rgba = |color, alpha| {
+        let mut color = theme.rgba(color);
+        color[3] = alpha;
+        color
+    };
 
     // 1. Drop shadow / subtle dark halo
     quads.extend_from_slice(&build_quad_vertices(
@@ -383,7 +391,7 @@ pub fn assemble_search_bar_quads(
         bar_y - 2.0,
         bar_w + 4.0,
         bar_h + 4.0,
-        [0.0, 0.0, 0.0, 0.45],
+        rgba(theme.background_primary, 0.45),
     ));
 
     // 2. Main search bar background (deep card surface)
@@ -392,14 +400,14 @@ pub fn assemble_search_bar_quads(
         bar_y,
         bar_w,
         bar_h,
-        [0.08, 0.09, 0.12, 0.96],
+        rgba(theme.background_elevated, 0.96),
     ));
 
     // 3. Accent border around search bar
     let border_color = if search.is_open {
         accent_color
     } else {
-        [0.2, 0.22, 0.28, 1.0]
+        theme.rgba(theme.border_default)
     };
     // Top border
     quads.extend_from_slice(&build_quad_vertices(bar_x, bar_y, bar_w, 1.0, border_color));
@@ -432,7 +440,7 @@ pub fn assemble_search_bar_quads(
         input_y,
         input_w,
         input_h,
-        [0.04, 0.045, 0.06, 0.9],
+        rgba(theme.background_primary, 0.9),
     ));
 
     // 5. Match badge background (pill)
@@ -441,9 +449,9 @@ pub fn assemble_search_bar_quads(
     let badge_w = 46.0;
     let badge_h = bar_h - 12.0;
     let badge_bg = if search.matches.is_empty() && !search.query.is_empty() {
-        [0.45, 0.12, 0.12, 0.85] // Red warning for no matches
+        rgba(theme.error, 0.85)
     } else {
-        [0.12, 0.14, 0.18, 0.85]
+        rgba(theme.background_tertiary, 0.85)
     };
     quads.extend_from_slice(&build_quad_vertices(
         badge_x, badge_y, badge_w, badge_h, badge_bg,
@@ -459,7 +467,7 @@ pub fn assemble_search_bar_quads(
         opt_y,
         opt_w,
         opt_h,
-        [0.10, 0.11, 0.15, 0.85],
+        rgba(theme.background_tertiary, 0.85),
     ));
 
     quads
@@ -472,6 +480,7 @@ pub fn build_search_bar_labels(
     pane_y: f32,
     pane_w: f32,
     search: &SearchState,
+    theme: crate::theme::ThemeTokens,
 ) -> Vec<TabLabel> {
     let mut labels = Vec::new();
     if !search.is_open {
@@ -484,11 +493,14 @@ pub fn build_search_bar_labels(
 
     // Search query text (or placeholder)
     let (query_display, query_color) = if search.query.is_empty() {
-        ("Search...".to_string(), GlyphonColor::rgb(110, 115, 130))
+        (
+            "Search...".to_string(),
+            theme.glyphon(theme.foreground_muted),
+        )
     } else {
         (
             format!("{}▏", search.query),
-            GlyphonColor::rgb(240, 242, 250),
+            theme.glyphon(theme.foreground_primary),
         )
     };
 
@@ -512,9 +524,9 @@ pub fn build_search_bar_labels(
     };
 
     let count_color = if search.matches.is_empty() && !search.query.is_empty() {
-        GlyphonColor::rgb(255, 120, 120)
+        theme.glyphon(theme.error)
     } else {
-        GlyphonColor::rgb(180, 190, 210)
+        theme.glyphon(theme.foreground_secondary)
     };
 
     labels.push(TabLabel {
@@ -528,9 +540,9 @@ pub fn build_search_bar_labels(
 
     // Mode toggles: Case (Aa) and Regex (.*)
     let case_color = if search.case_sensitive {
-        GlyphonColor::rgb(80, 210, 255)
+        theme.glyphon(theme.accent_primary)
     } else {
-        GlyphonColor::rgb(100, 105, 120)
+        theme.glyphon(theme.foreground_muted)
     };
     labels.push(TabLabel {
         text: "Aa".to_string(),
@@ -542,9 +554,9 @@ pub fn build_search_bar_labels(
     });
 
     let regex_color = if search.is_regex {
-        GlyphonColor::rgb(80, 210, 255)
+        theme.glyphon(theme.accent_primary)
     } else {
-        GlyphonColor::rgb(100, 105, 120)
+        theme.glyphon(theme.foreground_muted)
     };
     labels.push(TabLabel {
         text: ".*".to_string(),
@@ -794,11 +806,42 @@ mod tests {
         );
 
         // Quad vertices generated
-        let quads = assemble_search_bar_quads(pane_x, pane_y, pane_w, [0.0, 0.8, 1.0, 1.0], &state);
+        let theme = crate::theme::Theme::dracula().tokens();
+        let quads = assemble_search_bar_quads(
+            pane_x,
+            pane_y,
+            pane_w,
+            theme.rgba(theme.accent_primary),
+            &state,
+            theme,
+        );
         assert!(!quads.is_empty());
 
         // Labels generated
-        let labels = build_search_bar_labels(pane_x, pane_y, pane_w, &state);
+        let labels = build_search_bar_labels(pane_x, pane_y, pane_w, &state, theme);
         assert!(labels.iter().any(|l| l.text.contains("test")));
+
+        let pitch_black = crate::theme::Theme::pitch_black().tokens();
+        let pitch_quads = assemble_search_bar_quads(
+            pane_x,
+            pane_y,
+            pane_w,
+            pitch_black.rgba(pitch_black.accent_primary),
+            &state,
+            pitch_black,
+        );
+        let dracula_quads = assemble_search_bar_quads(
+            pane_x,
+            pane_y,
+            pane_w,
+            theme.rgba(theme.accent_primary),
+            &state,
+            theme,
+        );
+        assert_ne!(pitch_quads[0].color, dracula_quads[0].color);
+        assert_ne!(
+            build_search_bar_labels(pane_x, pane_y, pane_w, &state, pitch_black)[0].color,
+            labels[0].color
+        );
     }
 }

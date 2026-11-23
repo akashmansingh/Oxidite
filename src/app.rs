@@ -22,7 +22,8 @@ use crate::renderer::draw::{
 use crate::renderer::font::CellMetrics;
 use crate::renderer::gpu::GpuContext;
 use crate::renderer::window::{
-    DEFAULT_TITLE, create_window, window_size_to_grid_dimensions, window_size_to_pty_size,
+    DEFAULT_TITLE, create_window, restore_window_size, window_size_to_grid_dimensions,
+    window_size_to_pty_size,
 };
 use crate::tab::{TAB_BAR_HEIGHT, Tab, TabBarAction, compute_tab_layouts, hit_test};
 use crate::terminal::Terminal;
@@ -193,6 +194,16 @@ pub struct App {
     pub git_branch: Option<String>,
     /// Sidebar persistent multi-workspace and chat state.
     pub sidebar_state: crate::sidebar::SidebarState,
+    /// Active view shown by the navigation sidebar.
+    pub sidebar_mode: crate::shell::SidebarMode,
+    /// Live workspace sessions; inactive workspaces retain their PTYs and terminal state.
+    pub workspace_manager: crate::workspace::WorkspaceManager<Vec<Tab>>,
+    /// Active tab index remembered independently for every workspace.
+    pub workspace_tab_indices: Vec<usize>,
+    /// Enables user-profile session persistence in the interactive application.
+    pub persistence_enabled: bool,
+    /// Most recently observed inner window dimensions in physical pixels.
+    pub last_window_size: Option<(u32, u32)>,
     /// Whether the right changes / git review panel is open.
     pub changes_panel_open: bool,
     /// State representation for the right git panel.
@@ -221,6 +232,12 @@ pub struct App {
     pub last_active_cwd: Option<std::path::PathBuf>,
     /// In-terminal search state for scrollback and visible grid search.
     pub search_state: crate::search::SearchState,
+    /// Application-wide workspace, session, and command search state.
+    pub global_search_state: crate::global_search::SearchState,
+    /// Whether the split-layout picker is open.
+    pub split_picker_open: bool,
+    /// Layout option currently hovered in the split picker.
+    pub split_picker_hover: Option<crate::split_picker::SplitPreset>,
     /// Currently hovered URL span `(viewport_row, start_col, end_col, url)` if any.
     pub hovered_url: Option<(usize, usize, usize, String)>,
     /// Active tab drag-and-drop state for reordering tabs.
@@ -231,6 +248,8 @@ pub struct App {
     pub tab_rename_state: Option<crate::tab::TabRenameState>,
     /// Active close tab confirmation modal dialog state if closing an active tab.
     pub tab_close_confirm: Option<crate::tab::CloseConfirmState>,
+    /// Workspace/session navigation context menu, if one is open.
+    pub context_menu: Option<crate::context_menu::ContextMenuState>,
     /// Last applied PTY size to debounce redundant resize notifications.
     pub last_pty_size: Option<crate::pty::PtySize>,
 }
@@ -241,16 +260,36 @@ pub struct PaneGeometry {
     pub win_w: f32,
     pub win_h: f32,
     pub tab_bar_px: f32,
+    /// Custom titlebar height.
+    pub titlebar_px: f32,
+    /// Activity rail width.
+    pub activity_rail_w: f32,
+    /// Left edge of the main workspace after navigation regions.
+    pub workspace_x: f32,
+    /// Workspace header height.
+    pub workspace_header_px: f32,
+    /// Workspace tab strip top edge.
+    pub workspace_tabs_y: f32,
     pub status_bar_px: f32,
     pub content_top: f32,
     pub content_bottom: f32,
     pub content_h: f32,
     pub sidebar_w: f32,
+    /// Sidebar was hidden for this frame to preserve the active content minimums.
+    pub sidebar_auto_collapsed: bool,
+    /// Minimum terminal width used by responsive split allocation.
+    pub min_term_w: f32,
+    /// Minimum diff width used by responsive split allocation.
+    pub min_diff_w: f32,
     pub changes_panel_w: f32,
+    /// Whether the changes panel fits without stealing the terminal's minimum width.
+    pub changes_panel_visible: bool,
     pub term_w: f32,
     pub diff_w: f32,
     pub diff_x: f32,
     pub panel_x: f32,
+    /// Whether the diff editor fits beside the terminal at its minimum readable width.
+    pub diff_view_visible: bool,
 }
 
 /// Active draggable pane splitter dividing GUI columns.
@@ -305,6 +344,8 @@ impl App {
         let is_git = crate::git::is_git_repository(&cwd);
         let proj_info = crate::git::detect_project_type(&cwd);
         let workspace_name = proj_info.name.clone();
+        let workspace_manager =
+            crate::workspace::WorkspaceManager::new(workspace_name.clone(), cwd.clone());
         let git_branch = if is_git {
             crate::git::detect_git_branch(&cwd)
         } else {
@@ -317,6 +358,11 @@ impl App {
         };
         let total_adds: usize = changed_files.iter().map(|f| f.additions).sum();
         let total_dels: usize = changed_files.iter().map(|f| f.deletions).sum();
+        let history = if is_git {
+            crate::git::query_git_history(&cwd, 30)
+        } else {
+            Vec::new()
+        };
 
         let sidebar_open = true;
         let sidebar_state = crate::sidebar::SidebarState {
@@ -335,35 +381,23 @@ impl App {
             active_tab_index: 0,
             workspaces: vec![crate::sidebar::WorkspaceEntry {
                 name: format!("{} ({})", proj_info.name, proj_info.kind),
+                root_directory: cwd.display().to_string(),
                 branch: git_branch.clone().unwrap_or_else(|| "--".to_string()),
                 sessions_count: 1,
                 modified_count: changed_files.len(),
                 diff_stat: Some((total_adds, total_dels)),
                 is_active: true,
             }],
-            chats: vec![
-                crate::sidebar::ChatEntry {
-                    title: "Terminal Session 1".to_string(),
-                    status: crate::sidebar::ChatStatus::Idle,
-                    model: "Local Shell".to_string(),
-                },
-                crate::sidebar::ChatEntry {
-                    title: "AI Review Engine".to_string(),
-                    status: crate::sidebar::ChatStatus::Done,
-                    model: "Antigravity".to_string(),
-                },
-            ],
+            chats: Vec::new(),
+            source_control_tab: crate::changes_panel::ChangesTab::Changes,
+            changed_file_count: changed_files.len(),
+            commit_count: history.len(),
         };
 
         let selected_file_index = if changed_files.is_empty() {
             None
         } else {
             Some(0)
-        };
-        let history = if is_git {
-            crate::git::query_git_history(&cwd, 30)
-        } else {
-            Vec::new()
         };
         let changes_panel_state = crate::changes_panel::ChangesPanelState {
             active_tab: crate::changes_panel::ChangesTab::Changes,
@@ -452,9 +486,14 @@ impl App {
             workspace_name,
             git_branch,
             sidebar_state,
-            changes_panel_open: true,
+            sidebar_mode: crate::shell::SidebarMode::Workspaces,
+            workspace_manager,
+            workspace_tab_indices: vec![0],
+            persistence_enabled: false,
+            last_window_size: None,
+            changes_panel_open: false,
             changes_panel_state,
-            diff_view_open: true,
+            diff_view_open: false,
             diff_view_state,
             settings_open: false,
             sidebar_width: crate::sidebar::SIDEBAR_WIDTH,
@@ -466,11 +505,15 @@ impl App {
             hovered_pane_divider: None,
             last_active_cwd: Some(cwd),
             search_state: crate::search::SearchState::default(),
+            global_search_state: crate::global_search::SearchState::default(),
+            split_picker_open: false,
+            split_picker_hover: None,
             hovered_url: None,
             dragging_tab: None,
             last_tab_click: None,
             tab_rename_state: None,
             tab_close_confirm: None,
+            context_menu: None,
             last_pty_size: None,
         }
     }
@@ -479,55 +522,108 @@ impl App {
     #[must_use]
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub fn compute_pane_geometry(&self, win_w: f32, win_h: f32) -> PaneGeometry {
-        let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
+        let scale = (self.scale_factor as f32).max(0.5);
+        let min_term_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
+        let min_diff_w = (if win_w < 800.0 * scale { 180.0 } else { 280.0 }) * scale;
+        let minimum_main_width = if self.diff_view_open {
+            min_term_w + min_diff_w
+        } else {
+            min_term_w
+        };
+        let required_context_width = if self.changes_panel_open {
+            240.0 * scale
+        } else {
+            0.0
+        };
+        let mut shell = crate::shell::ShellLayout::calculate(
+            win_w,
+            win_h,
+            scale,
+            self.sidebar_width,
+            self.sidebar_open,
+            self.config.status_bar,
+        );
+        let sidebar_auto_collapsed = shell.navigation.width > 0.0
+            && (self.diff_view_open || self.changes_panel_open)
+            && win_w - shell.workspace_header.x < minimum_main_width + required_context_width;
+        if sidebar_auto_collapsed {
+            shell = crate::shell::ShellLayout::calculate(
+                win_w,
+                win_h,
+                scale,
+                self.sidebar_width,
+                false,
+                self.config.status_bar,
+            );
+        }
+        let titlebar_px = shell.titlebar.height;
+        let activity_rail_w = shell.activity_rail.width;
+        let sidebar_w = shell.navigation.width;
+        let workspace_x = shell.workspace_header.x;
+        let workspace_header_px = shell.workspace_header.height;
+        let workspace_tabs_y = shell.workspace_tabs.y;
+        let tab_bar_px = shell.canvas.y;
         let status_bar_px = if self.config.status_bar {
             (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32).round()
         } else {
             0.0
         };
-        let content_top = tab_bar_px;
+        let content_top = shell.canvas.y;
         let content_bottom = (win_h - status_bar_px).max(content_top);
         let content_h = (content_bottom - content_top).max(0.0);
 
-        let sidebar_w = if self.sidebar_open {
-            (self.sidebar_width * self.scale_factor as f32).round()
-        } else {
-            0.0
-        };
-        let changes_panel_w = if self.changes_panel_open {
-            (self.changes_panel_width * self.scale_factor as f32).round()
+        let after_sidebar = (win_w - workspace_x).max(0.0);
+        // Context panels collapse before the terminal and diff can overlap.
+        let changes_min_space = (240.0 * scale) + minimum_main_width;
+        let changes_panel_visible = self.changes_panel_open && after_sidebar >= changes_min_space;
+        let changes_panel_w = if changes_panel_visible {
+            (self.changes_panel_width * scale)
+                .clamp(240.0 * scale, 340.0 * scale)
+                .min(after_sidebar - minimum_main_width)
+                .round()
         } else {
             0.0
         };
 
-        let avail_middle = (win_w - sidebar_w - changes_panel_w).max(0.0);
-        let term_w = if self.diff_view_open {
-            (avail_middle * self.term_split_ratio).clamp(160.0, (avail_middle - 160.0).max(160.0))
+        let avail_middle = (win_w - workspace_x - changes_panel_w).max(0.0);
+        let diff_view_visible = self.diff_view_open && avail_middle >= min_term_w + min_diff_w;
+        let term_w = if diff_view_visible {
+            (avail_middle * self.term_split_ratio).clamp(min_term_w, avail_middle - min_diff_w)
         } else {
             avail_middle
         };
-        let diff_w = if self.diff_view_open {
-            (avail_middle - term_w).max(0.0)
+        let diff_w = if diff_view_visible {
+            avail_middle - term_w
         } else {
             0.0
         };
-        let diff_x = sidebar_w + term_w;
+        let diff_x = workspace_x + term_w;
         let panel_x = win_w - changes_panel_w;
 
         PaneGeometry {
             win_w,
             win_h,
             tab_bar_px,
+            titlebar_px,
+            activity_rail_w,
+            workspace_x,
+            workspace_header_px,
+            workspace_tabs_y,
             status_bar_px,
             content_top,
             content_bottom,
             content_h,
             sidebar_w,
+            sidebar_auto_collapsed,
+            min_term_w,
+            min_diff_w,
             changes_panel_w,
+            changes_panel_visible,
             term_w,
             diff_w,
             diff_x,
             panel_x,
+            diff_view_visible,
         }
     }
 
@@ -556,6 +652,7 @@ impl App {
         SettingsModalState {
             is_open: self.settings_open,
             active_theme: self.config.theme.name.clone(),
+            theme_tokens: self.config.theme.tokens(),
             font_size: self.base_font_size,
             font_family: self.config.font_family.clone(),
             zoom_pct,
@@ -567,19 +664,23 @@ impl App {
     }
 
     /// Converts window pixel coordinates to a clamped terminal grid point, accounting for tab bar height and window padding.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn pixel_to_grid_point(&self, pos: (f64, f64)) -> GridPoint {
         let pad_x = f64::from((self.config.padding_x * self.scale_factor as f32).round());
         let pad_y = f64::from((self.config.padding_y * self.scale_factor as f32).round());
-        let tab_bar = f64::from((TAB_BAR_HEIGHT * self.scale_factor as f32).round());
-        let sidebar_w = if self.sidebar_open {
-            f64::from((self.sidebar_width * self.scale_factor as f32).round())
-        } else {
-            0.0
-        };
-        let x_content = (pos.0 - sidebar_w - pad_x).max(0.0);
+        let size = self
+            .last_window_size
+            .map_or(PhysicalSize::new(800, 600), |(width, height)| {
+                PhysicalSize::new(width, height)
+            });
+        let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+        let x_content = (pos.0 - f64::from(geometry.workspace_x) - pad_x).max(0.0);
         let col = (x_content / f64::from(self.cell_metrics.cell_width)).max(0.0) as usize;
-        let y_content = (pos.1 - tab_bar - pad_y).max(0.0);
+        let y_content = (pos.1 - f64::from(geometry.content_top) - pad_y).max(0.0);
         let row = (y_content / f64::from(self.cell_metrics.cell_height)).max(0.0) as usize;
         GridPoint::new(
             col.min(self.terminal.grid.cols.saturating_sub(1)),
@@ -591,6 +692,115 @@ impl App {
     fn handle_keyboard_input(&mut self, key_ev: &winit::event::KeyEvent, win: &Window) {
         self.cursor_blink_visible = true;
         self.last_blink = std::time::Instant::now();
+
+        if let Some(menu) = self.context_menu
+            && key_ev.state == winit::event::ElementState::Pressed
+        {
+            use winit::keyboard::{Key, NamedKey};
+            match key_ev.logical_key {
+                Key::Named(NamedKey::Escape) => self.context_menu = None,
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.context_menu = Some(menu.move_selection(1));
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.context_menu = Some(menu.move_selection(-1));
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(action) = menu.selected_action() {
+                        self.activate_context_action(menu.target, action, win);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            win.request_redraw();
+            return;
+        }
+
+        if self.global_search_state.is_open {
+            if key_ev.state == winit::event::ElementState::Pressed {
+                use winit::keyboard::{Key, NamedKey};
+                match &key_ev.logical_key {
+                    Key::Named(NamedKey::Escape) => self.global_search_state.close(),
+                    Key::Named(NamedKey::ArrowUp) => {
+                        let results = self.global_search_results();
+                        let count = self.global_search_state.filtered(&results).len();
+                        self.global_search_state.move_selection(-1, count);
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        let results = self.global_search_results();
+                        let count = self.global_search_state.filtered(&results).len();
+                        self.global_search_state.move_selection(1, count);
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        let results = self.global_search_results();
+                        let target = self
+                            .global_search_state
+                            .filtered(&results)
+                            .get(self.global_search_state.selected)
+                            .map(|result| result.target.clone());
+                        if let Some(target) = target {
+                            self.activate_global_search_result(&target, win);
+                        }
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        self.global_search_state.query.pop();
+                        self.global_search_state.selected = 0;
+                    }
+                    _ => {
+                        if !self.modifiers.control_key()
+                            && !self.modifiers.alt_key()
+                            && !self.modifiers.super_key()
+                            && let Some(text) = &key_ev.text
+                        {
+                            self.global_search_state.query.push_str(text);
+                            self.global_search_state.selected = 0;
+                        }
+                    }
+                }
+                win.request_redraw();
+            }
+            return;
+        }
+
+        if self.split_picker_open {
+            if key_ev.state == winit::event::ElementState::Pressed {
+                use winit::keyboard::{Key, NamedKey};
+                match key_ev.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.split_picker_open = false;
+                        self.split_picker_hover = None;
+                    }
+                    Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
+                        let presets = crate::split_picker::PRESETS;
+                        let current = self
+                            .split_picker_hover
+                            .and_then(|preset| presets.iter().position(|item| *item == preset))
+                            .unwrap_or(0);
+                        let direction = if key_ev.logical_key == Key::Named(NamedKey::ArrowUp) {
+                            -1
+                        } else {
+                            1
+                        };
+                        let next = (isize::try_from(current).unwrap_or(0) + direction)
+                            .rem_euclid(isize::try_from(presets.len()).unwrap_or(1));
+                        self.split_picker_hover = usize::try_from(next)
+                            .ok()
+                            .and_then(|index| presets.get(index).copied());
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(preset) = self.split_picker_hover {
+                            self.apply_split_preset(preset);
+                        }
+                        self.split_picker_open = false;
+                        self.split_picker_hover = None;
+                    }
+                    _ => {}
+                }
+                win.request_redraw();
+            }
+            return;
+        }
 
         if key_ev.state == winit::event::ElementState::Pressed {
             use winit::keyboard::{Key, NamedKey};
@@ -614,7 +824,7 @@ impl App {
                     Key::Named(NamedKey::Enter) => {
                         self.tab_close_confirm = None;
                         if confirm.confirm_selected {
-                            self.close_tab(confirm.tab_index);
+                            self.confirm_close_target(&confirm);
                         }
                         win.request_redraw();
                         return;
@@ -644,14 +854,7 @@ impl App {
                     }
                     Key::Named(NamedKey::Enter) => {
                         self.tab_rename_state = None;
-                        let custom = rename.input_text.trim().to_string();
-                        if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
-                            tab.set_custom_title(if custom.is_empty() {
-                                None
-                            } else {
-                                Some(custom)
-                            });
-                        }
+                        self.apply_rename(&rename);
                         win.request_redraw();
                         return;
                     }
@@ -949,17 +1152,20 @@ impl App {
                     win.request_redraw();
                     return;
                 }
+                Key::Character(c) if c.eq_ignore_ascii_case("e") && self.modifiers.shift_key() => {
+                    let index = self.workspace_manager.workspaces().len() + 1;
+                    let root = self.active_cwd();
+                    self.create_workspace(format!("Workspace {index}"), root);
+                    win.request_redraw();
+                    return;
+                }
                 Key::Character(c) if c.eq_ignore_ascii_case("t") && self.modifiers.shift_key() => {
                     self.create_tab(None);
                     win.request_redraw();
                     return;
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("d") && self.modifiers.shift_key() => {
-                    let dup_title = self
-                        .tabs
-                        .get(self.active_tab_index)
-                        .map(|t| format!("{} (copy)", t.title));
-                    self.create_tab(dup_title);
+                    self.split_active_pane(crate::pane::SplitDirection::Horizontal);
                     win.request_redraw();
                     return;
                 }
@@ -969,9 +1175,7 @@ impl App {
                     return;
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("b") => {
-                    self.sidebar_open = !self.sidebar_open;
-                    self.handle_resize(win.inner_size());
-                    self.terminal.mark_all_dirty();
+                    self.toggle_sidebar_or_restore_content(win.inner_size());
                     win.request_redraw();
                     return;
                 }
@@ -986,11 +1190,24 @@ impl App {
                     return;
                 }
                 Key::Character(c) if c.eq_ignore_ascii_case("d") && !self.modifiers.shift_key() => {
-                    self.diff_view_open = !self.diff_view_open;
-                    self.handle_resize(win.inner_size());
-                    self.terminal.mark_all_dirty();
+                    self.split_active_pane(crate::pane::SplitDirection::Vertical);
                     win.request_redraw();
                     return;
+                }
+                Key::Character(c) if c.eq_ignore_ascii_case("w") && !self.modifiers.shift_key() => {
+                    let pane_count = self
+                        .tabs
+                        .get(self.active_tab_index)
+                        .map_or(1, |tab| tab.panes.len());
+                    if pane_count > 1 {
+                        self.close_active_pane();
+                        win.request_redraw();
+                        return;
+                    } else if self.tabs.len() > 1 {
+                        self.request_close_tab(self.active_tab_index);
+                        win.request_redraw();
+                        return;
+                    }
                 }
                 Key::Named(NamedKey::Tab) => {
                     if self.modifiers.shift_key() {
@@ -1091,6 +1308,10 @@ impl App {
                             .scroll_to_current_match(&mut self.terminal.grid);
                     }
                     self.terminal.mark_all_dirty();
+                    win.request_redraw();
+                }
+                InputAction::TogglePalette => {
+                    self.global_search_state.open();
                     win.request_redraw();
                 }
                 InputAction::SearchNext => {
@@ -1281,6 +1502,7 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        self.last_window_size = Some((size.width, size.height));
 
         // 1. Window / GPU surface
         if let Some(ref mut gpu) = self.gpu {
@@ -1290,41 +1512,11 @@ impl App {
         // 2. Terminal grid (content area between tab bar and status bar, with padding)
         let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
         let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
-        let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round() as u32;
-        let status_bar_px = if self.config.status_bar {
-            (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32).round() as u32
-        } else {
-            0
-        };
-        let sidebar_px = if self.sidebar_open {
-            (self.sidebar_width * self.scale_factor as f32).round() as u32
-        } else {
-            0
-        };
-        let changes_panel_px = if self.changes_panel_open {
-            (self.changes_panel_width * self.scale_factor as f32).round() as u32
-        } else {
-            0
-        };
-
-        let avail_middle = size
-            .width
-            .saturating_sub(sidebar_px)
-            .saturating_sub(changes_panel_px);
-        let term_width = if self.diff_view_open {
-            ((avail_middle as f32 * self.term_split_ratio).round() as u32)
-                .clamp(160, avail_middle.saturating_sub(160).max(160))
-        } else {
-            avail_middle
-        };
-
-        let content_width = term_width
+        let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+        let content_width = (geometry.term_w.round() as u32)
             .saturating_sub((effective_pad_x * 2.0) as u32)
             .max(1);
-        let content_height = size
-            .height
-            .saturating_sub(tab_bar_px)
-            .saturating_sub(status_bar_px)
+        let content_height = (geometry.content_h.round() as u32)
             .saturating_sub((effective_pad_y * 2.0) as u32)
             .max(1);
         let content_size = PhysicalSize::new(content_width, content_height);
@@ -1391,6 +1583,22 @@ impl App {
         }
     }
 
+    /// Toggles navigation, restoring it over a contextual view when space is constrained.
+    #[allow(clippy::cast_precision_loss)]
+    fn toggle_sidebar_or_restore_content(&mut self, size: PhysicalSize<u32>) {
+        let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+        if geometry.sidebar_w == 0.0 && (self.changes_panel_open || self.diff_view_open) {
+            self.sidebar_open = true;
+            self.changes_panel_open = false;
+            self.diff_view_open = false;
+            self.changes_panel_state.commit_input_focused = false;
+        } else {
+            self.sidebar_open = !self.sidebar_open;
+        }
+        self.handle_resize(size);
+        self.terminal.mark_all_dirty();
+    }
+
     /// Recalculates cell metrics based on the base font size and scale factor,
     /// invalidates shaped glyph caches, and resizes grid and PTY.
     #[allow(clippy::cast_possible_truncation)]
@@ -1419,19 +1627,43 @@ impl App {
     /// Increases base font size by one zoom step.
     pub fn zoom_in(&mut self) {
         self.base_font_size = (self.base_font_size + Self::FONT_SIZE_STEP).min(Self::MAX_FONT_SIZE);
+        self.config.font_size = self.base_font_size;
         self.update_scale();
+        self.save_config();
     }
 
     /// Decreases base font size by one zoom step.
     pub fn zoom_out(&mut self) {
         self.base_font_size = (self.base_font_size - Self::FONT_SIZE_STEP).max(Self::MIN_FONT_SIZE);
+        self.config.font_size = self.base_font_size;
         self.update_scale();
+        self.save_config();
     }
 
     /// Resets base font size to default.
     pub fn zoom_reset(&mut self) {
         self.base_font_size = Self::DEFAULT_FONT_SIZE;
+        self.config.font_size = self.base_font_size;
         self.update_scale();
+        self.save_config();
+    }
+
+    /// Applies a theme to all UI and terminal render states without restarting sessions.
+    fn apply_theme(&mut self, theme: crate::theme::Theme, persist: bool) {
+        self.config.theme = theme;
+        self.terminal.mark_all_dirty();
+        for tab in &mut self.tabs {
+            tab.terminal.mark_all_dirty();
+            for pane in &mut tab.panes {
+                pane.terminal.mark_all_dirty();
+            }
+        }
+        if persist {
+            self.save_config();
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
     }
 
     /// Cycles to the next available color theme.
@@ -1448,8 +1680,7 @@ impl App {
         let next_theme_name = &themes[next_index];
         if let Some(next_theme) = crate::config::load_theme_by_name(next_theme_name) {
             log::info!("Switched theme to '{}'", next_theme.name);
-            self.config.theme = next_theme;
-            self.terminal.mark_all_dirty();
+            self.apply_theme(next_theme, true);
             win.request_redraw();
         }
     }
@@ -1462,19 +1693,10 @@ impl App {
         if count == 0 {
             return Vec::new();
         }
-        let (layouts, plus_btn, sidebar_btn) = compute_tab_layouts(count, window_width);
+        let (layouts, plus_btn, _) = compute_tab_layouts(count, window_width);
         let chrome = crate::tab::compute_chrome_buttons_extended(window_width);
         let mut labels = Vec::new();
-
-        // Sidebar toggle button label [◨]
-        labels.push(TabLabel {
-            text: "◨".to_string(),
-            x: sidebar_btn.0 + 3.0,
-            y: sidebar_btn.1 + 1.0,
-            color: glyphon::Color::rgb(180, 185, 200),
-            bold: true,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
+        let theme = self.config.theme.tokens();
 
         for (idx, layout) in layouts.iter().enumerate() {
             let is_active = idx == self.active_tab_index;
@@ -1484,7 +1706,7 @@ impl App {
 
             let color = if is_active {
                 if agent == crate::tab::AgentKind::Shell {
-                    glyphon::Color::rgb(240, 242, 250)
+                    theme.glyphon(theme.foreground_primary)
                 } else {
                     let [r, g, b] = agent.brand_color();
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1495,7 +1717,7 @@ impl App {
                     )
                 }
             } else {
-                glyphon::Color::rgb(140, 145, 160)
+                theme.glyphon(theme.foreground_muted)
             };
 
             // Tab title with agent badge (honors user-specified custom title)
@@ -1533,9 +1755,9 @@ impl App {
                 x: layout.close_btn_x + 5.0,
                 y: layout.close_btn_y + 1.0,
                 color: if is_active {
-                    glyphon::Color::rgb(200, 205, 220)
+                    theme.glyphon(theme.foreground_secondary)
                 } else {
-                    glyphon::Color::rgb(120, 125, 140)
+                    theme.glyphon(theme.foreground_muted)
                 },
                 bold: true,
                 max_width: crate::tab::TAB_BUTTON_SIZE,
@@ -1547,53 +1769,19 @@ impl App {
             text: "+".to_string(),
             x: plus_btn.0 + 5.0,
             y: plus_btn.1 + 1.0,
-            color: glyphon::Color::rgb(190, 195, 210),
+            color: theme.glyphon(theme.foreground_secondary),
             bold: true,
             max_width: crate::tab::TAB_BUTTON_SIZE,
         });
 
-        // Upper ribbon right-aligned buttons
-        let btn_color = if self.config.theme.is_light() {
-            glyphon::Color::rgb(70, 80, 95)
-        } else {
-            glyphon::Color::rgb(180, 185, 205)
-        };
-
-        // Settings button [⚙]
-        labels.push(TabLabel {
-            text: "⚙".to_string(),
-            x: chrome.settings_btn.0 + 3.0,
-            y: chrome.settings_btn.1 + 1.0,
-            color: btn_color,
-            bold: false,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
+        // Contextual terminal action; window/sidebar actions live in the application shell.
+        let btn_color = theme.glyphon(theme.foreground_secondary);
 
         // Split pane button [◫]
         labels.push(TabLabel {
             text: "◫".to_string(),
             x: chrome.split_btn.0 + 3.0,
             y: chrome.split_btn.1 + 1.0,
-            color: btn_color,
-            bold: false,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
-
-        // Fullscreen button [⛶]
-        labels.push(TabLabel {
-            text: "⛶".to_string(),
-            x: chrome.fullscreen_btn.0 + 3.0,
-            y: chrome.fullscreen_btn.1 + 1.0,
-            color: btn_color,
-            bold: false,
-            max_width: crate::tab::TAB_BUTTON_SIZE,
-        });
-
-        // Maximize button [⤢]
-        labels.push(TabLabel {
-            text: "⤢".to_string(),
-            x: chrome.max_btn.0 + 3.0,
-            y: chrome.max_btn.1 + 1.0,
             color: btn_color,
             bold: false,
             max_width: crate::tab::TAB_BUTTON_SIZE,
@@ -1660,7 +1848,142 @@ impl App {
             window_width,
             window_height,
             status_bar_px,
+            self.config.theme.tokens(),
         )
+    }
+
+    /// Builds search entries from registered workspaces, their actual sessions, and supported commands.
+    #[must_use]
+    pub fn global_search_results(&self) -> Vec<crate::global_search::SearchResult> {
+        use crate::global_search::{PaletteCommand as Command, SearchResult, SearchTarget};
+        let mut results = Vec::new();
+        for (workspace_index, workspace) in self.workspace_manager.workspaces().iter().enumerate() {
+            results.push(SearchResult {
+                category: "Workspace".into(),
+                title: workspace.name.clone(),
+                detail: workspace.root_directory.display().to_string(),
+                target: SearchTarget::Workspace(workspace_index),
+            });
+            let sessions = if workspace_index == self.workspace_manager.active_index() {
+                Some(self.tabs.as_slice())
+            } else {
+                workspace.sessions.as_deref()
+            };
+            if let Some(sessions) = sessions {
+                for (tab_index, tab) in sessions.iter().enumerate() {
+                    results.push(SearchResult {
+                        category: "Session".into(),
+                        title: tab.display_title().to_owned(),
+                        detail: format!(
+                            "{} · {}",
+                            workspace.name,
+                            workspace.root_directory.display()
+                        ),
+                        target: SearchTarget::Session {
+                            workspace: workspace_index,
+                            tab: tab_index,
+                        },
+                    });
+                }
+            }
+        }
+        if self.git_branch.is_some() {
+            for branch in &self.changes_panel_state.branch_list {
+                results.push(SearchResult {
+                    category: "Branch".into(),
+                    title: branch.clone(),
+                    detail: format!("Switch branch in {}", self.workspace_name),
+                    target: SearchTarget::Branch(branch.clone()),
+                });
+            }
+        }
+        for (title, detail, command) in [
+            (
+                "New Terminal",
+                "Create a terminal session",
+                Command::NewTerminal,
+            ),
+            ("New Workspace", "Create a workspace", Command::NewWorkspace),
+            (
+                "Toggle Sidebar",
+                "Show or hide navigation",
+                Command::ToggleSidebar,
+            ),
+            (
+                "Source Control: Changes",
+                "Open repository changes",
+                Command::SourceChanges,
+            ),
+            (
+                "Source Control: Commit History",
+                "Open repository history",
+                Command::CommitHistory,
+            ),
+            (
+                "Settings",
+                "Open appearance and preferences",
+                Command::Settings,
+            ),
+        ] {
+            results.push(SearchResult {
+                category: "Command".into(),
+                title: title.into(),
+                detail: detail.into(),
+                target: SearchTarget::Command(command),
+            });
+        }
+        results
+    }
+
+    fn activate_global_search_result(
+        &mut self,
+        target: &crate::global_search::SearchTarget,
+        win: &Window,
+    ) {
+        use crate::global_search::{PaletteCommand as Command, SearchTarget};
+        match target {
+            SearchTarget::Workspace(index) => {
+                self.select_workspace(*index);
+            }
+            SearchTarget::Session { workspace, tab } => {
+                if *workspace != self.workspace_manager.active_index() {
+                    self.select_workspace(*workspace);
+                }
+                self.select_tab(*tab);
+            }
+            SearchTarget::Branch(name) => {
+                let cwd = self.active_cwd();
+                if crate::git::is_git_repository(&cwd) {
+                    let _ = crate::git::checkout_branch(&cwd, name);
+                    self.refresh_git_status();
+                }
+            }
+            SearchTarget::Command(command) => match command {
+                Command::NewTerminal => self.create_tab(None),
+                Command::NewWorkspace => {
+                    let index = self.workspace_manager.workspaces().len() + 1;
+                    self.create_workspace(format!("Workspace {index}"), self.active_cwd());
+                }
+                Command::ToggleSidebar => self.toggle_sidebar_or_restore_content(win.inner_size()),
+                Command::SourceChanges => {
+                    self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                    self.sidebar_open = true;
+                    self.changes_panel_state.active_tab = crate::changes_panel::ChangesTab::Changes;
+                    self.refresh_git_status();
+                    self.handle_resize(win.inner_size());
+                }
+                Command::CommitHistory => {
+                    self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                    self.sidebar_open = true;
+                    self.changes_panel_state.active_tab = crate::changes_panel::ChangesTab::History;
+                    self.refresh_git_status();
+                    self.handle_resize(win.inner_size());
+                }
+                Command::Settings => self.settings_open = true,
+            },
+        }
+        self.global_search_state.close();
+        win.request_redraw();
     }
 
     /// Creates and switches to a new tab, spawning a shell PTY if proxy is available.
@@ -1670,6 +1993,15 @@ impl App {
         clippy::cast_precision_loss
     )]
     pub fn create_tab(&mut self, title: Option<String>) {
+        self.create_tab_in_directory(title, None);
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn create_tab_in_directory(&mut self, title: Option<String>, cwd: Option<&std::path::Path>) {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
 
@@ -1695,7 +2027,7 @@ impl App {
                 px_h: (rows as f32 * self.cell_metrics.cell_height) as u16,
             };
 
-            if let Ok((writer, reader)) = crate::pty::spawn(cmd, pty_size) {
+            if let Ok((writer, reader)) = crate::pty::spawn_in_directory(cmd, pty_size, cwd) {
                 let writer = Arc::new(Mutex::new(writer));
                 spawn_tab_pty_forwarder(tab_id, reader, Arc::clone(&writer), proxy.clone());
                 pty_writer = Some(writer);
@@ -1703,9 +2035,657 @@ impl App {
         }
 
         let tab_title = title.unwrap_or_else(|| format!("Tab {}", tab_id + 1));
-        let tab = Tab::new(tab_id, tab_title, new_terminal, pty_writer);
+        let mut tab = Tab::new(tab_id, tab_title, new_terminal, pty_writer);
+        tab.cwd = cwd.map(std::path::Path::to_path_buf);
+        tab.sync_to_active_pane();
         self.tabs.push(tab);
         self.select_tab(self.tabs.len() - 1);
+    }
+
+    /// Starts an independent configured-shell session using an existing session's directory.
+    pub fn duplicate_terminal_session(&mut self, index: usize) -> bool {
+        let Some(source) = self.tabs.get(index) else {
+            return false;
+        };
+        let title = format!("{} Copy", source.display_title());
+        let cwd = source
+            .detect_cwd()
+            .or_else(|| source.cwd.clone())
+            .unwrap_or_else(|| {
+                self.workspace_manager.workspaces()[self.workspace_manager.active_index()]
+                    .root_directory
+                    .clone()
+            });
+        self.create_tab_in_directory(Some(title.clone()), Some(&cwd));
+        if let Some(tab) = self.tabs.last_mut() {
+            tab.set_custom_title(Some(title));
+            tab.cwd = Some(cwd);
+            tab.sync_to_active_pane();
+        }
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Creates a new workspace with an independent shell and terminal tab.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    pub fn create_workspace(&mut self, name: String, root_directory: std::path::PathBuf) {
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        let cols = self.terminal.grid.cols.max(1);
+        let rows = self.terminal.grid.rows.max(1);
+        let terminal = Terminal::new(cols, rows);
+        let mut writer = None;
+        if let Some(proxy) = &self.proxy {
+            let command = self.config.shell.as_ref().map_or_else(
+                crate::pty::ShellCommand::default_shell,
+                |program| {
+                    crate::pty::ShellCommand::with_args(
+                        program.clone(),
+                        self.config.shell_args.clone(),
+                    )
+                },
+            );
+            let size = crate::pty::PtySize {
+                rows: u16::try_from(rows).unwrap_or(24),
+                cols: u16::try_from(cols).unwrap_or(80),
+                px_w: (cols as f32 * self.cell_metrics.cell_width) as u16,
+                px_h: (rows as f32 * self.cell_metrics.cell_height) as u16,
+            };
+            if let Ok((pty_writer, reader)) =
+                crate::pty::spawn_in_directory(command, size, Some(&root_directory))
+            {
+                let pty_writer = Arc::new(Mutex::new(pty_writer));
+                spawn_tab_pty_forwarder(tab_id, reader, Arc::clone(&pty_writer), proxy.clone());
+                writer = Some(pty_writer);
+            }
+        }
+        let tab = Tab::new(tab_id, format!("{name} · Shell"), terminal, writer);
+        let index = self
+            .workspace_manager
+            .create(name, root_directory, vec![tab]);
+        self.workspace_tab_indices.push(0);
+        self.select_workspace(index);
+    }
+
+    /// Selects a workspace while retaining every inactive tab and PTY process.
+    pub fn select_workspace(&mut self, index: usize) -> bool {
+        if index == self.workspace_manager.active_index() {
+            return false;
+        }
+        if let Some(saved_index) = self
+            .workspace_tab_indices
+            .get_mut(self.workspace_manager.active_index())
+        {
+            *saved_index = self.active_tab_index;
+        }
+        if !self.workspace_manager.switch(index, &mut self.tabs) {
+            return false;
+        }
+        if self.tabs.is_empty() {
+            let root = self.workspace_manager.workspaces()[index]
+                .root_directory
+                .clone();
+            self.create_tab_in_directory(None, Some(&root));
+        }
+        self.active_tab_index = self
+            .workspace_tab_indices
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+        if let Some(active) = self.tabs.get(self.active_tab_index) {
+            self.terminal = active.terminal.clone();
+            self.pty_writer = active.pty_writer.clone();
+            self.selection = active.selection;
+            self.mouse_down_pos = active.mouse_down_pos;
+            self.pty_exited = active.pty_exited;
+            self.pty_exit_code = active.pty_exit_code;
+            self.title = active.display_title().to_owned();
+            self.workspace_name = self.workspace_manager.workspaces()[index].name.clone();
+            self.hovered_url = None;
+            self.terminal.mark_all_dirty();
+        }
+        self.refresh_git_status();
+        if let Some(window) = self.window.clone() {
+            let size = window.inner_size();
+            self.handle_resize(size);
+            window.set_title(&self.title);
+            window.request_redraw();
+        }
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Selects a workspace and starts a terminal when its session list is empty.
+    pub fn new_terminal_in_workspace(&mut self, index: usize) -> bool {
+        let Some(workspace) = self.workspace_manager.workspaces().get(index) else {
+            return false;
+        };
+        let starts_empty = workspace.sessions.as_ref().is_some_and(Vec::is_empty)
+            || (index == self.workspace_manager.active_index() && self.tabs.is_empty());
+
+        if index != self.workspace_manager.active_index() && !self.select_workspace(index) {
+            return false;
+        }
+        if !starts_empty || self.tabs.is_empty() {
+            self.create_tab(None);
+        }
+        true
+    }
+
+    /// Renames the selected workspace, rejecting empty names.
+    pub fn rename_active_workspace(&mut self, name: &str) -> bool {
+        let renamed = self
+            .workspace_manager
+            .rename(self.workspace_manager.active_index(), name);
+        if renamed {
+            self.workspace_name = self.workspace_manager.workspaces()
+                [self.workspace_manager.active_index()]
+            .name
+            .clone();
+            self.persist_workspace_state();
+        }
+        renamed
+    }
+
+    /// Renames a workspace by sidebar index.
+    pub fn rename_workspace(&mut self, index: usize, name: &str) -> bool {
+        if !self.workspace_manager.rename(index, name) {
+            return false;
+        }
+        if index == self.workspace_manager.active_index() {
+            self.workspace_name = self.workspace_manager.workspaces()[index].name.clone();
+        }
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Reorders workspaces while retaining their selected session collections.
+    pub fn reorder_workspace(&mut self, from: usize, to: usize) -> bool {
+        if !self.workspace_manager.reorder(from, to) {
+            return false;
+        }
+        let tab_index = self.workspace_tab_indices.remove(from);
+        self.workspace_tab_indices.insert(to, tab_index);
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Closes sessions in a workspace while keeping the workspace registered for later reopening.
+    pub fn close_workspace(&mut self, index: usize) -> bool {
+        if index >= self.workspace_manager.workspaces().len()
+            || self.workspace_manager.workspaces().len() <= 1
+        {
+            return false;
+        }
+        if index == self.workspace_manager.active_index() {
+            let replacement = if index + 1 < self.workspace_manager.workspaces().len() {
+                index + 1
+            } else {
+                index - 1
+            };
+            if !self.select_workspace(replacement) {
+                return false;
+            }
+        }
+        let Some(workspace) = self.workspace_manager.workspaces_mut().get_mut(index) else {
+            return false;
+        };
+        let Some(tabs) = workspace.sessions.as_mut() else {
+            return false;
+        };
+        Self::stop_workspace_tabs(std::mem::take(tabs));
+        self.workspace_tab_indices[index] = 0;
+        self.persist_workspace_state();
+        true
+    }
+
+    /// Removes a workspace registration and stops its sessions without touching project files.
+    pub fn remove_workspace(&mut self, index: usize) -> bool {
+        if index >= self.workspace_manager.workspaces().len()
+            || self.workspace_manager.workspaces().len() <= 1
+        {
+            return false;
+        }
+        if index == self.workspace_manager.active_index() {
+            let replacement = if index + 1 < self.workspace_manager.workspaces().len() {
+                index + 1
+            } else {
+                index - 1
+            };
+            if !self.select_workspace(replacement) {
+                return false;
+            }
+        }
+        let Some(tabs) = self.workspace_manager.remove_inactive(index) else {
+            return false;
+        };
+        Self::stop_workspace_tabs(tabs);
+        self.workspace_tab_indices.remove(index);
+        self.persist_workspace_state();
+        true
+    }
+
+    fn stop_workspace_tabs(tabs: Vec<Tab>) {
+        for tab in tabs {
+            for pane in tab.panes {
+                if let Some(writer) = pane.pty_writer
+                    && let Ok(mut writer) = writer.lock()
+                {
+                    let _ = writer.kill();
+                }
+            }
+        }
+    }
+
+    /// Opens a confirmation before closing a workspace and terminating its sessions.
+    pub fn request_close_workspace(&mut self, index: usize) {
+        self.request_workspace_confirmation(index, false);
+    }
+
+    /// Asks for confirmation before removing a workspace registration from Oxidite.
+    pub fn request_remove_workspace(&mut self, index: usize) {
+        self.request_workspace_confirmation(index, true);
+    }
+
+    fn request_workspace_confirmation(&mut self, index: usize, remove: bool) {
+        let Some(workspace) = self.workspace_manager.workspaces().get(index) else {
+            return;
+        };
+        if self.workspace_manager.workspaces().len() <= 1 {
+            return;
+        }
+        self.tab_close_confirm = Some(if remove {
+            crate::tab::CloseConfirmState::for_remove_workspace(index, workspace.name.clone())
+        } else {
+            crate::tab::CloseConfirmState::for_workspace(index, workspace.name.clone())
+        });
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn workspace_sidebar_entries(&self) -> Vec<crate::sidebar::WorkspaceEntry> {
+        self.workspace_manager
+            .workspaces()
+            .iter()
+            .enumerate()
+            .map(|(index, workspace)| {
+                let active = index == self.workspace_manager.active_index();
+                let branch = if active {
+                    self.git_branch.clone().unwrap_or_else(|| "--".to_string())
+                } else {
+                    "--".to_string()
+                };
+                let sessions_count = if active {
+                    self.tabs.len()
+                } else {
+                    workspace.sessions.as_ref().map_or(0, Vec::len)
+                };
+                crate::sidebar::WorkspaceEntry {
+                    name: workspace.name.clone(),
+                    root_directory: workspace.root_directory.display().to_string(),
+                    branch,
+                    sessions_count,
+                    modified_count: 0,
+                    diff_stat: None,
+                    is_active: active,
+                }
+            })
+            .collect()
+    }
+
+    fn agent_tab_indices(&self) -> Vec<usize> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.detect_agent() != crate::tab::AgentKind::Shell)
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn agent_sidebar_entries(&self) -> Vec<crate::sidebar::ChatEntry> {
+        self.agent_tab_indices()
+            .into_iter()
+            .filter_map(|index| self.tabs.get(index))
+            .map(|tab| {
+                let agent = tab.detect_agent();
+                let (_, agent_name) = agent.display_badge();
+                crate::sidebar::ChatEntry {
+                    title: tab.display_title().to_string(),
+                    status: if tab.pty_exited {
+                        crate::sidebar::ChatStatus::Done
+                    } else {
+                        crate::sidebar::ChatStatus::Idle
+                    },
+                    model: agent_name.to_string(),
+                }
+            })
+            .collect()
+    }
+
+    /// Saves workspace and split-layout metadata without serializing live processes.
+    pub fn persist_workspace_state(&self) {
+        if !self.persistence_enabled {
+            return;
+        }
+        let state = self.workspace_state_snapshot();
+        let Some(path) = crate::session_state::state_path() else {
+            return;
+        };
+        if let Err(error) = crate::session_state::save(&path, &state) {
+            log::warn!(
+                "Failed to save workspace state '{}': {error}",
+                path.display()
+            );
+        }
+    }
+
+    /// Persists config-backed user preferences after they change in the UI.
+    fn save_config(&self) {
+        if self.persistence_enabled
+            && let Err(error) = self.config.save()
+        {
+            log::warn!("Failed to persist user configuration: {error}");
+        }
+    }
+
+    /// Builds a serializable snapshot of active and inactive workspace layouts.
+    #[must_use]
+    pub fn workspace_state_snapshot(&self) -> crate::session_state::PersistedAppState {
+        let active_index = self.workspace_manager.active_index();
+        let workspaces = self
+            .workspace_manager
+            .workspaces()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, workspace)| {
+                let tabs = if index == active_index {
+                    Some(&self.tabs)
+                } else {
+                    workspace.sessions.as_ref()
+                }?;
+                Some(crate::session_state::PersistedWorkspace {
+                    id: workspace.id,
+                    name: workspace.name.clone(),
+                    root_directory: workspace.root_directory.clone(),
+                    active_tab_index: if index == active_index {
+                        self.active_tab_index
+                    } else {
+                        self.workspace_tab_indices.get(index).copied().unwrap_or(0)
+                    },
+                    tabs: tabs
+                        .iter()
+                        .map(|tab| crate::session_state::PersistedTab {
+                            id: tab.id,
+                            title: tab.title.clone(),
+                            custom_title: tab.custom_title.clone(),
+                            cwd: tab.detect_cwd(),
+                            active_pane_id: tab.active_pane_id,
+                            pane_tree: tab.pane_tree.root.clone(),
+                            panes: tab
+                                .panes
+                                .iter()
+                                .map(|pane| crate::session_state::PersistedPane {
+                                    id: pane.id,
+                                    title: pane.title.clone(),
+                                    cwd: pane.cwd.clone(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        crate::session_state::PersistedAppState {
+            version: crate::session_state::STATE_VERSION,
+            active_workspace_index: active_index,
+            sidebar_open: self.sidebar_open,
+            sidebar_width: self.sidebar_width,
+            window_size: self.last_window_size,
+            workspaces,
+        }
+    }
+
+    fn all_workspace_ids(&self) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for (index, workspace) in self.workspace_manager.workspaces().iter().enumerate() {
+            let tabs = if index == self.workspace_manager.active_index() {
+                Some(&self.tabs)
+            } else {
+                workspace.sessions.as_ref()
+            };
+            if let Some(tabs) = tabs {
+                for tab in tabs {
+                    ids.push(tab.id);
+                    ids.extend(tab.panes.iter().map(|pane| pane.id));
+                }
+            }
+        }
+        ids
+    }
+
+    /// Restores workspace layouts and starts fresh PTY processes for each saved pane.
+    pub fn restore_persisted_workspace_state(&mut self) -> bool {
+        let Some(path) = crate::session_state::state_path() else {
+            return false;
+        };
+        self.restore_workspace_state_from_path(&path)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn restore_workspace_state_from_path(&mut self, path: &std::path::Path) -> bool {
+        let state = match crate::session_state::load(path) {
+            Ok(Some(state)) => state,
+            Ok(None) => return false,
+            Err(error) => {
+                log::warn!(
+                    "Ignoring invalid workspace state '{}': {error}",
+                    path.display()
+                );
+                return false;
+            }
+        };
+        if state.workspaces.is_empty() {
+            return false;
+        }
+
+        let last_stored_id = state
+            .workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace.tabs.iter().flat_map(|tab| {
+                    std::iter::once(tab.id).chain(tab.panes.iter().map(|pane| pane.id))
+                })
+            })
+            .max()
+            .unwrap_or(0);
+        self.next_tab_id = self.next_tab_id.max(last_stored_id.saturating_add(1));
+
+        let mut restored: Vec<Vec<Tab>> = state
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| self.restore_tab(tab, &workspace.root_directory))
+                    .collect()
+            })
+            .collect();
+        for tabs in &mut restored {
+            if tabs.is_empty() {
+                let id = self.next_tab_id;
+                self.next_tab_id = self.next_tab_id.saturating_add(1);
+                tabs.push(Tab::new(
+                    id,
+                    "Shell".to_string(),
+                    Terminal::new(self.terminal.grid.cols, self.terminal.grid.rows),
+                    None,
+                ));
+            }
+        }
+
+        if let Some(writer) = &self.pty_writer
+            && let Ok(mut writer) = writer.lock()
+        {
+            let _ = writer.kill();
+        }
+        let active_index = state
+            .active_workspace_index
+            .min(state.workspaces.len().saturating_sub(1));
+        let first = &state.workspaces[0];
+        let mut manager = crate::workspace::WorkspaceManager::new_with_id(
+            first.id,
+            first.name.clone(),
+            first.root_directory.clone(),
+        );
+        for (index, workspace) in state.workspaces.iter().enumerate().skip(1) {
+            manager.insert_with_id(
+                workspace.id,
+                workspace.name.clone(),
+                workspace.root_directory.clone(),
+                std::mem::take(&mut restored[index]),
+            );
+        }
+        self.tabs = std::mem::take(&mut restored[0]);
+        self.active_tab_index = state.workspaces[0]
+            .active_tab_index
+            .min(self.tabs.len().saturating_sub(1));
+        if active_index != 0 {
+            let _ = manager.switch(active_index, &mut self.tabs);
+        }
+        self.workspace_tab_indices = state
+            .workspaces
+            .iter()
+            .map(|workspace| {
+                workspace
+                    .active_tab_index
+                    .min(workspace.tabs.len().max(1).saturating_sub(1))
+            })
+            .collect();
+        // `restored[0]` was moved into the manager; use the persisted index for the visible workspace.
+        self.active_tab_index = state.workspaces[active_index]
+            .active_tab_index
+            .min(self.tabs.len().saturating_sub(1));
+        self.workspace_manager = manager;
+        self.sidebar_open = state.sidebar_open;
+        self.sidebar_width = state.sidebar_width.clamp(185.0, 340.0);
+        self.last_window_size = state.window_size.filter(|(width, height)| {
+            (640..=7680).contains(width) && (480..=4320).contains(height)
+        });
+        self.workspace_name
+            .clone_from(&state.workspaces[active_index].name);
+        if let Some(tab) = self.tabs.get(self.active_tab_index) {
+            self.terminal = tab.terminal.clone();
+            self.pty_writer = tab.pty_writer.clone();
+            self.title = tab.display_title().to_owned();
+            self.pty_exited = tab.pty_exited;
+            self.pty_exit_code = tab.pty_exit_code;
+        }
+        self.next_tab_id = self
+            .all_workspace_ids()
+            .into_iter()
+            .max()
+            .unwrap_or(self.next_tab_id)
+            .saturating_add(1);
+        self.refresh_git_status();
+        true
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn restore_tab(
+        &mut self,
+        stored: &crate::session_state::PersistedTab,
+        workspace_root: &std::path::Path,
+    ) -> Tab {
+        let cols = self.terminal.grid.cols.max(1);
+        let rows = self.terminal.grid.rows.max(1);
+        let fallback = crate::session_state::PersistedPane {
+            id: stored.id,
+            title: stored.title.clone(),
+            cwd: stored.cwd.clone(),
+        };
+        let descriptors = if stored.panes.is_empty() {
+            vec![fallback]
+        } else {
+            stored.panes.clone()
+        };
+        let mut panes = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            let terminal = Terminal::new(cols, rows);
+            let cwd = descriptor
+                .cwd
+                .as_deref()
+                .filter(|directory| directory.is_dir())
+                .or_else(|| workspace_root.is_dir().then_some(workspace_root));
+            let size = crate::pty::PtySize {
+                rows: u16::try_from(rows).unwrap_or(24),
+                cols: u16::try_from(cols).unwrap_or(80),
+                px_w: (cols as f32 * self.cell_metrics.cell_width) as u16,
+                px_h: (rows as f32 * self.cell_metrics.cell_height) as u16,
+            };
+            let writer = self.spawn_workspace_pane(descriptor.id, size, cwd);
+            let mut pane =
+                crate::pane::Pane::new(descriptor.id, descriptor.title, terminal, writer);
+            pane.cwd = cwd.map(std::path::Path::to_path_buf);
+            panes.push(pane);
+        }
+        let first_pane_id = panes[0].id;
+        let first_terminal = panes[0].terminal.clone();
+        let first_writer = panes[0].pty_writer.clone();
+        let mut tab = Tab::new(
+            stored.id,
+            stored.title.clone(),
+            first_terminal,
+            first_writer,
+        );
+        let mut leaves = stored.pane_tree.all_leaf_ids();
+        let mut pane_ids: Vec<usize> = panes.iter().map(|pane| pane.id).collect();
+        leaves.sort_unstable();
+        pane_ids.sort_unstable();
+        tab.pane_tree.root = if leaves == pane_ids {
+            stored.pane_tree.clone()
+        } else {
+            crate::pane::PaneNode::Leaf(first_pane_id)
+        };
+        tab.pane_tree.next_split_id = tab.pane_tree.root.max_split_id().saturating_add(1);
+        tab.panes = panes;
+        tab.active_pane_id = if tab.pane(stored.active_pane_id).is_some() {
+            stored.active_pane_id
+        } else {
+            first_pane_id
+        };
+        tab.custom_title.clone_from(&stored.custom_title);
+        tab.sync_from_active_pane();
+        tab
+    }
+
+    fn spawn_workspace_pane(
+        &self,
+        pane_id: usize,
+        size: crate::pty::PtySize,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<Arc<Mutex<crate::pty::PtyWriter>>> {
+        let proxy = self.proxy.as_ref()?;
+        let command = self.config.shell.as_ref().map_or_else(
+            crate::pty::ShellCommand::default_shell,
+            |program| {
+                crate::pty::ShellCommand::with_args(program.clone(), self.config.shell_args.clone())
+            },
+        );
+        let (writer, reader) = crate::pty::spawn_in_directory(command, size, cwd).ok()?;
+        let writer = Arc::new(Mutex::new(writer));
+        spawn_tab_pty_forwarder(pane_id, reader, Arc::clone(&writer), proxy.clone());
+        Some(writer)
     }
 
     /// Switches the active view to the tab at `index`.
@@ -1744,6 +2724,7 @@ impl App {
             win.set_title(&self.title);
             win.request_redraw();
         }
+        self.persist_workspace_state();
         self.terminal.mark_all_dirty();
     }
 
@@ -1762,6 +2743,120 @@ impl App {
             return cwd.clone();
         }
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    }
+
+    fn activate_context_action(
+        &mut self,
+        target: crate::context_menu::ContextTarget,
+        action: crate::context_menu::ContextAction,
+        win: &Window,
+    ) {
+        use crate::context_menu::{ContextAction as Action, ContextTarget};
+        let reveal_path = match (target, action) {
+            (ContextTarget::Workspace(index), Action::Open) => {
+                self.select_workspace(index);
+                None
+            }
+            (ContextTarget::Workspace(index), Action::NewTerminal) => {
+                self.new_terminal_in_workspace(index);
+                None
+            }
+            (ContextTarget::Workspace(index), Action::Rename) => {
+                if let Some(workspace) = self.workspace_manager.workspaces().get(index) {
+                    self.tab_rename_state = Some(crate::tab::TabRenameState::for_workspace(
+                        index,
+                        &workspace.name,
+                    ));
+                }
+                None
+            }
+            (ContextTarget::Workspace(index), Action::RevealDirectory) => self
+                .workspace_manager
+                .workspaces()
+                .get(index)
+                .map(|workspace| workspace.root_directory.clone()),
+            (ContextTarget::Workspace(index), Action::CloseWorkspace) => {
+                self.request_close_workspace(index);
+                None
+            }
+            (ContextTarget::Workspace(index), Action::RemoveWorkspace) => {
+                self.request_remove_workspace(index);
+                None
+            }
+            (ContextTarget::Session(index), Action::Open) => {
+                self.select_tab(index);
+                None
+            }
+            (ContextTarget::Session(index), Action::Rename) => {
+                if let Some(tab) = self.tabs.get(index) {
+                    self.tab_rename_state =
+                        Some(crate::tab::TabRenameState::new(index, tab.display_title()));
+                }
+                None
+            }
+            (ContextTarget::Session(index), Action::DuplicateSession) => {
+                self.duplicate_terminal_session(index);
+                None
+            }
+            (ContextTarget::Session(index), Action::SplitRight | Action::SplitDown) => {
+                self.select_tab(index);
+                let direction = if action == Action::SplitRight {
+                    crate::pane::SplitDirection::Vertical
+                } else {
+                    crate::pane::SplitDirection::Horizontal
+                };
+                self.split_active_pane(direction);
+                None
+            }
+            (ContextTarget::Session(index), Action::RevealDirectory) => {
+                self.select_tab(index);
+                Some(self.active_cwd())
+            }
+            (ContextTarget::Session(index), Action::CloseSession) => {
+                self.request_close_tab(index);
+                None
+            }
+            _ => None,
+        };
+        if let Some(path) = reveal_path {
+            Self::reveal_directory(&path);
+        }
+        self.context_menu = None;
+        win.request_redraw();
+    }
+
+    fn apply_rename(&mut self, rename: &crate::tab::TabRenameState) {
+        let name = rename.input_text.trim().to_string();
+        if let Some(workspace_index) = rename.workspace_index {
+            self.rename_workspace(workspace_index, &name);
+        } else if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
+            tab.set_custom_title(if name.is_empty() { None } else { Some(name) });
+            self.persist_workspace_state();
+        }
+    }
+
+    fn confirm_close_target(&mut self, confirm: &crate::tab::CloseConfirmState) {
+        if let Some(workspace_index) = confirm.workspace_index {
+            if confirm.remove_workspace {
+                self.remove_workspace(workspace_index);
+            } else {
+                self.close_workspace(workspace_index);
+            }
+        } else {
+            self.close_tab(confirm.tab_index);
+        }
+    }
+
+    fn reveal_directory(path: &std::path::Path) {
+        #[cfg(target_os = "windows")]
+        let result = std::process::Command::new("explorer.exe").arg(path).spawn();
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("open").arg(path).spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let result = std::process::Command::new("xdg-open").arg(path).spawn();
+        if let Err(error) = result {
+            log::warn!("could not reveal directory {}: {error}", path.display());
+        }
     }
 
     /// Refreshes git status, changes panel list, and diff view from repository.
@@ -1916,6 +3011,7 @@ impl App {
             win.request_redraw();
         }
         self.terminal.mark_all_dirty();
+        self.persist_workspace_state();
     }
 
     /// Splits the currently active pane in the active tab either vertically or horizontally.
@@ -1925,18 +3021,31 @@ impl App {
         clippy::cast_precision_loss
     )]
     pub fn split_active_pane(&mut self, direction: crate::pane::SplitDirection) {
+        let Some(active_tab) = self.tabs.get(self.active_tab_index) else {
+            return;
+        };
+        let current_cols = active_tab.terminal.grid.cols;
+        let current_rows = active_tab.terminal.grid.rows;
+        let fits = match direction {
+            crate::pane::SplitDirection::Vertical => {
+                current_cols >= crate::pane::MIN_PANE_COLS.saturating_mul(2)
+            }
+            crate::pane::SplitDirection::Horizontal => {
+                current_rows >= crate::pane::MIN_PANE_ROWS.saturating_mul(2)
+            }
+        };
+        if !fits {
+            return;
+        }
+
         let new_pane_id = self.next_tab_id;
         self.next_tab_id += 1;
-
         let Some(active_tab) = self.tabs.get_mut(self.active_tab_index) else {
             return;
         };
-
-        let current_cols = active_tab.terminal.grid.cols;
-        let current_rows = active_tab.terminal.grid.rows;
         let (new_cols, new_rows) = match direction {
-            crate::pane::SplitDirection::Vertical => ((current_cols / 2).max(10), current_rows),
-            crate::pane::SplitDirection::Horizontal => (current_cols, (current_rows / 2).max(4)),
+            crate::pane::SplitDirection::Vertical => (current_cols / 2, current_rows),
+            crate::pane::SplitDirection::Horizontal => (current_cols, current_rows / 2),
         };
 
         let new_terminal = Terminal::new(new_cols, new_rows);
@@ -1982,6 +3091,40 @@ impl App {
             self.handle_resize(win.inner_size());
             win.request_redraw();
         }
+        self.persist_workspace_state();
+    }
+
+    /// Applies a split-picker recipe inside the focused pane, preserving every sibling pane.
+    pub fn apply_split_preset(&mut self, preset: crate::split_picker::SplitPreset) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab_index) else {
+            return false;
+        };
+        let fits = preset.fits(tab.terminal.grid.cols, tab.terminal.grid.rows);
+        if !fits {
+            return false;
+        }
+        if preset == crate::split_picker::SplitPreset::Single {
+            return true;
+        }
+        let mut pane_slots = vec![tab.active_pane_id];
+        for step in preset.steps() {
+            let Some(target_id) = pane_slots.get(step.target_slot).copied() else {
+                return false;
+            };
+            if let Some(tab) = self.tabs.get_mut(self.active_tab_index) {
+                tab.select_pane(target_id);
+            }
+            let previous_count = self.tabs[self.active_tab_index].panes.len();
+            self.split_active_pane(step.direction);
+            let Some(tab) = self.tabs.get(self.active_tab_index) else {
+                return false;
+            };
+            if tab.panes.len() != previous_count + 1 {
+                return false;
+            }
+            pane_slots.push(tab.active_pane_id);
+        }
+        true
     }
 
     /// Closes the currently active pane. If it is the last pane in the tab, closes the tab.
@@ -2005,6 +3148,7 @@ impl App {
             self.handle_resize(win.inner_size());
             win.request_redraw();
         }
+        self.persist_workspace_state();
     }
 
     /// Cycles keyboard focus to the next split pane in the active tab.
@@ -2046,7 +3190,50 @@ impl App {
     }
 
     /// Feeds PTY output bytes to a specific tab's parser and terminal state.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_tab_pty_output(&mut self, tab_id: usize, bytes: &[u8]) {
+        let belongs_to_active_workspace = self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id));
+        if !belongs_to_active_workspace {
+            for workspace in self.workspace_manager.workspaces_mut() {
+                let Some(tabs) = workspace.sessions.as_mut() else {
+                    continue;
+                };
+                let Some(tab) = tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id))
+                else {
+                    continue;
+                };
+                let pane_id = if tab.panes.iter().any(|pane| pane.id == tab_id) {
+                    tab_id
+                } else {
+                    tab.active_pane_id
+                };
+                let mut remaining = bytes;
+                while let Some(pos) = remaining.windows(4).position(|window| window == b"\x1b[6n") {
+                    if pos > 0 {
+                        tab.advance_pane_parser(pane_id, &remaining[..pos]);
+                    }
+                    if let Some(pane) = tab.pane(pane_id)
+                        && let Some(writer) = &pane.pty_writer
+                        && let Ok(mut writer) = writer.lock()
+                    {
+                        let row = pane.terminal.grid.cursor.row + 1;
+                        let col = pane.terminal.grid.cursor.col + 1;
+                        let _ = writer.write(format!("\x1b[{row};{col}R").as_bytes());
+                    }
+                    remaining = &remaining[pos + 4..];
+                }
+                if !remaining.is_empty() {
+                    tab.advance_pane_parser(pane_id, remaining);
+                }
+                return;
+            }
+        }
+
         let is_active_tab = self
             .tabs
             .get(self.active_tab_index)
@@ -2129,6 +3316,36 @@ impl App {
 
     /// Handles child process exit notification for a specific tab.
     pub fn handle_tab_pty_exited(&mut self, tab_id: usize, code: Option<i32>) {
+        let in_active_workspace = self
+            .tabs
+            .iter()
+            .any(|tab| tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id));
+        if !in_active_workspace {
+            for workspace in self.workspace_manager.workspaces_mut() {
+                let Some(tab) = workspace.sessions.as_mut().and_then(|tabs| {
+                    tabs.iter_mut().find(|tab| {
+                        tab.id == tab_id || tab.panes.iter().any(|pane| pane.id == tab_id)
+                    })
+                }) else {
+                    continue;
+                };
+                let pane_id = if tab.panes.iter().any(|pane| pane.id == tab_id) {
+                    tab_id
+                } else {
+                    tab.active_pane_id
+                };
+                if let Some(pane) = tab.pane_mut(pane_id) {
+                    pane.pty_exited = true;
+                    pane.pty_exit_code = code;
+                }
+                if pane_id == tab.active_pane_id {
+                    tab.pty_exited = true;
+                    tab.pty_exit_code = code;
+                }
+                return;
+            }
+            return;
+        }
         if let Some(tab) = self
             .tabs
             .iter_mut()
@@ -2178,37 +3395,92 @@ impl App {
         let palette = self.config.theme.to_f32_palette();
         let cursor_color = self.config.theme.cursor.to_rgba_array(1.0);
         let selection_color = self.config.theme.selection_bg.to_rgba_array(1.0);
-        let accent_color = palette[12]; // Vivid cyan/blue accent for active tab
+        let theme_tokens = self.config.theme.tokens();
+        let accent_color = theme_tokens.accent_primary.to_rgba_array(1.0);
 
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
+        let hovered_activity = if self.cursor_pixel_pos.0 >= 0.0
+            && self.cursor_pixel_pos.0 < f64::from(geo.activity_rail_w)
+        {
+            crate::shell::hit_test_activity(
+                self.cursor_pixel_pos.1 as f32,
+                geo.titlebar_px,
+                self.scale_factor as f32,
+            )
+        } else {
+            None
+        };
         let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
         let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
-        let x_offset = geo.sidebar_w + effective_pad_x;
+        let x_offset = geo.workspace_x + effective_pad_x;
         let y_offset = geo.tab_bar_px + effective_pad_y;
 
         let mut quad_vertices = Vec::new();
 
-        // 1. Tab bar quads (background, tab bodies, active indicator, dividers)
+        let shell_layout = crate::shell::ShellLayout::calculate(
+            geo.win_w,
+            geo.win_h,
+            self.scale_factor as f32,
+            self.sidebar_width,
+            self.sidebar_open,
+            self.config.status_bar,
+        );
+        let (shell_quads, _) = crate::shell::build_shell_chrome(
+            shell_layout,
+            &self.workspace_name,
+            self.last_active_cwd
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+            self.git_branch.as_deref(),
+            if self.settings_open {
+                crate::shell::SidebarMode::Settings
+            } else {
+                self.sidebar_mode
+            },
+            hovered_activity,
+            theme_tokens,
+        );
+        quad_vertices.extend_from_slice(&shell_quads);
+
+        // Terminal tabs occupy only the main workspace and sit below its header.
         let bg_color = self.config.theme.bg_color();
-        quad_vertices.extend_from_slice(&crate::tab::assemble_tab_bar_quads_themed(
+        let mut tab_quads = crate::tab::assemble_tab_bar_quads_themed(
             self.tabs.len(),
             self.active_tab_index,
-            screen_size[0],
+            (screen_size[0] - geo.workspace_x).max(0.0),
             accent_color,
             bg_color,
-        ));
+            self.config.theme.tokens(),
+        );
+        crate::shell::translate_quads(&mut tab_quads, geo.workspace_x, geo.workspace_tabs_y);
+        quad_vertices.extend_from_slice(&tab_quads);
 
         // 1.5. Sidebar quads (if expanded)
-        if self.sidebar_open {
-            quad_vertices.extend_from_slice(&crate::sidebar::assemble_sidebar_quads(
-                geo.tab_bar_px,
-                geo.content_h,
+        if geo.sidebar_w > 0.0 {
+            let mut sidebar_quads = crate::sidebar::assemble_sidebar_quads(
+                geo.titlebar_px,
+                (geo.win_h - geo.titlebar_px - geo.status_bar_px).max(0.0),
+                geo.sidebar_w,
                 accent_color,
                 self.active_tab_index,
                 self.tabs.len(),
-            ));
+                theme_tokens,
+            );
+            crate::shell::translate_quads(&mut sidebar_quads, geo.activity_rail_w, 0.0);
+            quad_vertices.extend_from_slice(&sidebar_quads);
+            if self.sidebar_mode == crate::shell::SidebarMode::SourceControl {
+                let mut branch_quads = crate::sidebar::assemble_branch_picker_quads(
+                    geo.titlebar_px,
+                    geo.sidebar_w,
+                    &self.changes_panel_state,
+                    theme_tokens,
+                );
+                crate::shell::translate_quads(&mut branch_quads, geo.activity_rail_w, 0.0);
+                quad_vertices.extend_from_slice(&branch_quads);
+            }
         }
-
         let is_multi_pane = self
             .tabs
             .get(self.active_tab_index)
@@ -2269,7 +3541,7 @@ impl App {
             ));
         } else if let Some(active_tab) = self.tabs.get(self.active_tab_index) {
             let container = crate::pane::PaneRect::new(
-                geo.sidebar_w,
+                geo.workspace_x,
                 geo.tab_bar_px,
                 geo.term_w,
                 geo.content_h,
@@ -2395,11 +3667,28 @@ impl App {
                 self.cell_metrics.cell_height,
                 x_offset,
                 y_offset,
+                theme_tokens,
+            ));
+        }
+
+        if self.split_picker_open {
+            let (split_button, _) =
+                crate::tab::compute_chrome_buttons((screen_size[0] - geo.workspace_x).max(0.0));
+            let layout = crate::split_picker::SplitPickerLayout::calculate(
+                screen_size[0],
+                screen_size[1] - geo.status_bar_px,
+                geo.workspace_x + split_button.0,
+                geo.workspace_tabs_y + split_button.1,
+            );
+            quad_vertices.extend_from_slice(&crate::split_picker::assemble_quads(
+                layout,
+                self.split_picker_hover,
+                self.config.theme.tokens(),
             ));
         }
 
         // 5.5. Central Side-by-side Diff View workspace quads (if open)
-        if self.diff_view_open && geo.diff_w > 10.0 {
+        if geo.diff_view_visible && geo.diff_w > 10.0 {
             quad_vertices.extend_from_slice(&crate::diff_view::assemble_diff_view_quads(
                 geo.diff_x,
                 geo.tab_bar_px,
@@ -2407,11 +3696,12 @@ impl App {
                 geo.content_h,
                 accent_color,
                 &self.diff_view_state,
+                self.config.theme.tokens(),
             ));
         }
 
         // 5.6. Right Changes & Git Panel quads (if open)
-        if self.changes_panel_open && geo.changes_panel_w > 10.0 {
+        if geo.changes_panel_visible && geo.changes_panel_w > 10.0 {
             quad_vertices.extend_from_slice(&crate::changes_panel::assemble_changes_panel_quads(
                 geo.panel_x,
                 geo.tab_bar_px,
@@ -2419,6 +3709,7 @@ impl App {
                 geo.content_h,
                 accent_color,
                 &self.changes_panel_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2430,7 +3721,7 @@ impl App {
         };
         if highlight_splitter != DraggingSplitter::None {
             let split_x = match highlight_splitter {
-                DraggingSplitter::Sidebar => geo.sidebar_w,
+                DraggingSplitter::Sidebar => geo.workspace_x,
                 DraggingSplitter::ChangesPanel => geo.panel_x,
                 DraggingSplitter::TerminalDiff => geo.diff_x,
                 DraggingSplitter::None => 0.0,
@@ -2455,6 +3746,7 @@ impl App {
                 status_bar_px,
                 accent_color,
                 &sb_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2466,14 +3758,25 @@ impl App {
             accent_color,
         ));
 
+        // Draw rail tooltips above terminal and navigation surfaces. The rail remains
+        // discoverable when the full navigation sidebar has been collapsed.
+        if let Some(mode) = hovered_activity {
+            quad_vertices.extend_from_slice(&crate::shell::build_activity_tooltip_quads(
+                shell_layout,
+                mode,
+                theme_tokens,
+            ));
+        }
+
         // 7.5. Floating search bar overlay (if open)
         if self.search_state.is_open {
             quad_vertices.extend_from_slice(&crate::search::assemble_search_bar_quads(
-                geo.sidebar_w,
+                geo.workspace_x,
                 geo.tab_bar_px,
                 geo.term_w,
                 accent_color,
                 &self.search_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2492,15 +3795,20 @@ impl App {
         if let Some(ref drag) = self.dragging_tab
             && drag.is_dragging
         {
-            let target_idx =
-                crate::tab::compute_tab_drop_index(drag.current_x, self.tabs.len(), screen_size[0]);
-            quad_vertices.extend_from_slice(&crate::tab::assemble_tab_drag_indicator_quads(
+            let target_idx = crate::tab::compute_tab_drop_index(
+                drag.current_x,
+                self.tabs.len(),
+                (screen_size[0] - geo.workspace_x).max(0.0),
+            );
+            let mut drag_quads = crate::tab::assemble_tab_drag_indicator_quads(
                 self.tabs.len(),
                 drag.origin_idx,
                 target_idx,
-                screen_size[0],
+                (screen_size[0] - geo.workspace_x).max(0.0),
                 accent_color,
-            ));
+            );
+            crate::shell::translate_quads(&mut drag_quads, geo.workspace_x, geo.workspace_tabs_y);
+            quad_vertices.extend_from_slice(&drag_quads);
         }
 
         // 8.2. Tab rename modal dialog (if open)
@@ -2509,6 +3817,7 @@ impl App {
                 screen_size[0],
                 screen_size[1],
                 accent_color,
+                theme_tokens,
             ));
         }
 
@@ -2519,6 +3828,7 @@ impl App {
                 screen_size[1],
                 confirm_state.confirm_selected,
                 accent_color,
+                theme_tokens,
             ));
         }
 
@@ -2530,6 +3840,41 @@ impl App {
                 screen_size[0],
                 screen_size[1],
                 [1.0, 1.0, 1.0, 0.25],
+            ));
+        }
+
+        if self.global_search_state.is_open {
+            let results = self.global_search_results();
+            let mut state = self.global_search_state.clone();
+            let filtered = state.filtered(&results);
+            let layout = crate::global_search::SearchLayout::calculate(
+                screen_size[0],
+                screen_size[1],
+                filtered.len(),
+            );
+            quad_vertices.extend_from_slice(&crate::global_search::assemble_quads(
+                screen_size[0],
+                screen_size[1],
+                layout,
+                &filtered,
+                state.selected,
+                self.config.theme.tokens(),
+            ));
+        }
+
+        if let Some(menu) = self.context_menu {
+            let layout = menu.layout(screen_size[0], screen_size[1], self.scale_factor as f32);
+            let hovered = layout
+                .hit_test(
+                    menu.target,
+                    self.cursor_pixel_pos.0 as f32,
+                    self.cursor_pixel_pos.1 as f32,
+                )
+                .or_else(|| menu.selected_action());
+            quad_vertices.extend_from_slice(&layout.quads(
+                menu.target,
+                hovered,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2556,7 +3901,9 @@ impl App {
         let track_top = y_offset;
         let track_height = (screen_size[1] - track_top - status_bar_px - effective_pad_y).max(10.0);
         let scrollbar_width = 4.0;
-        let track_x = screen_size[0] - scrollbar_width - 2.0;
+        let geometry = self.compute_pane_geometry(screen_size[0], screen_size[1]);
+        let track_x =
+            (geometry.sidebar_w + geometry.term_w - scrollbar_width - 2.0).max(geometry.sidebar_w);
 
         let mut quads = Vec::with_capacity(12);
 
@@ -2605,42 +3952,100 @@ impl App {
             None => return,
         };
         let geo = self.compute_pane_geometry(screen_size[0], screen_size[1]);
+        let theme_tokens = self.config.theme.tokens();
+        let hovered_activity = if self.cursor_pixel_pos.0 >= 0.0
+            && self.cursor_pixel_pos.0 < f64::from(geo.activity_rail_w)
+        {
+            crate::shell::hit_test_activity(
+                self.cursor_pixel_pos.1 as f32,
+                geo.titlebar_px,
+                self.scale_factor as f32,
+            )
+        } else {
+            None
+        };
         let quad_vertices = self.assemble_quad_vertices(is_bell_active, screen_size);
-        let mut tab_labels = self.build_tab_labels(screen_size[0]);
+        let shell_layout = crate::shell::ShellLayout::calculate(
+            geo.win_w,
+            geo.win_h,
+            self.scale_factor as f32,
+            self.sidebar_width,
+            self.sidebar_open,
+            self.config.status_bar,
+        );
+        let (_, shell_labels) = crate::shell::build_shell_chrome(
+            shell_layout,
+            &self.workspace_name,
+            self.last_active_cwd
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+            self.git_branch.as_deref(),
+            if self.settings_open {
+                crate::shell::SidebarMode::Settings
+            } else {
+                self.sidebar_mode
+            },
+            hovered_activity,
+            theme_tokens,
+        );
+        let mut tab_labels = shell_labels;
+        let mut terminal_tab_labels =
+            self.build_tab_labels((screen_size[0] - geo.workspace_x).max(0.0));
+        crate::shell::translate_labels(
+            &mut terminal_tab_labels,
+            geo.workspace_x,
+            geo.workspace_tabs_y,
+        );
+        tab_labels.extend(terminal_tab_labels);
 
-        if self.sidebar_open {
+        if geo.sidebar_w > 0.0 {
             let sidebar_state = crate::sidebar::SidebarState {
                 workspace_name: self.workspace_name.clone(),
                 git_branch: self.git_branch.clone(),
                 tab_titles: self.tabs.iter().map(|t| t.title.clone()).collect(),
                 active_tab_index: self.active_tab_index,
-                workspaces: self.sidebar_state.workspaces.clone(),
-                chats: self.sidebar_state.chats.clone(),
+                workspaces: self.workspace_sidebar_entries(),
+                chats: self.agent_sidebar_entries(),
                 git_status: self.sidebar_state.git_status.clone(),
+                source_control_tab: self.changes_panel_state.active_tab,
+                changed_file_count: self.changes_panel_state.changed_files.len(),
+                commit_count: self.changes_panel_state.history.len(),
             };
-            tab_labels.extend(crate::sidebar::build_sidebar_labels(
+            let mut sidebar_labels = crate::sidebar::build_navigation_labels(
                 &sidebar_state,
-                geo.tab_bar_px,
-            ));
+                self.sidebar_mode,
+                &self.changes_panel_state,
+                geo.titlebar_px,
+                geo.sidebar_w,
+                self.config.theme.tokens(),
+            );
+            crate::shell::translate_labels(&mut sidebar_labels, geo.activity_rail_w, 0.0);
+            let sidebar_bottom = geo.win_h - geo.status_bar_px;
+            sidebar_labels.retain(|label| label.y < sidebar_bottom - 14.0);
+            tab_labels.extend(sidebar_labels);
         }
 
-        if self.diff_view_open && geo.diff_w > 10.0 {
+        if geo.diff_view_visible && geo.diff_w > 10.0 {
             tab_labels.extend(crate::diff_view::build_diff_view_labels(
                 geo.diff_x,
                 geo.tab_bar_px,
                 geo.diff_w,
                 geo.content_h,
                 &self.diff_view_state,
+                theme_tokens,
             ));
         }
 
-        if self.changes_panel_open && geo.changes_panel_w > 10.0 {
+        if geo.changes_panel_visible && geo.changes_panel_w > 10.0 {
             tab_labels.extend(crate::changes_panel::build_changes_panel_labels(
                 geo.panel_x,
                 geo.tab_bar_px,
                 geo.changes_panel_w,
                 geo.content_h,
                 &self.changes_panel_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2650,10 +4055,11 @@ impl App {
 
         if self.search_state.is_open {
             tab_labels.extend(crate::search::build_search_bar_labels(
-                geo.sidebar_w,
+                geo.workspace_x,
                 geo.tab_bar_px,
                 geo.term_w,
                 &self.search_state,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2672,6 +4078,7 @@ impl App {
                 screen_size[0],
                 screen_size[1],
                 self.cursor_blink_visible,
+                self.config.theme.tokens(),
             ));
         }
 
@@ -2680,7 +4087,45 @@ impl App {
                 confirm_state,
                 screen_size[0],
                 screen_size[1],
+                self.config.theme.tokens(),
             ));
+        }
+
+        if self.global_search_state.is_open {
+            let results = self.global_search_results();
+            let filtered = self.global_search_state.filtered(&results);
+            let layout = crate::global_search::SearchLayout::calculate(
+                screen_size[0],
+                screen_size[1],
+                filtered.len(),
+            );
+            tab_labels.extend(crate::global_search::build_labels(
+                layout,
+                &self.global_search_state.query,
+                &filtered,
+                self.global_search_state.selected,
+                self.config.theme.tokens(),
+            ));
+        }
+
+        if self.split_picker_open {
+            let (split_button, _) =
+                crate::tab::compute_chrome_buttons((screen_size[0] - geo.workspace_x).max(0.0));
+            let layout = crate::split_picker::SplitPickerLayout::calculate(
+                screen_size[0],
+                screen_size[1] - geo.status_bar_px,
+                geo.workspace_x + split_button.0,
+                geo.workspace_tabs_y + split_button.1,
+            );
+            tab_labels.extend(crate::split_picker::build_labels(
+                layout,
+                self.config.theme.tokens(),
+            ));
+        }
+
+        if let Some(menu) = self.context_menu {
+            let layout = menu.layout(screen_size[0], screen_size[1], self.scale_factor as f32);
+            tab_labels.extend(layout.labels(menu.target, self.config.theme.tokens()));
         }
 
         let palette = self.config.theme.to_f32_palette();
@@ -2756,7 +4201,7 @@ impl App {
 
             let effective_pad_x = (self.config.padding_x * self.scale_factor as f32).round();
             let effective_pad_y = (self.config.padding_y * self.scale_factor as f32).round();
-            let x_offset = geo.sidebar_w + effective_pad_x;
+            let x_offset = geo.workspace_x + effective_pad_x;
             let y_offset = geo.tab_bar_px + effective_pad_y;
 
             let is_multi_pane = self
@@ -2779,7 +4224,7 @@ impl App {
                 let _ = glyph_pipeline.draw(&draw_ctx, &mut rpass, &self.terminal.grid);
             } else if let Some(active_tab) = self.tabs.get(self.active_tab_index) {
                 let container = crate::pane::PaneRect::new(
-                    geo.sidebar_w,
+                    geo.workspace_x,
                     geo.tab_bar_px,
                     geo.term_w,
                     geo.content_h,
@@ -2834,6 +4279,14 @@ impl ApplicationHandler<AppEvent> for App {
             match create_window(event_loop, &self.title) {
                 Ok(win) => {
                     self.scale_factor = win.scale_factor();
+                    let (restored_size, maximized) = restore_window_size(
+                        self.last_window_size,
+                        win.current_monitor().map(|monitor| monitor.size()),
+                    );
+                    let _ = win.request_inner_size(restored_size);
+                    if maximized {
+                        win.set_maximized(true);
+                    }
                     match GpuContext::new(Arc::clone(&win)) {
                         Ok(gpu) => {
                             let quad_pipeline = QuadPipeline::new(&gpu.device, gpu.config.format);
@@ -2875,10 +4328,11 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(path) = crate::config::config_path() {
                     match crate::config::Config::load_from_path(&path) {
                         Ok(new_config) => {
+                            let theme = new_config.theme.clone();
                             self.config = new_config;
+                            self.apply_theme(theme, false);
                             self.base_font_size = self.config.font_size;
                             self.update_scale();
-                            self.terminal.mark_all_dirty();
                             if let Some(ref win) = self.window {
                                 win.request_redraw();
                             }
@@ -2891,11 +4345,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::ThemeChanged(theme_name) => {
                 if let Some(new_theme) = crate::config::load_theme_by_name(&theme_name) {
-                    self.config.theme = new_theme;
-                    self.terminal.mark_all_dirty();
-                    if let Some(ref win) = self.window {
-                        win.request_redraw();
-                    }
+                    self.apply_theme(new_theme, false);
                 }
             }
         }
@@ -2921,6 +4371,7 @@ impl ApplicationHandler<AppEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.persist_workspace_state();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -2948,9 +4399,56 @@ impl ApplicationHandler<AppEvent> for App {
                 let win_h = win.inner_size().height as f32;
                 let geo = self.compute_pane_geometry(win_w, win_h);
 
+                if self.split_picker_open {
+                    let (split_button, _) =
+                        crate::tab::compute_chrome_buttons((win_w - geo.workspace_x).max(0.0));
+                    let layout = crate::split_picker::SplitPickerLayout::calculate(
+                        win_w,
+                        win_h - geo.status_bar_px,
+                        geo.workspace_x + split_button.0,
+                        geo.workspace_tabs_y + split_button.1,
+                    );
+                    let next = if layout
+                        .hit_test(position.x as f32, position.y as f32)
+                        .is_some()
+                    {
+                        layout.hit_test(position.x as f32, position.y as f32)
+                    } else {
+                        None
+                    };
+                    if next != self.split_picker_hover {
+                        self.split_picker_hover = next;
+                        win.request_redraw();
+                    }
+                }
+
+                if !win.is_maximized()
+                    && self.dragging_splitter == DraggingSplitter::None
+                    && self.dragging_pane_divider.is_none()
+                    && self.dragging_tab.is_none()
+                {
+                    let edge = crate::shell::hit_test_resize_edge(
+                        position.x as f32,
+                        position.y as f32,
+                        win_w,
+                        win_h,
+                        6.0 * self.scale_factor as f32,
+                    );
+                    if let Some(direction) = edge {
+                        win.set_cursor(winit::window::CursorIcon::from(direction));
+                    } else if self.hovered_splitter == DraggingSplitter::None
+                        && self.hovered_pane_divider.is_none()
+                    {
+                        win.set_cursor(winit::window::CursorIcon::Default);
+                    }
+                }
+
                 // Handle active tab header dragging for reordering
                 if let Some(ref mut drag) = self.dragging_tab {
-                    if drag.update_pos(position.x as f32, position.y as f32) {
+                    if drag.update_pos(
+                        position.x as f32 - geo.workspace_x,
+                        position.y as f32 - geo.workspace_tabs_y,
+                    ) {
                         win.request_redraw();
                     }
                     return;
@@ -2962,7 +4460,7 @@ impl ApplicationHandler<AppEvent> for App {
                         let cursor_x = position.x as f32;
                         let cursor_y = position.y as f32;
                         let container = crate::pane::PaneRect::new(
-                            geo.sidebar_w,
+                            geo.workspace_x,
                             geo.tab_bar_px,
                             geo.term_w,
                             geo.content_h,
@@ -2978,7 +4476,6 @@ impl ApplicationHandler<AppEvent> for App {
                             }
                         };
                         tab.pane_tree.root.adjust_split_ratio(div.split_id, ratio);
-                        self.handle_resize(win.inner_size());
                         win.request_redraw();
                     }
                     return;
@@ -2990,11 +4487,12 @@ impl ApplicationHandler<AppEvent> for App {
                     let cursor_x = position.x as f32;
 
                     if cursor_y >= geo.tab_bar_px && cursor_y <= (win_h - geo.status_bar_px) {
-                        if self.sidebar_open && (cursor_x - geo.sidebar_w).abs() <= 8.0 {
+                        if geo.sidebar_w > 0.0 && (cursor_x - geo.workspace_x).abs() <= 8.0 {
                             detected = DraggingSplitter::Sidebar;
-                        } else if self.changes_panel_open && (cursor_x - geo.panel_x).abs() <= 8.0 {
+                        } else if geo.changes_panel_visible && (cursor_x - geo.panel_x).abs() <= 8.0
+                        {
                             detected = DraggingSplitter::ChangesPanel;
-                        } else if self.diff_view_open && (cursor_x - geo.diff_x).abs() <= 8.0 {
+                        } else if geo.diff_view_visible && (cursor_x - geo.diff_x).abs() <= 8.0 {
                             detected = DraggingSplitter::TerminalDiff;
                         }
                     }
@@ -3020,7 +4518,7 @@ impl ApplicationHandler<AppEvent> for App {
                         let effective_pad_y =
                             (self.config.padding_y * self.scale_factor as f32).round();
                         let container = crate::pane::PaneRect::new(
-                            geo.sidebar_w,
+                            geo.workspace_x,
                             geo.tab_bar_px,
                             geo.term_w,
                             geo.content_h,
@@ -3070,8 +4568,8 @@ impl ApplicationHandler<AppEvent> for App {
                         && !self.settings_open
                     {
                         // Check URL hover within terminal content pane
-                        let in_terminal = cursor_x >= geo.sidebar_w
-                            && cursor_x < (geo.sidebar_w + geo.term_w)
+                        let in_terminal = cursor_x >= geo.workspace_x
+                            && cursor_x < (geo.workspace_x + geo.term_w)
                             && cursor_y >= geo.tab_bar_px
                             && cursor_y <= (win_h - geo.status_bar_px);
 
@@ -3101,8 +4599,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     match self.dragging_splitter {
                         DraggingSplitter::Sidebar => {
-                            let new_w =
-                                (position.x as f32 / self.scale_factor as f32).clamp(140.0, 480.0);
+                            let new_w = ((position.x as f32 - geo.activity_rail_w)
+                                / self.scale_factor as f32)
+                                .clamp(190.0, 360.0);
                             self.sidebar_width = new_w;
                         }
                         DraggingSplitter::ChangesPanel => {
@@ -3111,26 +4610,59 @@ impl ApplicationHandler<AppEvent> for App {
                             self.changes_panel_width = new_w;
                         }
                         DraggingSplitter::TerminalDiff => {
-                            let sidebar_px = if self.sidebar_open {
-                                (self.sidebar_width * self.scale_factor as f32).round()
-                            } else {
-                                0.0
-                            };
-                            let changes_px = if self.changes_panel_open {
-                                (self.changes_panel_width * self.scale_factor as f32).round()
-                            } else {
-                                0.0
-                            };
-                            let avail = (win_w - sidebar_px - changes_px).max(1.0);
-                            let rel_x = (position.x as f32 - sidebar_px)
-                                .clamp(160.0, (avail - 160.0).max(160.0));
-                            self.term_split_ratio = (rel_x / avail).clamp(0.15, 0.85);
+                            let avail = (win_w - geo.workspace_x - geo.changes_panel_w).max(1.0);
+                            let min_ratio = (geo.min_term_w / avail).min(0.5);
+                            let max_ratio = 1.0 - (geo.min_diff_w / avail).min(0.5);
+                            let rel_x = (position.x as f32 - geo.workspace_x)
+                                .clamp(avail * min_ratio, avail * max_ratio);
+                            self.term_split_ratio = rel_x / avail;
                         }
                         DraggingSplitter::None => {}
                     }
                     // Only request redraw during drag for high-fps responsiveness; resize PTY on release
                     win.request_redraw();
                 }
+            }
+            WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                button: winit::event::MouseButton::Right,
+                ..
+            } if !self.terminal.modes.mouse_reporting => {
+                let size = win.inner_size();
+                let geometry = self.compute_pane_geometry(size.width as f32, size.height as f32);
+                let x = self.cursor_pixel_pos.0 as f32;
+                let y = self.cursor_pixel_pos.1 as f32;
+                let target = if x >= geometry.activity_rail_w
+                    && x < geometry.workspace_x
+                    && y >= geometry.titlebar_px
+                {
+                    match crate::sidebar::hit_test_navigation(
+                        self.sidebar_mode,
+                        y,
+                        geometry.titlebar_px,
+                        self.workspace_manager.workspaces().len(),
+                        self.tabs.len(),
+                        &self.changes_panel_state,
+                    ) {
+                        crate::sidebar::SidebarAction::SelectWorkspace(index) => {
+                            Some(crate::context_menu::ContextTarget::Workspace(index))
+                        }
+                        crate::sidebar::SidebarAction::SelectTab(index) => {
+                            Some(crate::context_menu::ContextTarget::Session(index))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                self.context_menu = target.map(|target| {
+                    let can_close_workspace =
+                        !matches!(target, crate::context_menu::ContextTarget::Workspace(_))
+                            || self.workspace_manager.workspaces().len() > 1;
+                    crate::context_menu::ContextMenuState::new(target, x, y)
+                        .with_workspace_close_allowed(can_close_workspace)
+                });
+                win.request_redraw();
             }
             WindowEvent::MouseInput {
                 state,
@@ -3151,7 +4683,7 @@ impl ApplicationHandler<AppEvent> for App {
                         match action {
                             Some(crate::tab::CloseConfirmAction::Confirm) => {
                                 self.tab_close_confirm = None;
-                                self.close_tab(confirm.tab_index);
+                                self.confirm_close_target(&confirm);
                                 win.request_redraw();
                             }
                             Some(
@@ -3181,14 +4713,7 @@ impl ApplicationHandler<AppEvent> for App {
                         match action {
                             Some(crate::tab::TabRenameAction::Save) => {
                                 self.tab_rename_state = None;
-                                let custom = rename.input_text.trim().to_string();
-                                if let Some(tab) = self.tabs.get_mut(rename.tab_index) {
-                                    tab.set_custom_title(if custom.is_empty() {
-                                        None
-                                    } else {
-                                        Some(custom)
-                                    });
-                                }
+                                self.apply_rename(&rename);
                                 win.request_redraw();
                             }
                             Some(
@@ -3210,10 +4735,14 @@ impl ApplicationHandler<AppEvent> for App {
                     && drag.is_dragging
                 {
                     let win_w = win.inner_size().width as f32;
+                    let geo = self.compute_pane_geometry(
+                        win.inner_size().width as f32,
+                        win.inner_size().height as f32,
+                    );
                     let target_idx = crate::tab::compute_tab_drop_index(
-                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.0 as f32 - geo.workspace_x,
                         self.tabs.len(),
-                        win_w,
+                        (win_w - geo.workspace_x).max(0.0),
                     );
                     if target_idx != drag.origin_idx {
                         crate::tab::reorder_tabs(
@@ -3249,16 +4778,13 @@ impl ApplicationHandler<AppEvent> for App {
                                 if let Some(new_theme) =
                                     crate::theme::Theme::preset_by_name(&theme_name)
                                 {
-                                    self.config.theme = new_theme;
-                                    for tab in &mut self.tabs {
-                                        tab.terminal.mark_all_dirty();
-                                    }
-                                    self.terminal.mark_all_dirty();
+                                    self.apply_theme(new_theme, true);
                                     win.request_redraw();
                                 }
                             }
                             crate::settings_modal::SettingsAction::SelectFontFamily(family) => {
                                 self.config.font_family = family;
+                                self.save_config();
                                 win.request_redraw();
                             }
                             crate::settings_modal::SettingsAction::DecreaseFontSize => {
@@ -3297,12 +4823,14 @@ impl ApplicationHandler<AppEvent> for App {
                                 let (px, py) = choice.pixels();
                                 self.config.padding_x = px;
                                 self.config.padding_y = py;
+                                self.save_config();
                                 self.handle_resize(win.inner_size());
                                 self.terminal.mark_all_dirty();
                                 win.request_redraw();
                             }
                             crate::settings_modal::SettingsAction::ToggleStatusBar => {
                                 self.config.status_bar = !self.config.status_bar;
+                                self.save_config();
                                 self.handle_resize(win.inner_size());
                                 self.terminal.mark_all_dirty();
                                 win.request_redraw();
@@ -3317,6 +4845,135 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
 
+                // The custom client titlebar owns native window controls and global search.
+                let geometry = self.compute_pane_geometry(
+                    win.inner_size().width as f32,
+                    win.inner_size().height as f32,
+                );
+                let titlebar_action = crate::shell::hit_test_titlebar(
+                    self.cursor_pixel_pos.0 as f32,
+                    self.cursor_pixel_pos.1 as f32,
+                    win.inner_size().width as f32,
+                );
+                if state == winit::event::ElementState::Pressed
+                    && !win.is_maximized()
+                    && (self.cursor_pixel_pos.1 >= f64::from(geometry.titlebar_px)
+                        || titlebar_action == crate::shell::TitlebarAction::Drag)
+                {
+                    let size = win.inner_size();
+                    if let Some(direction) = crate::shell::hit_test_resize_edge(
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                        size.width as f32,
+                        size.height as f32,
+                        6.0 * self.scale_factor as f32,
+                    ) {
+                        let _ = win.drag_resize_window(direction);
+                        return;
+                    }
+                }
+                if self.cursor_pixel_pos.1 < f64::from(geometry.titlebar_px) {
+                    if state == winit::event::ElementState::Pressed {
+                        match titlebar_action {
+                            crate::shell::TitlebarAction::Drag => {
+                                let _ = win.drag_window();
+                            }
+                            crate::shell::TitlebarAction::Search => {
+                                self.global_search_state.open();
+                            }
+                            crate::shell::TitlebarAction::Settings => {
+                                self.settings_open = true;
+                            }
+                            crate::shell::TitlebarAction::Minimize => win.set_minimized(true),
+                            crate::shell::TitlebarAction::ToggleMaximize => {
+                                win.set_maximized(!win.is_maximized());
+                            }
+                            crate::shell::TitlebarAction::Close => {
+                                self.persist_workspace_state();
+                                event_loop.exit();
+                            }
+                        }
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
+                if self.global_search_state.is_open && state == winit::event::ElementState::Pressed
+                {
+                    let results = self.global_search_results();
+                    let filtered = self.global_search_state.filtered(&results);
+                    let layout = crate::global_search::SearchLayout::calculate(
+                        win.inner_size().width as f32,
+                        win.inner_size().height as f32,
+                        filtered.len(),
+                    );
+                    if let Some(index) = layout.hit_result(
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                        filtered.len(),
+                    ) {
+                        let target = filtered[index].target.clone();
+                        self.activate_global_search_result(&target, &win);
+                    } else {
+                        self.global_search_state.close();
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
+                if self.split_picker_open && state == winit::event::ElementState::Pressed {
+                    let size = win.inner_size();
+                    let geometry =
+                        self.compute_pane_geometry(size.width as f32, size.height as f32);
+                    let (split_button, _) = crate::tab::compute_chrome_buttons(
+                        (size.width as f32 - geometry.workspace_x).max(0.0),
+                    );
+                    let layout = crate::split_picker::SplitPickerLayout::calculate(
+                        size.width as f32,
+                        size.height as f32 - geometry.status_bar_px,
+                        geometry.workspace_x + split_button.0,
+                        geometry.workspace_tabs_y + split_button.1,
+                    );
+                    if let Some(preset) = layout.hit_test(
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                    ) {
+                        self.apply_split_preset(preset);
+                    }
+                    self.split_picker_open = false;
+                    self.split_picker_hover = None;
+                    win.request_redraw();
+                    return;
+                }
+
+                if self.cursor_pixel_pos.0 < f64::from(geometry.activity_rail_w)
+                    && self.cursor_pixel_pos.1 >= f64::from(geometry.titlebar_px)
+                {
+                    if state == winit::event::ElementState::Pressed
+                        && let Some(mode) = crate::shell::hit_test_activity(
+                            self.cursor_pixel_pos.1 as f32,
+                            geometry.titlebar_px,
+                            self.scale_factor as f32,
+                        )
+                    {
+                        if mode == crate::shell::SidebarMode::Settings {
+                            self.settings_open = !self.settings_open;
+                        } else if self.sidebar_mode == mode && self.sidebar_open {
+                            self.sidebar_open = false;
+                        } else {
+                            self.sidebar_mode = mode;
+                            self.sidebar_open = true;
+                            if mode == crate::shell::SidebarMode::SourceControl {
+                                self.refresh_git_status();
+                            }
+                        }
+                        self.changes_panel_open = false;
+                        self.handle_resize(win.inner_size());
+                        win.request_redraw();
+                    }
+                    return;
+                }
+
                 // If in-terminal search overlay is open, test for clicks on search bar controls
                 if self.search_state.is_open && state == winit::event::ElementState::Pressed {
                     let win_w = win.inner_size().width as f32;
@@ -3325,7 +4982,7 @@ impl ApplicationHandler<AppEvent> for App {
                     let action = crate::search::hit_test_search_bar(
                         self.cursor_pixel_pos.0 as f32,
                         self.cursor_pixel_pos.1 as f32,
-                        geo.sidebar_w,
+                        geo.workspace_x,
                         geo.tab_bar_px,
                         geo.term_w,
                         &self.search_state,
@@ -3412,13 +5069,23 @@ impl ApplicationHandler<AppEvent> for App {
                     win.request_redraw();
                     return;
                 }
-                if self.cursor_pixel_pos.1 <= f64::from(TAB_BAR_HEIGHT) {
+                if self.cursor_pixel_pos.1 >= f64::from(geometry.workspace_tabs_y)
+                    && self.cursor_pixel_pos.1
+                        < f64::from(
+                            geometry.workspace_tabs_y + TAB_BAR_HEIGHT * self.scale_factor as f32,
+                        )
+                    && self.cursor_pixel_pos.0 >= f64::from(geometry.workspace_x)
+                {
                     if state == winit::event::ElementState::Pressed {
-                        let win_w = win.inner_size().width as f32;
+                        let win_w = (win.inner_size().width as f32 - geometry.workspace_x).max(0.0);
                         let action = hit_test(
-                            self.cursor_pixel_pos.0 as f32,
-                            self.cursor_pixel_pos.1 as f32,
-                            self.tabs.len(),
+                            self.cursor_pixel_pos.0 as f32 - geometry.workspace_x,
+                            self.cursor_pixel_pos.1 as f32 - geometry.workspace_tabs_y,
+                            if self.sidebar_mode == crate::shell::SidebarMode::Conversations {
+                                self.agent_tab_indices().len()
+                            } else {
+                                self.tabs.len()
+                            },
                             win_w,
                         );
                         match action {
@@ -3442,8 +5109,8 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.select_tab(idx);
                                     self.dragging_tab = Some(crate::tab::TabDragState::new(
                                         idx,
-                                        self.cursor_pixel_pos.0 as f32,
-                                        self.cursor_pixel_pos.1 as f32,
+                                        self.cursor_pixel_pos.0 as f32 - geometry.workspace_x,
+                                        self.cursor_pixel_pos.1 as f32 - geometry.workspace_tabs_y,
                                     ));
                                 }
                             }
@@ -3454,14 +5121,13 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.create_tab(None);
                             }
                             TabBarAction::ToggleSidebar => {
-                                self.sidebar_open = !self.sidebar_open;
-                                self.handle_resize(win.inner_size());
-                                self.terminal.mark_all_dirty();
+                                self.toggle_sidebar_or_restore_content(win.inner_size());
                             }
                             TabBarAction::ToggleSplit => {
-                                self.diff_view_open = !self.diff_view_open;
-                                self.handle_resize(win.inner_size());
-                                self.terminal.mark_all_dirty();
+                                self.split_picker_open = !self.split_picker_open;
+                                self.split_picker_hover = self
+                                    .split_picker_open
+                                    .then_some(crate::split_picker::SplitPreset::Single);
                             }
                             TabBarAction::ToggleFullscreen => {
                                 let is_fullscreen = win.fullscreen().is_some();
@@ -3519,29 +5185,71 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
 
+                if let Some(menu) = self.context_menu
+                    && state == winit::event::ElementState::Pressed
+                {
+                    let size = win.inner_size();
+                    let layout = menu.layout(
+                        size.width as f32,
+                        size.height as f32,
+                        self.scale_factor as f32,
+                    );
+                    if let Some(action) = layout.hit_test(
+                        menu.target,
+                        self.cursor_pixel_pos.0 as f32,
+                        self.cursor_pixel_pos.1 as f32,
+                    ) {
+                        self.activate_context_action(menu.target, action, &win);
+                        return;
+                    }
+                    self.context_menu = None;
+                    win.request_redraw();
+                }
+
+                // The compact branch chip in the workspace header opens the real
+                // branch list in Source Control navigation.
+                if state == winit::event::ElementState::Pressed {
+                    let size = win.inner_size();
+                    let header_geometry =
+                        self.compute_pane_geometry(size.width as f32, size.height as f32);
+                    let scale = self.scale_factor as f32;
+                    let in_header = self.cursor_pixel_pos.1
+                        >= f64::from(header_geometry.titlebar_px)
+                        && self.cursor_pixel_pos.1 < f64::from(header_geometry.workspace_tabs_y)
+                        && self.cursor_pixel_pos.0 >= f64::from(size.width as f32 - 210.0 * scale)
+                        && self.cursor_pixel_pos.0 < f64::from(size.width as f32 - 8.0 * scale);
+                    if in_header && self.git_branch.is_some() {
+                        let cwd = self.active_cwd();
+                        self.changes_panel_state.branch_list = crate::git::list_branches(&cwd);
+                        self.changes_panel_state.branch_picker_open = true;
+                        self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                        self.sidebar_open = true;
+                        self.changes_panel_open = false;
+                        self.diff_view_open = false;
+                        self.handle_resize(size);
+                        win.request_redraw();
+                        return;
+                    }
+                }
+
                 // Check sidebar click if sidebar is open
-                let sidebar_px = if self.sidebar_open {
-                    f64::from((self.sidebar_width * self.scale_factor as f32).round())
-                } else {
-                    0.0
-                };
-                if self.sidebar_open && self.cursor_pixel_pos.0 <= sidebar_px {
+                let nav_geometry = self.compute_pane_geometry(
+                    win.inner_size().width as f32,
+                    win.inner_size().height as f32,
+                );
+                let sidebar_px = f64::from(nav_geometry.sidebar_w);
+                if sidebar_px > 0.0
+                    && self.cursor_pixel_pos.0 >= f64::from(nav_geometry.activity_rail_w)
+                    && self.cursor_pixel_pos.0 < f64::from(nav_geometry.workspace_x)
+                {
                     if state == winit::event::ElementState::Pressed {
-                        let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
-                        let status_bar_px = if self.config.status_bar {
-                            (crate::status_bar::STATUS_BAR_HEIGHT * self.scale_factor as f32)
-                                .round()
-                        } else {
-                            0.0
-                        };
-                        let sidebar_h =
-                            (win.inner_size().height as f32 - tab_bar_px - status_bar_px).max(0.0);
-                        let action = crate::sidebar::hit_test_sidebar(
-                            self.cursor_pixel_pos.0 as f32,
+                        let action = crate::sidebar::hit_test_navigation(
+                            self.sidebar_mode,
                             self.cursor_pixel_pos.1 as f32,
-                            tab_bar_px,
-                            sidebar_h,
+                            nav_geometry.titlebar_px,
+                            self.workspace_manager.workspaces().len(),
                             self.tabs.len(),
+                            &self.changes_panel_state,
                         );
                         match action {
                             crate::sidebar::SidebarAction::SelectTab(idx) => {
@@ -3556,20 +5264,90 @@ impl ApplicationHandler<AppEvent> for App {
                                 self.create_tab(None);
                                 win.request_redraw();
                             }
+                            crate::sidebar::SidebarAction::NewWorkspace => {
+                                let index = self.workspace_manager.workspaces().len() + 1;
+                                let root = self.active_cwd();
+                                self.create_workspace(format!("Workspace {index}"), root);
+                                win.request_redraw();
+                            }
                             crate::sidebar::SidebarAction::ToggleSidebar => {
-                                self.sidebar_open = !self.sidebar_open;
+                                self.toggle_sidebar_or_restore_content(win.inner_size());
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectWorkspace(idx) => {
+                                self.select_workspace(idx);
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectChat(idx) => {
+                                if let Some(tab_index) = self.agent_tab_indices().get(idx).copied()
+                                {
+                                    self.select_tab(tab_index);
+                                }
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectSourceControl(tab) => {
+                                self.changes_panel_state.active_tab = tab;
+                                self.changes_panel_state.commit_input_focused = false;
+                                self.sidebar_mode = crate::shell::SidebarMode::SourceControl;
+                                // Git navigation belongs in the sidebar; do not open the
+                                // legacy right-hand Changes panel alongside it.
+                                self.changes_panel_open = false;
+                                self.diff_view_open = false;
+                                self.refresh_git_status();
                                 self.handle_resize(win.inner_size());
                                 self.terminal.mark_all_dirty();
                                 win.request_redraw();
                             }
-                            crate::sidebar::SidebarAction::SelectWorkspace(idx) => {
-                                if let Some(ws) = self.sidebar_state.workspaces.get(idx) {
-                                    self.workspace_name = ws.name.clone();
-                                    self.git_branch = Some(ws.branch.clone());
+                            crate::sidebar::SidebarAction::SelectChangedFile(index) => {
+                                self.changes_panel_state.commit_input_focused = false;
+                                self.select_diff_file(index);
+                                self.changes_panel_open = false;
+                                self.handle_resize(win.inner_size());
+                                self.terminal.mark_all_dirty();
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SelectCommit(index) => {
+                                self.changes_panel_state.commit_input_focused = false;
+                                self.changes_panel_state.selected_commit_index = Some(index);
+                                if let Some(commit) = self.changes_panel_state.history.get(index) {
+                                    let cwd = self.active_cwd();
+                                    let (filename, path, hunks) =
+                                        crate::git::query_commit_diff(&cwd, &commit.hash);
+                                    self.diff_view_state.file_name = filename;
+                                    self.diff_view_state.path_info = path;
+                                    self.diff_view_state.hunks = hunks;
+                                    self.diff_view_state.staged = true;
+                                    self.diff_view_state.scroll_offset = 0;
+                                    self.diff_view_open = true;
+                                    self.changes_panel_open = false;
+                                    self.handle_resize(win.inner_size());
+                                    self.terminal.mark_all_dirty();
                                 }
                                 win.request_redraw();
                             }
-                            crate::sidebar::SidebarAction::SelectChat(_idx) => {
+                            crate::sidebar::SidebarAction::ToggleBranchPicker => {
+                                let cwd = self.active_cwd();
+                                if crate::git::is_git_repository(&cwd) {
+                                    if !self.changes_panel_state.branch_picker_open {
+                                        self.changes_panel_state.branch_list =
+                                            crate::git::list_branches(&cwd);
+                                    }
+                                    self.changes_panel_state.branch_picker_open =
+                                        !self.changes_panel_state.branch_picker_open;
+                                }
+                                win.request_redraw();
+                            }
+                            crate::sidebar::SidebarAction::SwitchBranch(index) => {
+                                if let Some(name) =
+                                    self.changes_panel_state.branch_list.get(index).cloned()
+                                {
+                                    let cwd = self.active_cwd();
+                                    if crate::git::is_git_repository(&cwd) {
+                                        let _ = crate::git::checkout_branch(&cwd, &name);
+                                        self.changes_panel_state.branch_picker_open = false;
+                                        self.refresh_git_status();
+                                    }
+                                }
                                 win.request_redraw();
                             }
                             crate::sidebar::SidebarAction::None => {}
@@ -3579,14 +5357,12 @@ impl ApplicationHandler<AppEvent> for App {
                 }
 
                 // Check changes panel click if changes panel is open
-                let changes_panel_px = if self.changes_panel_open {
-                    f64::from((self.changes_panel_width * self.scale_factor as f32).round())
-                } else {
-                    0.0
-                };
                 let win_w_f64 = f64::from(win.inner_size().width);
-                let panel_x = win_w_f64 - changes_panel_px;
-                if self.changes_panel_open && self.cursor_pixel_pos.0 >= panel_x {
+                let panel_geometry =
+                    self.compute_pane_geometry(win_w_f64 as f32, win.inner_size().height as f32);
+                let changes_panel_px = f64::from(panel_geometry.changes_panel_w);
+                let panel_x = f64::from(panel_geometry.panel_x);
+                if panel_geometry.changes_panel_visible && self.cursor_pixel_pos.0 >= panel_x {
                     if state == winit::event::ElementState::Pressed {
                         let tab_bar_px = (TAB_BAR_HEIGHT * self.scale_factor as f32).round();
                         let status_bar_px = if self.config.status_bar {
@@ -3635,6 +5411,7 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.diff_view_state.staged = file.staged;
                                     self.diff_view_state.scroll_offset = 0;
                                     self.diff_view_open = true;
+                                    self.changes_panel_open = false;
                                     self.handle_resize(win.inner_size());
                                     self.terminal.mark_all_dirty();
                                 }
@@ -3710,6 +5487,7 @@ impl ApplicationHandler<AppEvent> for App {
                                     self.diff_view_state.staged = true;
                                     self.diff_view_state.scroll_offset = 0;
                                     self.diff_view_open = true;
+                                    self.changes_panel_open = false;
                                     self.handle_resize(win.inner_size());
                                     self.terminal.mark_all_dirty();
                                 }
@@ -3788,7 +5566,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // Check diff view click if diff view is open
                 let geo =
                     self.compute_pane_geometry(win_w_f64 as f32, win.inner_size().height as f32);
-                if self.diff_view_open
+                if geo.diff_view_visible
                     && (self.cursor_pixel_pos.0 as f32) >= geo.diff_x
                     && (self.cursor_pixel_pos.0 as f32) < geo.diff_x + geo.diff_w
                 {
@@ -3998,7 +5776,7 @@ impl ApplicationHandler<AppEvent> for App {
                         let effective_pad_y =
                             (self.config.padding_y * self.scale_factor as f32).round();
                         let container = crate::pane::PaneRect::new(
-                            geo.sidebar_w,
+                            geo.workspace_x,
                             geo.tab_bar_px,
                             geo.term_w,
                             geo.content_h,
@@ -4118,6 +5896,152 @@ impl ApplicationHandler<AppEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_search_indexes_actual_workspace_session_and_commands() {
+        let app = App::new(None, Terminal::new(80, 24), None);
+        let results = app.global_search_results();
+        assert!(results.iter().any(|result| {
+            result.category == "Workspace" && result.title == app.workspace_name
+        }));
+        assert!(results.iter().any(|result| {
+            result.category == "Session"
+                && matches!(
+                    result.target,
+                    crate::global_search::SearchTarget::Session { tab: 0, .. }
+                )
+        }));
+        assert!(
+            results
+                .iter()
+                .any(|result| result.title == "Source Control: Changes")
+        );
+    }
+
+    #[test]
+    fn rename_modal_routes_workspace_and_session_names_to_their_owners() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        let workspace_rename = crate::tab::TabRenameState::for_workspace(0, "Oxidite");
+        app.apply_rename(&crate::tab::TabRenameState {
+            input_text: "Renamed workspace".into(),
+            ..workspace_rename
+        });
+        assert_eq!(
+            app.workspace_manager.workspaces()[0].name,
+            "Renamed workspace"
+        );
+
+        let session_rename = crate::tab::TabRenameState::new(0, "Initial");
+        app.apply_rename(&crate::tab::TabRenameState {
+            input_text: "Renamed session".into(),
+            ..session_rename
+        });
+        assert_eq!(app.tabs[0].display_title(), "Renamed session");
+    }
+
+    #[test]
+    fn workspace_close_waits_for_confirmation_and_keeps_registration() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace("Second".into(), std::env::temp_dir());
+        app.request_close_workspace(1);
+        let confirm = app.tab_close_confirm.clone().expect("close prompt opened");
+        assert_eq!(confirm.workspace_index, Some(1));
+        assert_eq!(confirm.dialog_title(), "Close Workspace?");
+        assert_eq!(app.workspace_manager.workspaces().len(), 2);
+
+        app.tab_close_confirm = None;
+        app.confirm_close_target(&confirm);
+        assert_eq!(app.workspace_manager.workspaces().len(), 2);
+        assert!(
+            app.workspace_manager.workspaces()[1]
+                .sessions
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+        );
+        assert!(app.tab_close_confirm.is_none());
+
+        assert!(app.select_workspace(1));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "opening a closed workspace starts a fresh terminal"
+        );
+    }
+
+    #[test]
+    fn new_terminal_action_reuses_fresh_session_created_when_reopening_closed_workspace() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace("Second".into(), std::env::temp_dir());
+        assert!(app.close_workspace(1));
+        assert!(app.new_terminal_in_workspace(1));
+
+        assert_eq!(app.workspace_manager.active_index(), 1);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn new_terminal_action_adds_a_tab_to_an_existing_workspace_session_list() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace("Second".into(), std::env::temp_dir());
+        assert!(app.new_terminal_in_workspace(0));
+
+        assert_eq!(app.workspace_manager.active_index(), 0);
+        assert_eq!(app.tabs.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_session_starts_a_distinct_tab_in_the_same_directory() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        let directory = std::env::temp_dir();
+        app.tabs[0].cwd = Some(directory.clone());
+        let original_id = app.tabs[0].id;
+
+        assert!(app.duplicate_terminal_session(0));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_ne!(app.tabs[1].id, original_id);
+        assert_eq!(app.tabs[1].cwd.as_ref(), Some(&directory));
+        assert_eq!(app.tabs[1].custom_title.as_deref(), Some("Tab 1 Copy"));
+        assert_eq!(app.active_tab_index, 1);
+    }
+
+    #[test]
+    fn workspace_remove_confirmation_unregisters_without_deleting_directory() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        let root = std::env::temp_dir();
+        app.create_workspace("Second".into(), root.clone());
+        app.request_remove_workspace(1);
+        let confirm = app.tab_close_confirm.clone().expect("remove prompt opened");
+        assert!(confirm.remove_workspace);
+        assert_eq!(confirm.dialog_title(), "Remove Workspace?");
+        assert!(root.is_dir());
+
+        app.tab_close_confirm = None;
+        app.confirm_close_target(&confirm);
+        assert_eq!(app.workspace_manager.workspaces().len(), 1);
+        assert!(root.is_dir(), "remove only unregisters the directory");
+    }
+
+    #[test]
+    fn split_picker_applies_independent_nested_terminal_panes() {
+        let mut app = App::new(None, Terminal::new(120, 24), None);
+        assert!(app.apply_split_preset(crate::split_picker::SplitPreset::Grid));
+        assert_eq!(app.tabs[0].panes.len(), 4);
+        assert_eq!(app.tabs[0].pane_tree.panes_count(), 4);
+        let ids = app.tabs[0]
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[test]
+    fn split_picker_rejects_layouts_that_would_violate_minimum_grids() {
+        let mut app = App::new(None, Terminal::new(40, 24), None);
+        assert!(!app.apply_split_preset(crate::split_picker::SplitPreset::Grid));
+        assert_eq!(app.tabs[0].panes.len(), 1);
+    }
     use crate::pty::{PtySize, ShellCommand};
 
     #[test]
@@ -4139,8 +6063,93 @@ mod tests {
         assert!(app.pty_exit_code.is_none());
         assert_eq!(app.terminal.grid.cols, 80);
         assert_eq!(app.terminal.grid.rows, 24);
+        assert!(!app.changes_panel_open);
+        assert!(!app.diff_view_open);
         assert!((app.base_font_size - 14.0).abs() < f32::EPSILON);
         assert!((app.scale_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn layout_geometry_never_overlaps_or_exceeds_the_window() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.sidebar_open = true;
+        app.changes_panel_open = true;
+        app.diff_view_open = true;
+        app.sidebar_width = 240.0;
+
+        for width in [1920.0, 1600.0, 1366.0, 1280.0, 1024.0, 800.0, 640.0, 420.0] {
+            let geo = app.compute_pane_geometry(width, 800.0);
+            assert!(
+                geo.sidebar_w >= 0.0 && geo.sidebar_w <= width,
+                "width={width}"
+            );
+            assert!(geo.term_w >= 0.0 && geo.diff_w >= 0.0 && geo.changes_panel_w >= 0.0);
+            if geo.changes_panel_visible {
+                assert!(geo.changes_panel_w >= 240.0, "width={width}: {geo:?}");
+                if geo.diff_view_visible {
+                    assert!(
+                        geo.term_w >= geo.min_term_w && geo.diff_w >= geo.min_diff_w,
+                        "width={width}: {geo:?}"
+                    );
+                } else {
+                    assert!(geo.term_w >= geo.min_term_w, "width={width}: {geo:?}");
+                }
+            }
+            assert!(
+                geo.sidebar_w + geo.term_w <= geo.diff_x + 0.01,
+                "width={width}"
+            );
+            assert!(
+                geo.diff_x + geo.diff_w <= geo.panel_x + 0.01,
+                "width={width}"
+            );
+            assert!(
+                geo.panel_x + geo.changes_panel_w <= width + 0.01,
+                "width={width}"
+            );
+            assert!(
+                geo.term_w + geo.diff_w + geo.changes_panel_w + geo.sidebar_w <= width + 0.01,
+                "width={width}"
+            );
+            if geo.diff_view_visible {
+                assert!(
+                    geo.term_w >= geo.min_term_w && geo.diff_w >= geo.min_diff_w,
+                    "width={width}: {geo:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_sidebar_width_is_clamped_to_navigation_constraints() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.sidebar_open = true;
+        assert_eq!(app.compute_pane_geometry(420.0, 800.0).sidebar_w, 0.0);
+        assert_eq!(app.compute_pane_geometry(360.0, 800.0).sidebar_w, 0.0);
+        for (requested, expected) in [(80.0, 190.0), (240.0, 240.0), (500.0, 360.0)] {
+            app.sidebar_width = requested;
+            let geo = app.compute_pane_geometry(1200.0, 800.0);
+            assert_eq!(geo.sidebar_w, expected);
+        }
+    }
+
+    #[test]
+    fn narrow_context_view_collapses_sidebar_and_navigation_restores_it() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.sidebar_open = true;
+        app.changes_panel_open = true;
+
+        let geo = app.compute_pane_geometry(600.0, 800.0);
+        assert_eq!(geo.sidebar_w, 0.0);
+        assert!(geo.sidebar_auto_collapsed);
+        assert!(geo.changes_panel_visible);
+        assert!(geo.term_w >= geo.min_term_w);
+
+        app.toggle_sidebar_or_restore_content(PhysicalSize::new(600, 800));
+        let restored = app.compute_pane_geometry(600.0, 800.0);
+        assert!(app.sidebar_open);
+        assert!(!app.changes_panel_open);
+        assert!(restored.sidebar_w > 0.0);
     }
 
     #[test]
@@ -4189,16 +6198,23 @@ mod tests {
 
         app.handle_resize(PhysicalSize::new(1000, 800));
 
-        assert_eq!(app.terminal.grid.cols, 99);
-        assert_eq!(app.terminal.grid.rows, 36);
-        assert_eq!(app.terminal.alternate_grid.cols, 99);
-        assert_eq!(app.terminal.alternate_grid.rows, 36);
+        let geometry = app.compute_pane_geometry(1000.0, 800.0);
+        let expected_cols = ((geometry.term_w - app.config.padding_x * 2.0)
+            / app.cell_metrics.cell_width)
+            .floor() as usize;
+        let expected_rows = ((geometry.content_h - app.config.padding_y * 2.0)
+            / app.cell_metrics.cell_height)
+            .floor() as usize;
+        assert_eq!(app.terminal.grid.cols, expected_cols);
+        assert_eq!(app.terminal.grid.rows, expected_rows);
+        assert_eq!(app.terminal.alternate_grid.cols, expected_cols);
+        assert_eq!(app.terminal.alternate_grid.rows, expected_rows);
         assert!(app.terminal.has_damage());
 
         // When sidebar is opened: columns adjust to fit narrower width (240px sidebar)
         app.sidebar_open = true;
         app.handle_resize(PhysicalSize::new(1000, 800));
-        assert_eq!(app.terminal.grid.cols, 75);
+        assert!(app.terminal.grid.cols < expected_cols);
 
         // When all cockpit panes are opened: terminal fits agent pane
         app.changes_panel_open = true;
@@ -4231,8 +6247,15 @@ mod tests {
             };
 
             app.handle_resize(PhysicalSize::new(1000, 800));
-            assert_eq!(app.terminal.grid.cols, 99);
-            assert_eq!(app.terminal.grid.rows, 36);
+            let geometry = app.compute_pane_geometry(1000.0, 800.0);
+            let expected_cols = ((geometry.term_w - app.config.padding_x * 2.0)
+                / app.cell_metrics.cell_width)
+                .floor() as usize;
+            let expected_rows = ((geometry.content_h - app.config.padding_y * 2.0)
+                / app.cell_metrics.cell_height)
+                .floor() as usize;
+            assert_eq!(app.terminal.grid.cols, expected_cols);
+            assert_eq!(app.terminal.grid.rows, expected_rows);
         }
     }
 
@@ -4363,6 +6386,76 @@ mod tests {
     }
 
     #[test]
+    fn agent_sidebar_uses_real_agent_terminal_tabs() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_tab(Some("Claude Code".to_string()));
+        app.create_tab(Some("PowerShell".to_string()));
+
+        assert_eq!(app.agent_tab_indices(), vec![1]);
+        let agents = app.agent_sidebar_entries();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].title, "Claude Code");
+        assert_eq!(agents[0].status, crate::sidebar::ChatStatus::Idle);
+    }
+
+    #[test]
+    fn workspace_switch_restores_terminal_state_and_routes_inactive_output() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.handle_pty_output(b"primary-output");
+        let primary_tab_id = app.tabs[0].id;
+
+        app.create_workspace(
+            "Second workspace".to_string(),
+            std::env::current_dir().expect("current directory exists"),
+        );
+        assert_eq!(app.workspace_manager.active_index(), 1);
+        assert_eq!(app.workspace_manager.workspaces().len(), 2);
+        let second_tab_id = app.tabs[0].id;
+        assert_ne!(primary_tab_id, second_tab_id);
+        app.handle_pty_output(b"second-output");
+
+        assert!(app.select_workspace(0));
+        assert_eq!(app.terminal.grid[0][0].ch, 'p');
+        assert_eq!(app.active_tab_index, 0);
+
+        app.handle_tab_pty_output(second_tab_id, b"-continued");
+        let inactive_tabs = app.workspace_manager.workspaces()[1]
+            .sessions
+            .as_ref()
+            .expect("inactive workspace retains its tabs");
+        assert_eq!(inactive_tabs[0].terminal.grid[0][13].ch, '-');
+
+        assert!(app.select_workspace(1));
+        assert_eq!(app.terminal.grid[0][0].ch, 's');
+        assert_eq!(app.terminal.grid[0][13].ch, '-');
+    }
+
+    #[test]
+    fn workspace_state_snapshot_restores_nested_layout_with_fresh_terminals() {
+        let mut app = App::new(None, Terminal::new(80, 24), None);
+        app.create_workspace(
+            "Second workspace".to_string(),
+            std::env::current_dir().expect("current directory exists"),
+        );
+        app.split_active_pane(crate::pane::SplitDirection::Vertical);
+        let snapshot = app.workspace_state_snapshot();
+        assert_eq!(snapshot.workspaces.len(), 2);
+        crate::session_state::validate(&snapshot).expect("valid workspace snapshot");
+
+        let path =
+            std::env::temp_dir().join(format!("oxidite-app-state-{}.toml", std::process::id()));
+        crate::session_state::save(&path, &snapshot).expect("save app state");
+        let mut restored = App::new(None, Terminal::new(80, 24), None);
+        assert!(restored.restore_workspace_state_from_path(&path));
+        assert_eq!(restored.workspace_manager.active_index(), 1);
+        assert_eq!(restored.workspace_name, "Second workspace");
+        assert_eq!(restored.tabs[0].panes.len(), 2);
+        assert_eq!(restored.tabs[0].pane_tree.panes_count(), 2);
+        assert!(restored.tabs[0].pty_writer.is_none());
+        std::fs::remove_file(path).expect("remove app state file");
+    }
+
+    #[test]
     fn multi_tab_pty_output_routes_to_correct_tab() {
         let mut app = App::new(None, Terminal::new(80, 24), None);
         app.create_tab(Some("Second".to_string()));
@@ -4387,18 +6480,14 @@ mod tests {
         app.create_tab(Some("Workspaces".to_string()));
 
         let labels = app.build_tab_labels(800.0);
-        // 1 sidebar button + 2 tabs * 2 labels (title + close) + 1 plus button + 4 chrome buttons = 10 labels
-        assert_eq!(labels.len(), 10);
-        assert_eq!(labels[0].text, "◨");
-        assert_eq!(labels[1].text, "Tab 1");
-        assert_eq!(labels[2].text, "×");
-        assert_eq!(labels[3].text, "Workspaces");
-        assert_eq!(labels[4].text, "×");
-        assert_eq!(labels[5].text, "+");
-        assert_eq!(labels[6].text, "⚙");
-        assert_eq!(labels[7].text, "◫");
-        assert_eq!(labels[8].text, "⛶");
-        assert_eq!(labels[9].text, "⤢");
+        // Two actual terminal tabs, new tab, and the contextual split action.
+        assert_eq!(labels.len(), 6);
+        assert_eq!(labels[0].text, "Tab 1");
+        assert_eq!(labels[1].text, "×");
+        assert_eq!(labels[2].text, "Workspaces");
+        assert_eq!(labels[3].text, "×");
+        assert_eq!(labels[4].text, "+");
+        assert_eq!(labels[5].text, "◫");
 
         // Verify agent detection badge formatting
         app.create_tab(Some("claude-code".to_string()));
@@ -4419,13 +6508,20 @@ mod tests {
         app.config.padding_x = 10.0;
         app.config.padding_y = 10.0;
 
-        // Exactly at (pad_x, TAB_BAR_HEIGHT + pad_y) -> (col 0, row 0)
-        let pt0 = app.pixel_to_grid_point((10.0, 36.0 + 10.0));
+        let geometry = app.compute_pane_geometry(800.0, 600.0);
+        // Terminal grid coordinates start within the canvas after shell chrome.
+        let pt0 = app.pixel_to_grid_point((
+            f64::from(geometry.workspace_x) + 10.0,
+            f64::from(geometry.content_top) + 10.0,
+        ));
         assert_eq!(pt0.col, 0);
         assert_eq!(pt0.row, 0);
 
         // One cell over in X and Y
-        let pt1 = app.pixel_to_grid_point((20.0, 36.0 + 30.0));
+        let pt1 = app.pixel_to_grid_point((
+            f64::from(geometry.workspace_x) + 20.0,
+            f64::from(geometry.content_top) + 30.0,
+        ));
         assert_eq!(pt1.col, 1);
         assert_eq!(pt1.row, 1);
     }
@@ -4497,6 +6593,14 @@ mod tests {
         // Close pane
         app.close_active_pane();
         assert_eq!(app.tabs[0].panes.len(), 2);
+    }
+
+    #[test]
+    fn split_is_rejected_when_two_minimum_panes_do_not_fit() {
+        let mut app = App::new(None, Terminal::new(40, 24), None);
+        app.split_active_pane(crate::pane::SplitDirection::Vertical);
+        assert_eq!(app.tabs[0].panes.len(), 1);
+        assert_eq!(app.next_tab_id, 1);
     }
 
     #[test]

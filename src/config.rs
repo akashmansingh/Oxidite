@@ -66,6 +66,16 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// Failed to persist updated configuration.
+    #[error("failed to write config file '{path}': {source}")]
+    WriteIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failed to serialize configuration as TOML.
+    #[error("failed to serialize config TOML: {0}")]
+    Serialize(#[from] toml::ser::Error),
     /// TOML parsing failure.
     #[error("failed to parse config TOML: {0}")]
     Toml(#[from] toml::de::Error),
@@ -128,8 +138,8 @@ impl Default for KeybindingsConfig {
             scroll_down: "Shift+PageDown".to_string(),
             scroll_to_top: "Shift+Home".to_string(),
             scroll_to_bottom: "Shift+End".to_string(),
-            cycle_theme: "Ctrl+Shift+T".to_string(),
-            toggle_status_bar: "Ctrl+Shift+B".to_string(),
+            cycle_theme: "Ctrl+Shift+Y".to_string(),
+            toggle_status_bar: "Ctrl+Alt+B".to_string(),
             search: "Ctrl+Shift+F".to_string(),
             split_vertical: "Ctrl+Shift+\\".to_string(),
             split_horizontal: "Ctrl+Shift+-".to_string(),
@@ -482,6 +492,42 @@ impl Config {
         Self::from_toml(&content)
     }
 
+    /// Writes the current appearance and application preferences to a config file.
+    pub fn save_to_path(&self, path: &std::path::Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::WriteIo {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        let file = ConfigFile {
+            theme: self.theme.name.clone(),
+            font_family: self.font_family.clone(),
+            font_size: self.font_size,
+            padding_x: self.padding_x,
+            padding_y: self.padding_y,
+            shell: self.shell.clone(),
+            shell_args: self.shell_args.clone(),
+            scrollback_lines: self.scrollback_lines,
+            status_bar: self.status_bar,
+            confirm_close_active_tab: self.confirm_close_active_tab,
+            keybindings: self.keybindings.clone(),
+        };
+        let content = toml::to_string_pretty(&file)?;
+        std::fs::write(path, content).map_err(|source| ConfigError::WriteIo {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Saves to the standard per-user config location when it is available.
+    pub fn save(&self) -> Result<(), ConfigError> {
+        if let Some(path) = config_path() {
+            self.save_to_path(&path)?;
+        }
+        Ok(())
+    }
+
     /// Loads configuration from the standard platform config file path, falling back
     /// to defaults on missing file or parse error.
     #[must_use]
@@ -527,6 +573,54 @@ mod tests {
         assert!(config.shell.is_none());
         assert_eq!(config.shell_args, Vec::<String>::new());
         assert_eq!(config.scrollback_lines, 10_000);
+    }
+
+    #[test]
+    fn status_bar_default_shortcut_does_not_conflict_with_sidebar_toggle() {
+        let keybindings = KeybindingsConfig::default();
+        let event = |key: &str, modifiers| {
+            crate::input::KeyEvent::new(
+                winit::keyboard::Key::Character(key.into()),
+                Some(key.to_string()),
+                modifiers,
+                winit::event::ElementState::Pressed,
+            )
+        };
+        let ctrl_shift =
+            winit::keyboard::ModifiersState::CONTROL | winit::keyboard::ModifiersState::SHIFT;
+        let ctrl_alt =
+            winit::keyboard::ModifiersState::CONTROL | winit::keyboard::ModifiersState::ALT;
+
+        assert_eq!(
+            keybindings.check_action(&event("b", ctrl_shift)),
+            None,
+            "Ctrl+Shift+B remains dedicated to the sidebar"
+        );
+        assert_eq!(
+            keybindings.check_action(&event("b", ctrl_alt)),
+            Some(crate::input::InputAction::ToggleStatusBar)
+        );
+    }
+
+    #[test]
+    fn config_save_and_reload_preserves_selected_theme_and_appearance() {
+        let unique = format!(
+            "oxidite-config-test-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        );
+        let path = std::env::temp_dir().join(unique.replace(':', "_"));
+        let mut config = Config::default();
+        config.theme = Theme::dracula();
+        config.font_family = "JetBrains Mono".into();
+        config.padding_x = 8.0;
+        config.save_to_path(&path).expect("save config");
+
+        let loaded = Config::load_from_path(&path).expect("reload config");
+        assert_eq!(loaded.theme.name, "dracula");
+        assert_eq!(loaded.font_family, "JetBrains Mono");
+        assert!((loaded.padding_x - 8.0).abs() < f32::EPSILON);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
