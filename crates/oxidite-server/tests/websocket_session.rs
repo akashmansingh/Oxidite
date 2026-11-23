@@ -21,6 +21,7 @@ async fn test_websocket_session_lifecycle() {
         known_hosts: oxidite_ssh::KnownHostsStore::new(),
         security: oxidite_server::security::SecurityConfig::default(),
         auth: oxidite_server::auth::UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
         rate_limiter: oxidite_server::security::RateLimiter::new(),
     };
 
@@ -132,6 +133,7 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
         known_hosts: oxidite_ssh::KnownHostsStore::new(),
         security: oxidite_server::security::SecurityConfig::default(),
         auth: oxidite_server::auth::UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
         rate_limiter: oxidite_server::security::RateLimiter::new(),
     };
 

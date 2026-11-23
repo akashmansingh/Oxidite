@@ -4,23 +4,24 @@
 
 pub mod auth;
 pub mod security;
+pub mod share;
 pub mod tls;
 
 use axum::{
     Json, Router,
     extract::{
-        State,
+        Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
     middleware,
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use oxidite_proto::{
-    ClientMsg, ErrorCode, PROTOCOL_VERSION, ServerMsg, SessionId, SessionState, pack_server_msg,
-    unpack_client_msg,
+    AttachMode, ClientMsg, ErrorCode, PROTOCOL_VERSION, ServerMsg, SessionId, SessionState,
+    pack_server_msg, unpack_client_msg,
 };
 use oxidite_session::{actor::ActorCmd, manager::SessionManager};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ use crate::auth::UserStore;
 use crate::security::{
     AuditEvent, AuditLogger, RateLimiter, SecurityConfig, security_headers_middleware,
 };
+use crate::share::ShareStore;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -41,6 +43,7 @@ pub struct AppState {
     pub known_hosts: oxidite_ssh::KnownHostsStore,
     pub security: SecurityConfig,
     pub auth: UserStore,
+    pub shares: ShareStore,
     pub rate_limiter: RateLimiter,
 }
 
@@ -64,11 +67,26 @@ pub struct LoginResponse {
     pub expires_in_secs: u64,
 }
 
+#[derive(Deserialize)]
+pub struct CreateShareRequest {
+    pub mode: Option<String>,
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct CreateShareResponse {
+    pub token: String,
+    pub mode: String,
+    pub expires_in_secs: u64,
+}
+
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/api/login", post(login_handler))
         .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/:id/share", post(create_share_handler))
+        .route("/api/shares/:token", delete(revoke_share_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(middleware::from_fn(security_headers_middleware))
@@ -124,6 +142,68 @@ async fn login_handler(
     }
 }
 
+async fn create_share_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateShareRequest>,
+) -> Result<Json<CreateShareResponse>, StatusCode> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let sid = match uuid::Uuid::parse_str(&session_id) {
+        Ok(s) => s,
+        Err(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let user_id = if let Some(h) = auth_header {
+        let token = h.strip_prefix("Bearer ").unwrap_or(h);
+        if token == state.token {
+            "admin".to_string()
+        } else if let Some(uid) = state.auth.validate_token(token) {
+            uid
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    if user_id != "admin" && !state.auth.is_session_owner(sid, &user_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mode = match payload.mode.as_deref() {
+        Some("writer") | Some("Writer") => AttachMode::Writer,
+        _ => AttachMode::Viewer,
+    };
+    let ttl_secs = payload.ttl_secs.unwrap_or(3600);
+    let share = state
+        .shares
+        .create_share(sid, mode, Duration::from_secs(ttl_secs));
+
+    Ok(Json(CreateShareResponse {
+        token: share.token,
+        mode: match mode {
+            AttachMode::Writer => "writer".into(),
+            AttachMode::Viewer => "viewer".into(),
+        },
+        expires_in_secs: ttl_secs,
+    }))
+}
+
+async fn revoke_share_handler(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> StatusCode {
+    if state.shares.revoke_share(&token) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
 async fn list_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -148,7 +228,6 @@ async fn list_sessions(
     let all_ids = state.manager.list();
     let mut list = Vec::new();
     for id in all_ids {
-        // Enforce per-user ownership unless admin
         if user_id != "admin" && !state.auth.is_session_owner(id, &user_id) {
             continue;
         }
@@ -192,7 +271,6 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
         }
     }
 
-    // Fallback to index.html for SPA routes
     let index_path = std::path::Path::new(&state.static_dir).join("index.html");
     if index_path.exists() {
         if let Ok(content) = tokio::fs::read(&index_path).await {
@@ -222,7 +300,7 @@ async fn ws_handler(
 
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
     // Handshake: Expect ClientMsg::Hello first
-    let user_id = match socket.recv().await {
+    let (user_id, shared_access) = match socket.recv().await {
         Some(Ok(Message::Binary(bin))) => {
             match unpack_client_msg(&bin) {
                 Ok(ClientMsg::Hello {
@@ -244,9 +322,22 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
                     // Authenticate token
                     if token == state.token {
-                        "admin".to_string()
+                        ("admin".to_string(), None)
+                    } else if token.starts_with("share_") {
+                        if let Some((sid, mode)) = state.shares.validate_share(&token) {
+                            (format!("viewer_{}", &token[6..14]), Some((sid, mode)))
+                        } else {
+                            let err = pack_server_msg(&ServerMsg::Error {
+                                code: ErrorCode::Unauthorized,
+                                message: "Share link expired or revoked".into(),
+                            })
+                            .unwrap_or_default();
+                            let _ = socket.send(Message::Binary(err.into())).await;
+                            let _ = socket.close().await;
+                            return;
+                        }
                     } else if let Some(uid) = state.auth.validate_token(&token) {
-                        uid
+                        (uid, None)
                     } else {
                         let err = pack_server_msg(&ServerMsg::Error {
                             code: ErrorCode::Unauthorized,
@@ -281,12 +372,13 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
     let (mut ws_sink, mut ws_stream) = socket.split();
 
-    // Client connection loop
+    // Client connection state
+    let client_id = rand::random::<u64>();
     let mut current_session: Option<SessionId> = None;
     let mut current_tx: Option<mpsc::Sender<ActorCmd>> = None;
     let mut pending_ssh: Option<(oxidite_proto::BackendSpec, oxidite_proto::TermSize, String)> =
         None;
-    let (server_tx, mut server_rx) = mpsc::channel::<ServerMsg>(128);
+    let (server_tx, mut server_rx) = mpsc::channel::<ServerMsg>(256);
 
     // Forward messages from server_rx to WebSocket client
     let forward_task = tokio::spawn(async move {
@@ -305,7 +397,6 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             _ => continue,
         };
 
-        // Enforce maximum message size
         if bytes.len() > state.security.max_message_size {
             let _ = server_tx
                 .send(ServerMsg::Error {
@@ -331,7 +422,16 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
         match client_msg {
             ClientMsg::Create { backend, size } => {
-                // Check session limits
+                if shared_access.is_some() {
+                    let _ = server_tx
+                        .send(ServerMsg::Error {
+                            code: ErrorCode::Unauthorized,
+                            message: "Share tokens cannot create sessions".into(),
+                        })
+                        .await;
+                    continue;
+                }
+
                 let current_user_sessions = state.auth.user_sessions(&user_id);
                 if user_id != "admin"
                     && current_user_sessions.len() >= state.security.max_sessions_per_user
@@ -493,16 +593,29 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 last_offset,
                 mode,
             } => {
-                // Per-user ownership check
-                if user_id != "admin" && !state.auth.is_session_owner(session, &user_id) {
-                    let _ = server_tx
-                        .send(ServerMsg::Error {
-                            code: ErrorCode::Unauthorized,
-                            message: "You do not own this session".into(),
-                        })
-                        .await;
-                    continue;
-                }
+                let actual_mode = if let Some((shared_sid, share_mode)) = shared_access {
+                    if session != shared_sid {
+                        let _ = server_tx
+                            .send(ServerMsg::Error {
+                                code: ErrorCode::Unauthorized,
+                                message: "Share token not valid for this session".into(),
+                            })
+                            .await;
+                        continue;
+                    }
+                    share_mode
+                } else {
+                    if user_id != "admin" && !state.auth.is_session_owner(session, &user_id) {
+                        let _ = server_tx
+                            .send(ServerMsg::Error {
+                                code: ErrorCode::Unauthorized,
+                                message: "You do not own this session".into(),
+                            })
+                            .await;
+                        continue;
+                    }
+                    mode
+                };
 
                 if let Some(handle) = state.manager.get(session) {
                     current_session = Some(session);
@@ -512,8 +625,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                     if handle
                         .tx
                         .send(ActorCmd::Attach {
-                            mode,
+                            mode: actual_mode,
                             last_offset,
+                            client_id: Some(client_id),
                             resp: resp_tx,
                         })
                         .await
@@ -522,7 +636,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         if let Ok(mut attach_res) = resp_rx.await {
                             AuditLogger::record(AuditEvent::SessionAttached {
                                 session_id: &session.to_string(),
-                                mode: match mode {
+                                mode: match actual_mode {
                                     oxidite_proto::AttachMode::Writer => "writer",
                                     oxidite_proto::AttachMode::Viewer => "viewer",
                                 },
@@ -532,7 +646,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             let _ = server_tx
                                 .send(ServerMsg::Attached {
                                     session,
-                                    mode,
+                                    mode: actual_mode,
                                     start: attach_res.start.clone(),
                                 })
                                 .await;
@@ -555,7 +669,6 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                                 }
                             }
 
-                            // Spawn subscriber to broadcast actor output to this client
                             let stx = server_tx.clone();
                             tokio::spawn(async move {
                                 while let Ok(smsg) = attach_res.rx.recv().await {
@@ -575,9 +688,26 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         .await;
                 }
             }
+            ClientMsg::TakeoverWriter => {
+                if let Some(tx) = &current_tx {
+                    let (resp_tx, resp_rx) = oneshot::channel();
+                    let _ = tx
+                        .send(ActorCmd::TakeoverWriter {
+                            client_id,
+                            resp: resp_tx,
+                        })
+                        .await;
+                    let _ = resp_rx.await;
+                }
+            }
             ClientMsg::Input(bytes) => {
                 if let Some(tx) = &current_tx {
-                    let _ = tx.send(ActorCmd::Input { bytes }).await;
+                    let _ = tx
+                        .send(ActorCmd::Input {
+                            client_id: Some(client_id),
+                            bytes,
+                        })
+                        .await;
                 }
             }
             ClientMsg::Resize(size) => {
@@ -587,7 +717,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             }
             ClientMsg::Ack { offset } => {
                 if let Some(tx) = &current_tx {
-                    let _ = tx.send(ActorCmd::Ack { offset }).await;
+                    let _ = tx
+                        .send(ActorCmd::Ack {
+                            client_id: Some(client_id),
+                            offset,
+                        })
+                        .await;
                 }
             }
             ClientMsg::Ping { nonce } => {
@@ -595,7 +730,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             }
             ClientMsg::Detach => {
                 if let Some(tx) = &current_tx {
-                    let _ = tx.send(ActorCmd::Detach).await;
+                    let _ = tx
+                        .send(ActorCmd::Detach {
+                            client_id: Some(client_id),
+                        })
+                        .await;
                 }
                 break;
             }
@@ -625,9 +764,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    // Detach if still connected
     if let Some(tx) = current_tx {
-        let _ = tx.send(ActorCmd::Detach).await;
+        let _ = tx
+            .send(ActorCmd::Detach {
+                client_id: Some(client_id),
+            })
+            .await;
     }
     forward_task.abort();
 }
