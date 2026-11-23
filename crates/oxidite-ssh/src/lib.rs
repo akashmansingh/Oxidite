@@ -110,3 +110,59 @@ impl KnownHostsStore {
         self.hosts.write().insert(host, fingerprint);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_known_hosts_trust_and_mismatch() {
+        let store = KnownHostsStore::new();
+        let host = "bastion.example.com";
+        let fp1 = "SHA256:abc123def456";
+        let fp2 = "SHA256:xyz789mno321";
+
+        // Unknown on first connection
+        assert_eq!(
+            store.check(host, fp1),
+            oxidite_proto::HostKeyStatus::Unknown
+        );
+
+        // Trust on first use
+        store.trust(host.into(), fp1.into());
+        assert_eq!(
+            store.check(host, fp1),
+            oxidite_proto::HostKeyStatus::Trusted
+        );
+
+        // Changed key is refused as Mismatch
+        assert_eq!(
+            store.check(host, fp2),
+            oxidite_proto::HostKeyStatus::Mismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ssh_backend_channel_lifecycle() {
+        let cfg = SshConfig::default();
+        let (mut backend, event_tx, mut in_rx) =
+            SshBackend::new(cfg, TermSize { rows: 24, cols: 80 });
+
+        backend.write(b"ls -la\n").await.unwrap();
+        let received = in_rx.recv().await.unwrap();
+        assert_eq!(received, b"ls -la\n");
+
+        event_tx
+            .send(BackendEvent::Output(b"total 0\n".to_vec()))
+            .await
+            .unwrap();
+        let mut rx = backend.events();
+        match rx.recv().await.unwrap() {
+            BackendEvent::Output(b) => assert_eq!(b, b"total 0\n"),
+            _ => panic!("Expected output event"),
+        }
+
+        backend.kill().await.unwrap();
+        assert!(backend.write(b"should fail").await.is_err());
+    }
+}
