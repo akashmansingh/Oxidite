@@ -45,6 +45,8 @@ pub struct AppState {
     pub auth: UserStore,
     pub shares: ShareStore,
     pub rate_limiter: RateLimiter,
+    pub node_id: String,
+    pub directory: std::sync::Arc<dyn oxidite_directory::SessionDirectory>,
 }
 
 #[derive(Serialize)]
@@ -456,6 +458,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             .await
                         {
                             Ok(sid) => {
+                                let _ = state
+                                    .directory
+                                    .claim(sid, state.node_id.clone(), Duration::from_secs(60))
+                                    .await;
                                 state.auth.set_session_owner(sid, &user_id);
                                 AuditLogger::record(AuditEvent::SessionCreated {
                                     session_id: &sid.to_string(),
@@ -530,6 +536,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                                 state
                                     .manager
                                     .create_with_backend(sid, size, Box::new(backend));
+                                let _ = state
+                                    .directory
+                                    .claim(sid, state.node_id.clone(), Duration::from_secs(60))
+                                    .await;
                                 state.auth.set_session_owner(sid, &user_id);
                                 AuditLogger::record(AuditEvent::SessionCreated {
                                     session_id: &sid.to_string(),
@@ -616,6 +626,22 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                     }
                     mode
                 };
+
+                // Multi-node ownership lookup check
+                if let Ok(Some(owner)) = state.directory.lookup(session).await {
+                    if owner.node != state.node_id {
+                        let _ = server_tx
+                            .send(ServerMsg::Error {
+                                code: ErrorCode::SessionNotFound,
+                                message: format!(
+                                    "Session {session} is hosted on remote node {}",
+                                    owner.node
+                                ),
+                            })
+                            .await;
+                        continue;
+                    }
+                }
 
                 if let Some(handle) = state.manager.get(session) {
                     current_session = Some(session);

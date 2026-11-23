@@ -32,6 +32,8 @@ async fn main() -> Result<()> {
         auth: UserStore::new(),
         shares: ShareStore::new(),
         rate_limiter: RateLimiter::new(),
+        node_id: "node-gateway-1".into(),
+        directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
     };
 
     let app = create_app(state);
