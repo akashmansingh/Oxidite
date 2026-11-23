@@ -1,4 +1,6 @@
 use anyhow::Result;
+use oxidite_server::auth::UserStore;
+use oxidite_server::security::{RateLimiter, SecurityConfig};
 use oxidite_server::{AppState, create_app};
 use oxidite_session::manager::SessionManager;
 use std::net::SocketAddr;
@@ -25,6 +27,9 @@ async fn main() -> Result<()> {
         token,
         static_dir,
         known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: SecurityConfig::default(),
+        auth: UserStore::new(),
+        rate_limiter: RateLimiter::new(),
     };
 
     let app = create_app(state);

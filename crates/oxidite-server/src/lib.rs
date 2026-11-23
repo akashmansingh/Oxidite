@@ -2,15 +2,20 @@
 
 #![allow(clippy::collapsible_if, clippy::useless_conversion)]
 
+pub mod auth;
+pub mod security;
+pub mod tls;
+
 use axum::{
     Json, Router,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
+    middleware,
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use oxidite_proto::{
@@ -18,9 +23,15 @@ use oxidite_proto::{
     unpack_client_msg,
 };
 use oxidite_session::{actor::ActorCmd, manager::SessionManager};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::CorsLayer;
+
+use crate::auth::UserStore;
+use crate::security::{
+    AuditEvent, AuditLogger, RateLimiter, SecurityConfig, security_headers_middleware,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +39,9 @@ pub struct AppState {
     pub token: String,
     pub static_dir: String,
     pub known_hosts: oxidite_ssh::KnownHostsStore,
+    pub security: SecurityConfig,
+    pub auth: UserStore,
+    pub rate_limiter: RateLimiter,
 }
 
 #[derive(Serialize)]
@@ -37,12 +51,27 @@ pub struct SessionInfo {
     pub label: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct LoginResponse {
+    pub token: String,
+    pub user_id: String,
+    pub expires_in_secs: u64,
+}
+
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .route("/api/login", post(login_handler))
         .route("/api/sessions", get(list_sessions))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -51,22 +80,79 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn list_sessions(
+async fn login_handler(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<Vec<SessionInfo>>, StatusCode> {
-    // Check Authorization header: Bearer <token>
-    let auth = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok());
-    let expected = format!("Bearer {}", state.token);
-    if auth != Some(&expected) {
-        return Err(StatusCode::UNAUTHORIZED);
+    headers: HeaderMap,
+    Json(payload): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, StatusCode> {
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("unknown");
+
+    if !state.rate_limiter.check_limit(
+        client_ip,
+        state.security.rate_limit_per_minute,
+        Duration::from_secs(60),
+    ) {
+        AuditLogger::record(AuditEvent::SecurityViolation {
+            reason: "Rate limit exceeded on login",
+            remote_ip: client_ip,
+        });
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
-    let ids = state.manager.list();
+    let ttl = Duration::from_secs(3600);
+    if let Some(token) = state.auth.login(&payload.username, &payload.password, ttl) {
+        AuditLogger::record(AuditEvent::LoginAttempt {
+            username: &payload.username,
+            success: true,
+            remote_ip: client_ip,
+        });
+        Ok(Json(LoginResponse {
+            token: token.token,
+            user_id: token.user_id,
+            expires_in_secs: ttl.as_secs(),
+        }))
+    } else {
+        AuditLogger::record(AuditEvent::LoginAttempt {
+            username: &payload.username,
+            success: false,
+            remote_ip: client_ip,
+        });
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionInfo>>, StatusCode> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let user_id = if let Some(h) = auth_header {
+        let token = h.strip_prefix("Bearer ").unwrap_or(h);
+        if token == state.token {
+            "admin".to_string()
+        } else if let Some(uid) = state.auth.validate_token(token) {
+            uid
+        } else {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let all_ids = state.manager.list();
     let mut list = Vec::new();
-    for id in ids {
+    for id in all_ids {
+        // Enforce per-user ownership unless admin
+        if user_id != "admin" && !state.auth.is_session_owner(id, &user_id) {
+            continue;
+        }
+
         if let Some(handle) = state.manager.get(id) {
             let (tx, rx) = oneshot::channel();
             if handle
@@ -100,8 +186,7 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
         let mime = mime_guess::from_path(&target).first_or_octet_stream();
         match tokio::fs::read(&target).await {
             Ok(content) => {
-                return ([(axum::http::header::CONTENT_TYPE, mime.as_ref())], content)
-                    .into_response();
+                return ([(header::CONTENT_TYPE, mime.as_ref())], content).into_response();
             }
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
@@ -118,13 +203,26 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
     StatusCode::NOT_FOUND.into_response()
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    let origin = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok());
+    if !state.security.is_origin_allowed(origin) {
+        AuditLogger::record(AuditEvent::SecurityViolation {
+            reason: "Rejected WebSocket upgrade: unauthorized origin",
+            remote_ip: origin.unwrap_or("unknown"),
+        });
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
     // Handshake: Expect ClientMsg::Hello first
-    let hello = match socket.recv().await {
+    let user_id = match socket.recv().await {
         Some(Ok(Message::Binary(bin))) => {
             match unpack_client_msg(&bin) {
                 Ok(ClientMsg::Hello {
@@ -133,14 +231,23 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 }) => {
                     if protocol_version != PROTOCOL_VERSION {
                         let err = pack_server_msg(&ServerMsg::Error {
-                        code: ErrorCode::ProtocolMismatch,
-                        message: format!("Version mismatch: expected {PROTOCOL_VERSION}, got {protocol_version}"),
-                    }).unwrap_or_default();
+                            code: ErrorCode::ProtocolMismatch,
+                            message: format!(
+                                "Version mismatch: expected {PROTOCOL_VERSION}, got {protocol_version}"
+                            ),
+                        })
+                        .unwrap_or_default();
                         let _ = socket.send(Message::Binary(err.into())).await;
                         let _ = socket.close().await;
                         return;
                     }
-                    if token != state.token {
+
+                    // Authenticate token
+                    if token == state.token {
+                        "admin".to_string()
+                    } else if let Some(uid) = state.auth.validate_token(&token) {
+                        uid
+                    } else {
                         let err = pack_server_msg(&ServerMsg::Error {
                             code: ErrorCode::Unauthorized,
                             message: "Invalid access token".into(),
@@ -150,18 +257,18 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         let _ = socket.close().await;
                         return;
                     }
-                    true
                 }
-                _ => false,
+                _ => {
+                    let _ = socket.close().await;
+                    return;
+                }
             }
         }
-        _ => false,
+        _ => {
+            let _ = socket.close().await;
+            return;
+        }
     };
-
-    if !hello {
-        let _ = socket.close().await;
-        return;
-    }
 
     // Send Welcome
     let welcome = pack_server_msg(&ServerMsg::Welcome {
@@ -175,7 +282,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Client connection loop
-    let mut _current_session: Option<SessionId> = None;
+    let mut current_session: Option<SessionId> = None;
     let mut current_tx: Option<mpsc::Sender<ActorCmd>> = None;
     let mut pending_ssh: Option<(oxidite_proto::BackendSpec, oxidite_proto::TermSize, String)> =
         None;
@@ -198,6 +305,17 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             _ => continue,
         };
 
+        // Enforce maximum message size
+        if bytes.len() > state.security.max_message_size {
+            let _ = server_tx
+                .send(ServerMsg::Error {
+                    code: ErrorCode::InvalidMessage,
+                    message: "Message exceeds maximum allowed size".into(),
+                })
+                .await;
+            continue;
+        }
+
         let client_msg = match unpack_client_msg(&bytes) {
             Ok(m) => m,
             Err(e) => {
@@ -212,88 +330,119 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         };
 
         match client_msg {
-            ClientMsg::Create { backend, size } => match backend {
-                oxidite_proto::BackendSpec::LocalPty { shell, cwd } => {
-                    match state
-                        .manager
-                        .create(oxidite_proto::BackendSpec::LocalPty { shell, cwd }, size)
-                        .await
-                    {
-                        Ok(sid) => {
-                            _current_session = Some(sid);
-                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
-                        }
-                        Err(e) => {
-                            let _ = server_tx
-                                .send(ServerMsg::Error {
-                                    code: ErrorCode::BackendError,
-                                    message: e.to_string(),
-                                })
-                                .await;
+            ClientMsg::Create { backend, size } => {
+                // Check session limits
+                let current_user_sessions = state.auth.user_sessions(&user_id);
+                if user_id != "admin"
+                    && current_user_sessions.len() >= state.security.max_sessions_per_user
+                {
+                    let _ = server_tx
+                        .send(ServerMsg::Error {
+                            code: ErrorCode::BackendError,
+                            message: format!(
+                                "Maximum session limit ({}) reached",
+                                state.security.max_sessions_per_user
+                            ),
+                        })
+                        .await;
+                    continue;
+                }
+
+                match backend {
+                    oxidite_proto::BackendSpec::LocalPty { shell, cwd } => {
+                        match state
+                            .manager
+                            .create(oxidite_proto::BackendSpec::LocalPty { shell, cwd }, size)
+                            .await
+                        {
+                            Ok(sid) => {
+                                state.auth.set_session_owner(sid, &user_id);
+                                AuditLogger::record(AuditEvent::SessionCreated {
+                                    session_id: &sid.to_string(),
+                                    backend_kind: "local_pty",
+                                    user: &user_id,
+                                });
+                                current_session = Some(sid);
+                                let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                            }
+                            Err(e) => {
+                                let _ = server_tx
+                                    .send(ServerMsg::Error {
+                                        code: ErrorCode::BackendError,
+                                        message: e.to_string(),
+                                    })
+                                    .await;
+                            }
                         }
                     }
-                }
-                oxidite_proto::BackendSpec::Ssh {
-                    host,
-                    port,
-                    user,
-                    auth,
-                    multiplexer,
-                } => {
-                    let fp = format!("SHA256:{:x}", host.len() * 31 + port as usize);
-                    let status = state.known_hosts.check(&host, &fp);
-                    match status {
-                        oxidite_proto::HostKeyStatus::Unknown => {
-                            pending_ssh = Some((
-                                oxidite_proto::BackendSpec::Ssh {
-                                    host: host.clone(),
+                    oxidite_proto::BackendSpec::Ssh {
+                        host,
+                        port,
+                        user,
+                        auth,
+                        multiplexer,
+                    } => {
+                        let fp = format!("SHA256:{:x}", host.len() * 31 + port as usize);
+                        let status = state.known_hosts.check(&host, &fp);
+                        match status {
+                            oxidite_proto::HostKeyStatus::Unknown => {
+                                pending_ssh = Some((
+                                    oxidite_proto::BackendSpec::Ssh {
+                                        host: host.clone(),
+                                        port,
+                                        user,
+                                        auth,
+                                        multiplexer,
+                                    },
+                                    size,
+                                    fp.clone(),
+                                ));
+                                let _ = server_tx
+                                    .send(ServerMsg::HostKeyPrompt {
+                                        host,
+                                        fingerprint: fp,
+                                        known: oxidite_proto::HostKeyStatus::Unknown,
+                                    })
+                                    .await;
+                            }
+                            oxidite_proto::HostKeyStatus::Mismatch => {
+                                let _ = server_tx
+                                    .send(ServerMsg::Error {
+                                        code: ErrorCode::BackendError,
+                                        message: format!(
+                                            "Host key mismatch for {host}! Connection refused."
+                                        ),
+                                    })
+                                    .await;
+                            }
+                            oxidite_proto::HostKeyStatus::Trusted => {
+                                let ssh_cfg = oxidite_ssh::SshConfig {
+                                    host,
                                     port,
                                     user,
                                     auth,
                                     multiplexer,
-                                },
-                                size,
-                                fp.clone(),
-                            ));
-                            let _ = server_tx
-                                .send(ServerMsg::HostKeyPrompt {
-                                    host,
-                                    fingerprint: fp,
-                                    known: oxidite_proto::HostKeyStatus::Unknown,
-                                })
-                                .await;
-                        }
-                        oxidite_proto::HostKeyStatus::Mismatch => {
-                            let _ = server_tx
-                                .send(ServerMsg::Error {
-                                    code: ErrorCode::BackendError,
-                                    message: format!(
-                                        "Host key mismatch for {host}! Connection refused."
-                                    ),
-                                })
-                                .await;
-                        }
-                        oxidite_proto::HostKeyStatus::Trusted => {
-                            let ssh_cfg = oxidite_ssh::SshConfig {
-                                host,
-                                port,
-                                user,
-                                auth,
-                                multiplexer,
-                                keepalive_interval_secs: 15,
-                                keepalive_max_misses: 3,
-                            };
-                            let (backend, _, _) = oxidite_ssh::SshBackend::new(ssh_cfg, size);
-                            let sid = oxidite_proto::SessionId::new_v4();
-                            state
-                                .manager
-                                .create_with_backend(sid, size, Box::new(backend));
-                            _current_session = Some(sid);
-                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                                    keepalive_interval_secs: 15,
+                                    keepalive_max_misses: 3,
+                                };
+                                let (backend, _, _) = oxidite_ssh::SshBackend::new(ssh_cfg, size);
+                                let sid = oxidite_proto::SessionId::new_v4();
+                                state
+                                    .manager
+                                    .create_with_backend(sid, size, Box::new(backend));
+                                state.auth.set_session_owner(sid, &user_id);
+                                AuditLogger::record(AuditEvent::SessionCreated {
+                                    session_id: &sid.to_string(),
+                                    backend_kind: "ssh",
+                                    user: &user_id,
+                                });
+                                current_session = Some(sid);
+                                let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                            }
                         }
                     }
                 }
-            },
+            }
             ClientMsg::HostKeyDecision { accept } => {
                 if let Some((spec, size, fp)) = pending_ssh.take() {
                     if accept {
@@ -320,7 +469,13 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             state
                                 .manager
                                 .create_with_backend(sid, size, Box::new(backend));
-                            _current_session = Some(sid);
+                            state.auth.set_session_owner(sid, &user_id);
+                            AuditLogger::record(AuditEvent::SessionCreated {
+                                session_id: &sid.to_string(),
+                                backend_kind: "ssh",
+                                user: &user_id,
+                            });
+                            current_session = Some(sid);
                             let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
                         }
                     } else {
@@ -338,8 +493,19 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 last_offset,
                 mode,
             } => {
+                // Per-user ownership check
+                if user_id != "admin" && !state.auth.is_session_owner(session, &user_id) {
+                    let _ = server_tx
+                        .send(ServerMsg::Error {
+                            code: ErrorCode::Unauthorized,
+                            message: "You do not own this session".into(),
+                        })
+                        .await;
+                    continue;
+                }
+
                 if let Some(handle) = state.manager.get(session) {
-                    _current_session = Some(session);
+                    current_session = Some(session);
                     current_tx = Some(handle.tx.clone());
 
                     let (resp_tx, resp_rx) = oneshot::channel();
@@ -354,6 +520,15 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         .is_ok()
                     {
                         if let Ok(mut attach_res) = resp_rx.await {
+                            AuditLogger::record(AuditEvent::SessionAttached {
+                                session_id: &session.to_string(),
+                                mode: match mode {
+                                    oxidite_proto::AttachMode::Writer => "writer",
+                                    oxidite_proto::AttachMode::Viewer => "viewer",
+                                },
+                                user: &user_id,
+                            });
+
                             let _ = server_tx
                                 .send(ServerMsg::Attached {
                                     session,
@@ -425,6 +600,22 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 break;
             }
             ClientMsg::Kill => {
+                if let Some(sid) = current_session {
+                    if user_id != "admin" && !state.auth.is_session_owner(sid, &user_id) {
+                        let _ = server_tx
+                            .send(ServerMsg::Error {
+                                code: ErrorCode::Unauthorized,
+                                message: "You do not own this session".into(),
+                            })
+                            .await;
+                        continue;
+                    }
+                    AuditLogger::record(AuditEvent::SessionTerminated {
+                        session_id: &sid.to_string(),
+                        user: &user_id,
+                    });
+                    state.auth.remove_session_owner(sid);
+                }
                 if let Some(tx) = &current_tx {
                     let _ = tx.send(ActorCmd::Kill).await;
                 }

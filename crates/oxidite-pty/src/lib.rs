@@ -44,7 +44,7 @@ fn which_in_path(binary: &str) -> bool {
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let full = dir.join(binary);
-            if full.is_file() {
+            if full.is_file() && !full.to_string_lossy().contains("WindowsApps") {
                 return true;
             }
         }
