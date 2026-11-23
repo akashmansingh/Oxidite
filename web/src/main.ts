@@ -80,6 +80,13 @@ function begin(t: { id: string } | { spec: BackendSpec }, label: string): void {
 async function refresh(): Promise<void> {
   try {
     const r = await fetch("/api/sessions", { headers: { Authorization: `Bearer ${token}` } });
+    if (r.status === 401) {
+      sessionStorage.removeItem("oxidite.token");
+      token = "";
+      gate.showModal();
+      say("Please enter the gateway token.");
+      return;
+    }
     if (!r.ok) throw new Error(String(r.status));
     // Assumed shape: [{ id: string, state: SessionState, label?: string }]
     const list = (await r.json()) as { id: string; state: SessionState; label?: string }[];
@@ -94,6 +101,7 @@ async function refresh(): Promise<void> {
       b.onclick = () => begin({ id: s.id }, s.label ?? "session");
       return b;
     }));
+    say("");
   } catch { say("Could not load sessions. Check the token and that the gateway is running."); }
 }
 

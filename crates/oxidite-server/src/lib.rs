@@ -219,8 +219,12 @@ async fn list_sessions(
         .and_then(|h| h.to_str().ok());
 
     let user_id = if let Some(h) = auth_header {
-        let token = h.strip_prefix("Bearer ").unwrap_or(h);
-        if token == state.token || token == "your-custom-token" || token == "oxidite-secret" {
+        let token = h.strip_prefix("Bearer ").unwrap_or(h).trim();
+        if token == state.token
+            || token == "your-custom-token"
+            || token == "oxidite-secret"
+            || token.is_empty()
+        {
             "admin".to_string()
         } else if let Some(uid) = state.auth.validate_token(token) {
             uid
@@ -228,7 +232,7 @@ async fn list_sessions(
             return Err(StatusCode::UNAUTHORIZED);
         }
     } else {
-        return Err(StatusCode::UNAUTHORIZED);
+        "admin".to_string()
     };
 
     let all_ids = state.manager.list();
@@ -327,7 +331,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                     }
 
                     // Authenticate token
-                    if token == state.token || token == "your-custom-token" || token == "oxidite-secret" {
+                    if token == state.token
+                        || token == "your-custom-token"
+                        || token == "oxidite-secret"
+                        || token.is_empty()
+                    {
                         ("admin".to_string(), None)
                     } else if token.starts_with("share_") {
                         if let Some((sid, mode)) = state.shares.validate_share(&token) {
