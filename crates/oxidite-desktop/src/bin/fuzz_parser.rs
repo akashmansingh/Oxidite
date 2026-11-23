@@ -5,8 +5,8 @@
 //! Or used with stdin to test specific crash reproduction files:
 //!   `cargo run --bin fuzz_parser < crash_input.bin`
 
-use oxidite::parser::{LoggingHandler, Parser};
-use oxidite::terminal::Terminal;
+use oxidite_vt::parser::{LoggingHandler, Parser};
+use oxidite_vt::terminal::Terminal;
 use std::io::Read;
 
 /// Mutates an input byte slice to produce variations for fuzz exploration.

@@ -5,7 +5,7 @@
 // Contract stubs are intentionally unused until later phases wire them up.
 #![allow(dead_code)]
 
-use oxidite::{app, config, parser, pty, renderer, terminal};
+use oxidite_desktop::{app, config, parser, pty, renderer, terminal};
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
