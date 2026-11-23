@@ -9,8 +9,8 @@
     clippy::uninlined_format_args
 )]
 
-use oxidite::parser::Parser;
-use oxidite::terminal::Terminal;
+use oxidite_vt::parser::Parser;
+use oxidite_vt::terminal::Terminal;
 use std::time::Instant;
 
 /// Generates a numerical sequence payload simulating `seq 1 100000`.

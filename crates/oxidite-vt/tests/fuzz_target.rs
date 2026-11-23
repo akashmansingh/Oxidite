@@ -1,7 +1,7 @@
 //! Integration test exercising the fuzz target harness on standard and adversarial inputs.
 
-use oxidite::parser::{LoggingHandler, Parser};
-use oxidite::terminal::Terminal;
+use oxidite_vt::parser::{LoggingHandler, Parser};
+use oxidite_vt::terminal::Terminal;
 
 fn fuzz_one_input(data: &[u8]) {
     let mut parser = Parser::new();
