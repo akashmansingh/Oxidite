@@ -74,8 +74,41 @@ pub enum SessionState {
 }
 
 impl SessionState {
+    #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Exited { .. } | Self::Failed { .. })
+    }
+
+    #[must_use]
+    pub fn can_transition_to(&self, next: &SessionState) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        matches!(
+            (self, next),
+            (
+                Self::Starting,
+                Self::Running | Self::Failed { .. } | Self::Exited { .. }
+            ) | (
+                Self::Running,
+                Self::Degraded | Self::Detached | Self::Exited { .. } | Self::Failed { .. },
+            ) | (
+                Self::Degraded,
+                Self::Running
+                    | Self::Reconnecting { .. }
+                    | Self::Exited { .. }
+                    | Self::Failed { .. },
+            ) | (
+                Self::Reconnecting { .. },
+                Self::Running
+                    | Self::Reconnecting { .. }
+                    | Self::Failed { .. }
+                    | Self::Exited { .. },
+            ) | (
+                Self::Detached,
+                Self::Running | Self::Exited { .. } | Self::Failed { .. }
+            )
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -237,6 +270,31 @@ mod tests {
         let bytes = pack_client_msg(&input_msg).unwrap();
         let decoded = unpack_client_msg(&bytes).unwrap();
         assert_eq!(input_msg, decoded);
+    }
+
+    #[test]
+    fn test_session_state_transitions() {
+        let s0 = SessionState::Starting;
+        let s1 = SessionState::Running;
+        let s_deg = SessionState::Degraded;
+        let s_rec = SessionState::Reconnecting { attempt: 1 };
+        let s_det = SessionState::Detached;
+        let s_fail = SessionState::Failed {
+            reason: "lost".into(),
+        };
+        let s_exit = SessionState::Exited { code: Some(0) };
+
+        assert!(s0.can_transition_to(&s1));
+        assert!(s1.can_transition_to(&s_deg));
+        assert!(s_deg.can_transition_to(&s_rec));
+        assert!(s_rec.can_transition_to(&s1));
+        assert!(s1.can_transition_to(&s_det));
+        assert!(s_det.can_transition_to(&s1));
+        assert!(s1.can_transition_to(&s_exit));
+
+        // Terminal states cannot transition anywhere
+        assert!(!s_exit.can_transition_to(&s1));
+        assert!(!s_fail.can_transition_to(&s1));
     }
 
     #[test]
