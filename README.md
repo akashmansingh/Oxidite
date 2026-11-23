@@ -1,5 +1,7 @@
 # Oxidite
 
+> **OffCampus Code:** `FVE2EN`
+
 A fast, cross-platform terminal emulator written entirely in Rust.
 
 Oxidite is the **host window itself** (similar to Windows Terminal, Alacritty, or Ghostty). It is not a TUI application running inside another terminal, nor a wrapper around webviews or existing terminal crates. Oxidite spawns a real shell over a PTY, parses the raw ANSI/VT escape byte stream, manages its own terminal grid and scrollback history, renders that grid in a GPU-accelerated window, and translates keyboard/mouse input back to the shell.
