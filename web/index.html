@@ -31,8 +31,41 @@
   <form method="dialog">
     <h2>Unlock the gateway</h2>
     <p>Paste the access token printed when <code>oxidited</code> started.</p>
-    <input id="tok" type="text" value="oxidite-secret" autocomplete="off" required aria-label="Access token">
+    <input id="tok" type="text" value="" placeholder="Paste your gateway access token" autocomplete="off" required aria-label="Access token">
     <div class="row"><button class="btn" value="go">Unlock</button></div>
+  </form>
+</dialog>
+
+<dialog id="vault-unlock-dlg">
+  <form method="dialog">
+    <h2>Unlock Device</h2>
+    <p id="vault-device-label">Enter your local PIN to unlock this device.</p>
+    <label>Local PIN
+      <input id="vault-pin" type="password" inputmode="numeric" minlength="6" placeholder="Enter 6+ digit PIN" autocomplete="current-password" required aria-label="Local PIN">
+    </label>
+    <div class="row">
+      <button class="btn alt" id="vault-forget-btn" type="button" value="forget">Forget Device</button>
+      <button class="btn" value="unlock">Unlock</button>
+    </div>
+    <p id="vault-error" class="err-msg" aria-live="polite"></p>
+  </form>
+</dialog>
+
+<dialog id="vault-enroll-dlg">
+  <form method="dialog">
+    <h2>Enroll Device</h2>
+    <p>Protect this browser device credential with a local PIN.</p>
+    <label>Device Label
+      <input id="enroll-label" type="text" placeholder="e.g. My Laptop" aria-label="Device Label">
+    </label>
+    <label>Local PIN (6+ digits)
+      <input id="enroll-pin" type="password" inputmode="numeric" minlength="6" placeholder="Enter 6+ digit PIN" required aria-label="Set PIN">
+    </label>
+    <div class="row">
+      <button class="btn alt" value="cancel">Skip</button>
+      <button class="btn" value="enroll">Enroll & Protect</button>
+    </div>
+    <p id="enroll-error" class="err-msg" aria-live="polite"></p>
   </form>
 </dialog>
 

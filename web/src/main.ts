@@ -2,11 +2,12 @@ import "./style.css";
 import { makeTerminal } from "./terminal";
 import { Connection, type Handlers } from "./connection";
 import { stateName, type BackendSpec, type Msg, type SessionState } from "./protocol";
+import { DeviceVault } from "./device-vault";
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T => document.querySelector<T>(s) as T;
 const enc = new TextEncoder();
 const { term, fit } = makeTerminal($("#term"));
-let token = sessionStorage.getItem("oxidite.token") ?? "";
+let token = "";
 let conn: Connection | null = null;
 let raf = 0;
 
@@ -81,10 +82,9 @@ async function refresh(): Promise<void> {
   try {
     const r = await fetch("/api/sessions", { headers: { Authorization: `Bearer ${token}` } });
     if (r.status === 401) {
-      sessionStorage.removeItem("oxidite.token");
       token = "";
-      gate.showModal();
-      say("Please enter the gateway token.");
+      void initAuth();
+      say("Please unlock the device or enter an authorization token.");
       return;
     }
     if (!r.ok) throw new Error(String(r.status));
@@ -123,9 +123,99 @@ $<HTMLDialogElement>("#newdlg").onclose = (e) => {
 };
 
 const gate = $<HTMLDialogElement>("#gate");
+const unlockDlg = $<HTMLDialogElement>("#vault-unlock-dlg");
+const enrollDlg = $<HTMLDialogElement>("#vault-enroll-dlg");
+
+unlockDlg.onclose = async () => {
+  if (unlockDlg.returnValue === "unlock") {
+    const pin = $<HTMLInputElement>("#vault-pin").value.trim();
+    try {
+      token = await DeviceVault.unlock(pin);
+      $<HTMLInputElement>("#vault-pin").value = "";
+      $("#vault-error").textContent = "";
+      void refresh();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to unlock device";
+      $("#vault-error").textContent = msg;
+      unlockDlg.showModal();
+    }
+  }
+};
+
+$<HTMLButtonElement>("#vault-forget-btn").onclick = async () => {
+  await DeviceVault.forget();
+  unlockDlg.close("forget");
+  gate.showModal();
+};
+
 gate.onclose = () => {
-  token = $<HTMLInputElement>("#tok").value.trim();
-  sessionStorage.setItem("oxidite.token", token);
+  const entered = $<HTMLInputElement>("#tok").value.trim();
+  if (!entered) {
+    gate.showModal();
+    return;
+  }
+
+  if (DeviceVault.isAvailable()) {
+    $<HTMLInputElement>("#enroll-pin").value = "";
+    $<HTMLInputElement>("#enroll-label").value = "Browser Device";
+    $("#enroll-error").textContent = "";
+    enrollDlg.showModal();
+  } else {
+    token = entered;
+    void refresh();
+  }
+};
+
+enrollDlg.onclose = async () => {
+  const enteredGrant = $<HTMLInputElement>("#tok").value.trim();
+  if (enrollDlg.returnValue === "enroll") {
+    const pin = $<HTMLInputElement>("#enroll-pin").value.trim();
+    const label = $<HTMLInputElement>("#enroll-label").value.trim() || "Browser Device";
+
+    if (pin.length < 6) {
+      $("#enroll-error").textContent = "PIN must be at least 6 characters";
+      enrollDlg.showModal();
+      return;
+    }
+
+    try {
+      const r = await fetch("/api/devices/enroll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ grant: enteredGrant, label }),
+      });
+
+      if (r.ok) {
+        const data = (await r.json()) as { device_id: string; token: string; label: string };
+        await DeviceVault.enroll(data.device_id, data.token, data.label, pin);
+        token = data.token;
+        $<HTMLInputElement>("#tok").value = "";
+        $<HTMLInputElement>("#enroll-pin").value = "";
+        void refresh();
+        return;
+      }
+    } catch {
+      // Fall through to memory token
+    }
+  }
+
+  token = enteredGrant;
+  $<HTMLInputElement>("#tok").value = "";
   void refresh();
 };
-if (token) void refresh(); else gate.showModal();
+
+async function initAuth(): Promise<void> {
+  if (DeviceVault.isAvailable() && (await DeviceVault.hasEnrolledDevice())) {
+    const info = await DeviceVault.getEnrolledInfo();
+    if (info) {
+      $("#vault-device-label").textContent = `Enter your local PIN to unlock "${info.label}".`;
+    }
+    $<HTMLInputElement>("#vault-pin").value = "";
+    $("#vault-error").textContent = "";
+    unlockDlg.showModal();
+  } else {
+    gate.showModal();
+  }
+}
+
+void initAuth();

@@ -68,11 +68,11 @@
 
 **Interfaces:** `DeviceVault.enroll`, `.unlock`, `.forget` backed only by IndexedDB/Web Crypto.
 
-- [ ] Write RED tests for encrypted storage, correct/wrong PIN, and unavailable IndexedDB without fallback.
-- [ ] Run focused web test; confirm RED.
-- [ ] Implement random salt/IV, PBKDF2-SHA-256, AES-GCM, and accessible enrollment/unlock UI.
-- [ ] Run focused test plus `bun run lint`/`bun run build`; confirm GREEN.
-- [ ] Commit `feat(web): unlock enrolled devices with a local pin`.
+- [x] Write RED tests for encrypted storage, correct/wrong PIN, and unavailable IndexedDB without fallback.
+- [x] Run focused web test; confirm RED.
+- [x] Implement random salt/IV, PBKDF2-SHA-256, AES-GCM, and accessible enrollment/unlock UI.
+- [x] Run focused test plus `bun run lint`/`bun run build`; confirm GREEN.
+- [x] Commit `feat(web): unlock enrolled devices with a local pin`.
 
 ### Task 5: Enforce active device revocation
 
