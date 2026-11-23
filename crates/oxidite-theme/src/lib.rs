@@ -199,6 +199,7 @@ impl ThemeTokens {
     }
 
     /// Converts a token to glyphon text color.
+    #[cfg(feature = "glyphon")]
     #[must_use]
     pub fn glyphon(self, color: Rgb) -> glyphon::Color {
         glyphon::Color::rgb(color.r, color.g, color.b)
@@ -475,12 +476,14 @@ impl Theme {
     }
 
     /// Text primary color for UI labels.
+    #[cfg(feature = "glyphon")]
     #[must_use]
     pub fn text_primary(&self) -> glyphon::Color {
         glyphon::Color::rgb(self.foreground.r, self.foreground.g, self.foreground.b)
     }
 
     /// Text muted color for secondary UI labels.
+    #[cfg(feature = "glyphon")]
     #[must_use]
     pub fn text_muted(&self) -> glyphon::Color {
         if self.is_light() {
