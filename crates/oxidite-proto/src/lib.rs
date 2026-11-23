@@ -1,0 +1,262 @@
+//! Wire protocol types and MessagePack framing for Oxidite.
+
+use serde::{Deserialize, Serialize};
+
+pub const PROTOCOL_VERSION: u16 = 1;
+
+pub type SessionId = uuid::Uuid;
+pub type Offset = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermSize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+impl Default for TermSize {
+    fn default() -> Self {
+        Self { rows: 24, cols: 80 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachMode {
+    Writer,
+    Viewer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplayStart {
+    Replay { from: Offset },
+    Snapshot { at: Offset },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Multiplexer {
+    None,
+    Tmux,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthSpec {
+    Password(String),
+    PublicKey {
+        key_path: String,
+        passphrase: Option<String>,
+    },
+    Interactive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackendSpec {
+    LocalPty {
+        shell: Option<String>,
+        cwd: Option<String>,
+    },
+    Ssh {
+        host: String,
+        port: u16,
+        user: String,
+        auth: AuthSpec,
+        multiplexer: Multiplexer,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionState {
+    Starting,
+    Running,
+    Degraded,
+    Reconnecting { attempt: u32 },
+    Detached,
+    Exited { code: Option<i32> },
+    Failed { reason: String },
+}
+
+impl SessionState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Exited { .. } | Self::Failed { .. })
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Running => "Running",
+            Self::Degraded => "Degraded",
+            Self::Reconnecting { .. } => "Reconnecting",
+            Self::Detached => "Detached",
+            Self::Exited { .. } => "Exited",
+            Self::Failed { .. } => "Failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostKeyStatus {
+    Unknown,
+    Trusted,
+    Mismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorCode {
+    ProtocolMismatch,
+    Unauthorized,
+    SessionNotFound,
+    SessionExited,
+    BackendError,
+    BufferExceeded,
+    InvalidMessage,
+    InternalError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientMsg {
+    Hello {
+        protocol_version: u16,
+        token: String,
+    },
+    Create {
+        backend: BackendSpec,
+        size: TermSize,
+    },
+    Attach {
+        session: SessionId,
+        last_offset: Option<Offset>,
+        mode: AttachMode,
+    },
+    Input(#[serde(with = "serde_bytes")] Vec<u8>),
+    Resize(TermSize),
+    Ack {
+        offset: Offset,
+    },
+    HostKeyDecision {
+        accept: bool,
+    },
+    AuthResponse {
+        answers: Vec<String>,
+    },
+    Ping {
+        nonce: u64,
+    },
+    Detach,
+    Kill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerMsg {
+    Welcome {
+        server_version: String,
+    },
+    Created {
+        session: SessionId,
+    },
+    Attached {
+        session: SessionId,
+        mode: AttachMode,
+        start: ReplayStart,
+    },
+    Snapshot {
+        offset: Offset,
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    },
+    Output {
+        offset: Offset,
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    },
+    State {
+        session: SessionId,
+        state: SessionState,
+    },
+    HostKeyPrompt {
+        host: String,
+        fingerprint: String,
+        known: HostKeyStatus,
+    },
+    AuthPrompt {
+        prompts: Vec<String>,
+    },
+    Title(String),
+    Exit {
+        code: Option<i32>,
+    },
+    Pong {
+        nonce: u64,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtoError {
+    #[error("MessagePack encode error: {0}")]
+    Encode(#[from] rmp_serde::encode::Error),
+    #[error("MessagePack decode error: {0}")]
+    Decode(#[from] rmp_serde::decode::Error),
+}
+
+/// Encodes a client message using named MessagePack fields.
+pub fn pack_client_msg(msg: &ClientMsg) -> Result<Vec<u8>, ProtoError> {
+    rmp_serde::to_vec_named(msg).map_err(ProtoError::Encode)
+}
+
+/// Decodes a client message from MessagePack bytes.
+pub fn unpack_client_msg(bytes: &[u8]) -> Result<ClientMsg, ProtoError> {
+    rmp_serde::from_slice(bytes).map_err(ProtoError::Decode)
+}
+
+/// Encodes a server message using named MessagePack fields.
+pub fn pack_server_msg(msg: &ServerMsg) -> Result<Vec<u8>, ProtoError> {
+    rmp_serde::to_vec_named(msg).map_err(ProtoError::Encode)
+}
+
+/// Decodes a server message from MessagePack bytes.
+pub fn unpack_server_msg(bytes: &[u8]) -> Result<ServerMsg, ProtoError> {
+    rmp_serde::from_slice(bytes).map_err(ProtoError::Decode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_msg_roundtrip() {
+        let msg = ClientMsg::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            token: "secret-token".into(),
+        };
+        let bytes = pack_client_msg(&msg).unwrap();
+        let decoded = unpack_client_msg(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+
+        let input_msg = ClientMsg::Input(b"ls -la\n".to_vec());
+        let bytes = pack_client_msg(&input_msg).unwrap();
+        let decoded = unpack_client_msg(&bytes).unwrap();
+        assert_eq!(input_msg, decoded);
+    }
+
+    #[test]
+    fn test_server_msg_roundtrip() {
+        let sid = uuid::Uuid::new_v4();
+        let msg = ServerMsg::Attached {
+            session: sid,
+            mode: AttachMode::Writer,
+            start: ReplayStart::Snapshot { at: 1024 },
+        };
+        let bytes = pack_server_msg(&msg).unwrap();
+        let decoded = unpack_server_msg(&bytes).unwrap();
+        assert_eq!(msg, decoded);
+
+        let out = ServerMsg::Output {
+            offset: 42,
+            bytes: b"\x1b[32mhello\x1b[0m".to_vec(),
+        };
+        let bytes = pack_server_msg(&out).unwrap();
+        let decoded = unpack_server_msg(&bytes).unwrap();
+        assert_eq!(out, decoded);
+    }
+}

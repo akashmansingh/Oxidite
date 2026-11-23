@@ -1,0 +1,16 @@
+[package]
+name = "oxidite-ssh"
+version = "0.1.0"
+edition = "2024"
+description = "SSH backend, connection pooling, keepalives, and tmux persistence for Oxidite"
+license = "MIT"
+
+[dependencies]
+oxidite-proto = { path = "../oxidite-proto" }
+oxidite-session = { path = "../oxidite-session" }
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2.0"
+tracing = "0.1"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+parking_lot = "0.12"

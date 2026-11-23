@@ -1,0 +1,18 @@
+[package]
+name = "oxidite-session"
+version = "0.1.0"
+edition = "2024"
+description = "Session actor, state management, replay buffer, and backends for Oxidite"
+license = "MIT"
+
+[dependencies]
+oxidite-vt = { path = "../oxidite-vt" }
+oxidite-pty = { path = "../oxidite-pty" }
+oxidite-proto = { path = "../oxidite-proto" }
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+tracing = "0.1"
+thiserror = "2.0"
+bytes = "1.7"
+parking_lot = "0.12"
