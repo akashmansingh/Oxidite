@@ -19,3 +19,7 @@ Thumbs.db
 .cargo-cache/
 .agents/
 code-review.md
+tests/benchmarks/evidence/
+*.ndjson
+oxidite.db*
+

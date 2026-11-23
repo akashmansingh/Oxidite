@@ -104,11 +104,11 @@
 
 **Interfaces:** bounded NDJSON fields `scenario_id`, opaque `trace_id`, route class, status, byte/timing/cache decisions, and redacted WS counters.
 
-- [ ] Write RED tests for cold/warm assets, API no-store, terminal-flow evidence, and secret/output absence.
-- [ ] Run focused benchmark test; confirm RED.
-- [ ] Implement fixed scenario planner and PowerShell worker against a local live server with capped files/records.
-- [ ] Run it; inspect evidence against real HTTP/WS traffic.
-- [ ] Commit `test(server): capture bounded real-traffic benchmark evidence`.
+- [x] Write RED tests for cold/warm assets, API no-store, terminal-flow evidence, and secret/output absence.
+- [x] Run focused benchmark test; confirm RED.
+- [x] Implement fixed scenario planner and PowerShell worker against a local live server with capped files/records.
+- [x] Run it; inspect evidence against real HTTP/WS traffic.
+- [x] Commit `test(server): capture bounded real-traffic benchmark evidence`.
 
 ### Task 8: Document and verify
 

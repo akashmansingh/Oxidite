@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion, clippy::field_reassign_with_default)]
+
 use futures_util::{SinkExt, StreamExt};
 use oxidite_directory::InMemoryDirectory;
 use oxidite_proto::{ClientMsg, PROTOCOL_VERSION, ServerMsg, pack_client_msg, unpack_server_msg};

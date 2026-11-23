@@ -54,3 +54,24 @@ Verify that a network partition between a gateway node and the session directory
 6. Verify postconditions:
    - Directory returns `DirectoryError::FencingMismatch`.
    - Node A terminates ownership and client writes are rejected.
+
+---
+
+## Test 4: Real-Traffic Benchmark Verification under Load
+
+### Goal
+Verify that rapid client request sequences (cold/warm static assets, traversal attempts, API polling, and WebSocket handshakes) produce bounded, size-capped NDJSON evidence with zero secret leaks.
+
+### Procedure
+1. Execute the automated benchmark integration test:
+   ```bash
+   cargo test -p oxidite-server --test benchmark_evidence
+   ```
+2. Or run the live PowerShell benchmark worker against an active gateway:
+   ```powershell
+   .\tests\benchmarks\run.ps1 -Url "http://127.0.0.1:3000" -Token "<admin-token>"
+   ```
+3. Verify postconditions:
+   - Output file is strictly capped under the 512 KiB and 100 records limit.
+   - All records contain low-cardinality route classes and opaque trace IDs.
+   - Privacy checks pass with zero credentials, tokens, or terminal output in evidence.

@@ -102,3 +102,15 @@ Verify readiness endpoint:
 curl -i http://localhost:3001/ready
 ```
 Returns `HTTP/1.1 200 OK` with body `READY`.
+
+---
+
+## 7. Real-Traffic Benchmark Evidence
+
+Run the bounded scenario benchmark against a live gateway:
+
+```powershell
+.\tests\benchmarks\run.ps1 -Url "http://localhost:3000" -Token "dev-secret-token-12345"
+```
+
+Verify that `tests/benchmarks/evidence/benchmark-latest.ndjson` contains size-capped NDJSON records with redacted measurements, explicit cache decisions, and zero leaked credentials.

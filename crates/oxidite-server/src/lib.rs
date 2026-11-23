@@ -122,7 +122,7 @@ async fn route_metrics_middleware(
     let start = std::time::Instant::now();
     let path = request.uri().path().to_string();
     let route_class = routing::classify_request_path(&path);
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
     let duration = start.elapsed();
     let status = response.status();
     let bytes = response
@@ -134,6 +134,13 @@ async fn route_metrics_middleware(
     state
         .metrics
         .observe_http(route_class, status, duration, bytes);
+
+    if !response.headers().contains_key(header::CACHE_CONTROL) {
+        if let Ok(val) = header::HeaderValue::from_str(routing::cache_control(route_class)) {
+            response.headers_mut().insert(header::CACHE_CONTROL, val);
+        }
+    }
+
     response
 }
 

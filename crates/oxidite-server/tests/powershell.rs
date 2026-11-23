@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion, clippy::field_reassign_with_default)]
+
 use futures_util::{SinkExt, StreamExt};
 use oxidite_directory::InMemoryDirectory;
 use oxidite_proto::{
@@ -232,7 +234,7 @@ async fn test_local_pty_disabled_on_non_loopback_bind() {
         token,
     })
     .unwrap();
-    ws.send(Message::Binary(hello.into())).await.unwrap();
+    ws.send(Message::Binary(hello)).await.unwrap();
 
     let _welcome = ws.next().await.unwrap().unwrap();
 
@@ -245,7 +247,7 @@ async fn test_local_pty_disabled_on_non_loopback_bind() {
         size: TermSize { rows: 24, cols: 80 },
     })
     .unwrap();
-    ws.send(Message::Binary(create.into())).await.unwrap();
+    ws.send(Message::Binary(create)).await.unwrap();
 
     let resp = tokio::time::timeout(Duration::from_secs(3), ws.next())
         .await

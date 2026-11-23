@@ -79,5 +79,8 @@ fn is_fingerprinted_asset(path: &str) -> bool {
         return false;
     };
     let hash = suffix.split('.').next().unwrap_or_default();
-    hash.len() >= 8 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    hash.len() >= 8
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }

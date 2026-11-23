@@ -33,8 +33,10 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(3000);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut security = SecurityConfig::default();
-    security.bind_addr = Some(addr);
+    let security = SecurityConfig {
+        bind_addr: Some(addr),
+        ..Default::default()
+    };
 
     let state = AppState {
         manager: SessionManager::new(),

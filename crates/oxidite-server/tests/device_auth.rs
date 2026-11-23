@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion, clippy::field_reassign_with_default)]
+
 use oxidite_server::devices::{DeviceAuthError, DeviceStore};
 use std::time::Duration;
 use uuid::Uuid;
@@ -249,7 +251,7 @@ async fn test_device_api_endpoints_and_websocket_auth() {
         token: device_token.clone(),
     })
     .unwrap();
-    ws.send(Message::Binary(hello.into())).await.unwrap();
+    ws.send(Message::Binary(hello)).await.unwrap();
 
     let msg = ws.next().await.unwrap().unwrap();
     if let Message::Binary(bin) = msg {
@@ -267,10 +269,7 @@ async fn test_device_api_endpoints_and_websocket_auth() {
         token: "your-custom-token".to_string(),
     })
     .unwrap();
-    bad_ws
-        .send(Message::Binary(bad_hello.into()))
-        .await
-        .unwrap();
+    bad_ws.send(Message::Binary(bad_hello)).await.unwrap();
 
     let bad_msg = bad_ws.next().await.unwrap().unwrap();
     if let Message::Binary(bin) = bad_msg {
@@ -313,7 +312,7 @@ async fn test_device_api_endpoints_and_websocket_auth() {
     })
     .unwrap();
     revoked_ws
-        .send(Message::Binary(revoked_hello.into()))
+        .send(Message::Binary(revoked_hello))
         .await
         .unwrap();
 

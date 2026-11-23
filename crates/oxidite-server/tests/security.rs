@@ -1,3 +1,5 @@
+#![allow(clippy::useless_conversion, clippy::field_reassign_with_default)]
+
 use futures_util::{SinkExt, StreamExt};
 use oxidite_proto::{
     AttachMode, BackendSpec, ClientMsg, ErrorCode, PROTOCOL_VERSION, ServerMsg, TermSize,
