@@ -1,4 +1,9 @@
 /target/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.lockb
 **/*.rs.bk
 .DS_Store
 Thumbs.db
