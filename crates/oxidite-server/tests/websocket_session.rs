@@ -19,6 +19,9 @@ async fn test_websocket_session_lifecycle() {
         token: token.clone(),
         static_dir: "web/dist".into(),
         known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: oxidite_server::security::SecurityConfig::default(),
+        auth: oxidite_server::auth::UserStore::new(),
+        rate_limiter: oxidite_server::security::RateLimiter::new(),
     };
 
     let app = create_app(state);
@@ -127,6 +130,9 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
         token: token.clone(),
         static_dir: "web/dist".into(),
         known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: oxidite_server::security::SecurityConfig::default(),
+        auth: oxidite_server::auth::UserStore::new(),
+        rate_limiter: oxidite_server::security::RateLimiter::new(),
     };
 
     let app = create_app(state);

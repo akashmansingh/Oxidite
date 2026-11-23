@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use oxidite_proto::{AttachMode, ReplayStart, TermSize};
 use oxidite_session::{
-    actor::{ActorCmd, SessionActor},
     Backend, BackendEvent, Result,
+    actor::{ActorCmd, SessionActor},
 };
 use oxidite_vt::terminal::Terminal;
 use std::time::Duration;
