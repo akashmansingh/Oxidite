@@ -51,6 +51,21 @@ impl SessionManager {
         Ok(id)
     }
 
+    pub fn create_with_backend(
+        &self,
+        id: SessionId,
+        size: TermSize,
+        backend: Box<dyn Backend>,
+    ) -> SessionId {
+        let (tx, rx) = mpsc::channel(128);
+        let (actor, _) = SessionActor::new(id, size, backend, rx);
+
+        tokio::spawn(actor.run());
+
+        self.sessions.write().insert(id, SessionHandle { id, tx });
+        id
+    }
+
     pub fn insert_handle(&self, id: SessionId, handle: SessionHandle) {
         self.sessions.write().insert(id, handle);
     }

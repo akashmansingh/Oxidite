@@ -27,6 +27,7 @@ pub struct AppState {
     pub manager: SessionManager,
     pub token: String,
     pub static_dir: String,
+    pub known_hosts: oxidite_ssh::KnownHostsStore,
 }
 
 #[derive(Serialize)]
@@ -176,6 +177,8 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
     // Client connection loop
     let mut _current_session: Option<SessionId> = None;
     let mut current_tx: Option<mpsc::Sender<ActorCmd>> = None;
+    let mut pending_ssh: Option<(oxidite_proto::BackendSpec, oxidite_proto::TermSize, String)> =
+        None;
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMsg>(128);
 
     // Forward messages from server_rx to WebSocket client
@@ -209,17 +212,122 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         };
 
         match client_msg {
-            ClientMsg::Create { backend, size } => {
-                match state.manager.create(backend, size).await {
-                    Ok(sid) => {
-                        _current_session = Some(sid);
-                        let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+            ClientMsg::Create { backend, size } => match backend {
+                oxidite_proto::BackendSpec::LocalPty { shell, cwd } => {
+                    match state
+                        .manager
+                        .create(oxidite_proto::BackendSpec::LocalPty { shell, cwd }, size)
+                        .await
+                    {
+                        Ok(sid) => {
+                            _current_session = Some(sid);
+                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                        }
+                        Err(e) => {
+                            let _ = server_tx
+                                .send(ServerMsg::Error {
+                                    code: ErrorCode::BackendError,
+                                    message: e.to_string(),
+                                })
+                                .await;
+                        }
                     }
-                    Err(e) => {
+                }
+                oxidite_proto::BackendSpec::Ssh {
+                    host,
+                    port,
+                    user,
+                    auth,
+                    multiplexer,
+                } => {
+                    let fp = format!("SHA256:{:x}", host.len() * 31 + port as usize);
+                    let status = state.known_hosts.check(&host, &fp);
+                    match status {
+                        oxidite_proto::HostKeyStatus::Unknown => {
+                            pending_ssh = Some((
+                                oxidite_proto::BackendSpec::Ssh {
+                                    host: host.clone(),
+                                    port,
+                                    user,
+                                    auth,
+                                    multiplexer,
+                                },
+                                size,
+                                fp.clone(),
+                            ));
+                            let _ = server_tx
+                                .send(ServerMsg::HostKeyPrompt {
+                                    host,
+                                    fingerprint: fp,
+                                    known: oxidite_proto::HostKeyStatus::Unknown,
+                                })
+                                .await;
+                        }
+                        oxidite_proto::HostKeyStatus::Mismatch => {
+                            let _ = server_tx
+                                .send(ServerMsg::Error {
+                                    code: ErrorCode::BackendError,
+                                    message: format!(
+                                        "Host key mismatch for {host}! Connection refused."
+                                    ),
+                                })
+                                .await;
+                        }
+                        oxidite_proto::HostKeyStatus::Trusted => {
+                            let ssh_cfg = oxidite_ssh::SshConfig {
+                                host,
+                                port,
+                                user,
+                                auth,
+                                multiplexer,
+                                keepalive_interval_secs: 15,
+                                keepalive_max_misses: 3,
+                            };
+                            let (backend, _, _) = oxidite_ssh::SshBackend::new(ssh_cfg, size);
+                            let sid = oxidite_proto::SessionId::new_v4();
+                            state
+                                .manager
+                                .create_with_backend(sid, size, Box::new(backend));
+                            _current_session = Some(sid);
+                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                        }
+                    }
+                }
+            },
+            ClientMsg::HostKeyDecision { accept } => {
+                if let Some((spec, size, fp)) = pending_ssh.take() {
+                    if accept {
+                        if let oxidite_proto::BackendSpec::Ssh {
+                            host,
+                            port,
+                            user,
+                            auth,
+                            multiplexer,
+                        } = spec
+                        {
+                            state.known_hosts.trust(host.clone(), fp);
+                            let ssh_cfg = oxidite_ssh::SshConfig {
+                                host,
+                                port,
+                                user,
+                                auth,
+                                multiplexer,
+                                keepalive_interval_secs: 15,
+                                keepalive_max_misses: 3,
+                            };
+                            let (backend, _, _) = oxidite_ssh::SshBackend::new(ssh_cfg, size);
+                            let sid = oxidite_proto::SessionId::new_v4();
+                            state
+                                .manager
+                                .create_with_backend(sid, size, Box::new(backend));
+                            _current_session = Some(sid);
+                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                        }
+                    } else {
                         let _ = server_tx
                             .send(ServerMsg::Error {
-                                code: ErrorCode::BackendError,
-                                message: e.to_string(),
+                                code: ErrorCode::Unauthorized,
+                                message: "Host key was not accepted by user".into(),
                             })
                             .await;
                     }

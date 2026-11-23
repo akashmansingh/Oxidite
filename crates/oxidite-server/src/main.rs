@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
         manager: SessionManager::new(),
         token,
         static_dir,
+        known_hosts: oxidite_ssh::KnownHostsStore::new(),
     };
 
     let app = create_app(state);
