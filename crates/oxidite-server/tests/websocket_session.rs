@@ -23,6 +23,7 @@ async fn test_websocket_session_lifecycle() {
         auth: oxidite_server::auth::UserStore::new(),
         shares: oxidite_server::share::ShareStore::new(),
         rate_limiter: oxidite_server::security::RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-test-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
     };
@@ -137,6 +138,7 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
         auth: oxidite_server::auth::UserStore::new(),
         shares: oxidite_server::share::ShareStore::new(),
         rate_limiter: oxidite_server::security::RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-test-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
     };

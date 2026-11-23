@@ -3,6 +3,7 @@
 #![allow(clippy::collapsible_if, clippy::useless_conversion)]
 
 pub mod auth;
+pub mod metrics;
 pub mod security;
 pub mod share;
 pub mod tls;
@@ -45,6 +46,7 @@ pub struct AppState {
     pub auth: UserStore,
     pub shares: ShareStore,
     pub rate_limiter: RateLimiter,
+    pub metrics: metrics::MetricsCollector,
     pub node_id: String,
     pub directory: std::sync::Arc<dyn oxidite_directory::SessionDirectory>,
 }
@@ -85,6 +87,8 @@ pub struct CreateShareResponse {
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .route("/ready", get(metrics::readiness_handler))
+        .route("/metrics", get(metrics::prometheus_metrics_handler))
         .route("/api/login", post(login_handler))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/:id/share", post(create_share_handler))

@@ -49,6 +49,7 @@ async fn test_websocket_origin_rejection() {
         auth: UserStore::new(),
         shares: oxidite_server::share::ShareStore::new(),
         rate_limiter: RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-security-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
     };
@@ -101,6 +102,7 @@ async fn test_per_user_ownership_enforcement() {
         auth: user_store,
         shares: oxidite_server::share::ShareStore::new(),
         rate_limiter: RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-security-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
     };

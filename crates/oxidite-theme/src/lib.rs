@@ -1081,7 +1081,7 @@ ansi = [
 
     #[test]
     fn dracula_toml_matches_dracula_preset() {
-        let toml_str = include_str!("../themes/dracula.toml");
+        let toml_str = include_str!("../../../themes/dracula.toml");
         let parsed = Theme::from_toml(toml_str).expect("dracula.toml should parse");
         let expected = Theme::dracula();
         assert_eq!(parsed.name, expected.name);
@@ -1094,7 +1094,7 @@ ansi = [
 
     #[test]
     fn solarized_dark_toml_matches_preset() {
-        let toml_str = include_str!("../themes/solarized-dark.toml");
+        let toml_str = include_str!("../../../themes/solarized-dark.toml");
         let parsed = Theme::from_toml(toml_str).expect("solarized-dark.toml should parse");
         let expected = Theme::solarized_dark();
         assert_eq!(parsed.name, expected.name);
@@ -1106,7 +1106,7 @@ ansi = [
 
     #[test]
     fn solarized_light_toml_matches_preset() {
-        let toml_str = include_str!("../themes/solarized-light.toml");
+        let toml_str = include_str!("../../../themes/solarized-light.toml");
         let parsed = Theme::from_toml(toml_str).expect("solarized-light.toml should parse");
         let expected = Theme::solarized_light();
         assert_eq!(parsed.name, expected.name);
@@ -1118,7 +1118,7 @@ ansi = [
 
     #[test]
     fn gruvbox_dark_toml_matches_preset() {
-        let toml_str = include_str!("../themes/gruvbox-dark.toml");
+        let toml_str = include_str!("../../../themes/gruvbox-dark.toml");
         let parsed = Theme::from_toml(toml_str).expect("gruvbox-dark.toml should parse");
         let expected = Theme::gruvbox_dark();
         assert_eq!(parsed.name, expected.name);
@@ -1130,7 +1130,7 @@ ansi = [
 
     #[test]
     fn nord_toml_matches_preset() {
-        let toml_str = include_str!("../themes/nord.toml");
+        let toml_str = include_str!("../../../themes/nord.toml");
         let parsed = Theme::from_toml(toml_str).expect("nord.toml should parse");
         let expected = Theme::nord();
         assert_eq!(parsed.name, expected.name);
@@ -1142,7 +1142,7 @@ ansi = [
 
     #[test]
     fn one_dark_toml_matches_preset() {
-        let toml_str = include_str!("../themes/one-dark.toml");
+        let toml_str = include_str!("../../../themes/one-dark.toml");
         let parsed = Theme::from_toml(toml_str).expect("one-dark.toml should parse");
         let expected = Theme::one_dark();
         assert_eq!(parsed.name, expected.name);
