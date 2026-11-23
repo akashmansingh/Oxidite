@@ -7,6 +7,10 @@ use oxidite_proto::{
 use oxidite_vt::terminal::Terminal;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+pub const HIGH_WATERMARK: usize = 1024 * 1024; // 1 MiB
+pub const LOW_WATERMARK: usize = 256 * 1024; // 256 KiB
+pub const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 pub struct SessionActor {
     pub id: SessionId,
     pub terminal: Terminal,
@@ -17,6 +21,10 @@ pub struct SessionActor {
     pub client_tx: broadcast::Sender<ServerMsg>,
     pub active_writer: Option<u64>,
     pub unacked_bytes: usize,
+    pub high_watermark: usize,
+    pub low_watermark: usize,
+    pub detached_at: Option<std::time::Instant>,
+    pub idle_timeout: std::time::Duration,
 }
 
 pub enum ActorCmd {
@@ -67,6 +75,10 @@ impl SessionActor {
             client_tx: client_tx.clone(),
             active_writer: None,
             unacked_bytes: 0,
+            high_watermark: HIGH_WATERMARK,
+            low_watermark: LOW_WATERMARK,
+            detached_at: None,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
         };
         (actor, client_tx)
     }
@@ -84,6 +96,7 @@ impl SessionActor {
                 Some(cmd) = self.receiver.recv() => {
                     match cmd {
                         ActorCmd::Attach { mode: _, last_offset, resp } => {
+                            self.detached_at = None;
                             let head = self.replay.head_offset();
                             let tail = self.replay.tail_offset();
                             let attach_res = if let Some(last) = last_offset {
@@ -125,12 +138,14 @@ impl SessionActor {
                             self.terminal.resize(size.cols.into(), size.rows.into());
                             let _ = self.backend.resize(size).await;
                         }
-                        ActorCmd::Ack { offset: _ } => {
-                            self.unacked_bytes = 0;
+                        ActorCmd::Ack { offset } => {
+                            let head = self.replay.head_offset();
+                            self.unacked_bytes = (head.saturating_sub(offset)) as usize;
                         }
                         ActorCmd::Detach => {
                             if self.client_tx.receiver_count() <= 1 {
                                 self.state = SessionState::Detached;
+                                self.detached_at = Some(std::time::Instant::now());
                                 let _ = self.client_tx.send(ServerMsg::State {
                                     session: self.id,
                                     state: self.state.clone(),
@@ -148,7 +163,7 @@ impl SessionActor {
                         }
                     }
                 }
-                Some(event) = backend_events.recv() => {
+                Some(event) = backend_events.recv(), if self.unacked_bytes < self.high_watermark => {
                     match event {
                         BackendEvent::Output(bytes) => {
                             let start_offset = self.replay.head_offset();
