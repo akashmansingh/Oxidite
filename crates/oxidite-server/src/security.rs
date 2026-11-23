@@ -19,6 +19,7 @@ pub struct SecurityConfig {
     pub max_sessions_per_user: usize,
     pub max_replay_buffer: usize,
     pub rate_limit_per_minute: u32,
+    pub bind_addr: Option<std::net::SocketAddr>,
 }
 
 impl Default for SecurityConfig {
@@ -33,11 +34,23 @@ impl Default for SecurityConfig {
             max_sessions_per_user: 10,
             max_replay_buffer: 8 * 1024 * 1024,
             rate_limit_per_minute: 120,
+            bind_addr: None,
         }
     }
 }
 
 impl SecurityConfig {
+    /// Returns whether LocalPty is allowed under this configuration and bind address.
+    #[must_use]
+    pub fn is_local_pty_allowed(&self) -> bool {
+        if self.allow_non_loopback_pty {
+            return true;
+        }
+        match self.bind_addr {
+            Some(addr) => addr.ip().is_loopback(),
+            None => true,
+        }
+    }
     #[must_use]
     pub fn is_origin_allowed(&self, origin: Option<&str>) -> bool {
         match origin {

@@ -28,12 +28,20 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| oxidite_server::devices::DeviceStore::default());
     devices.register_bootstrap_grant(&token, "admin");
 
+    let port = std::env::var("OXIDITE_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3000);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut security = SecurityConfig::default();
+    security.bind_addr = Some(addr);
+
     let state = AppState {
         manager: SessionManager::new(),
         token,
         static_dir,
         known_hosts: oxidite_ssh::KnownHostsStore::new(),
-        security: SecurityConfig::default(),
+        security,
         auth: UserStore::new(),
         shares: ShareStore::new(),
         rate_limiter: RateLimiter::new(),
@@ -44,12 +52,7 @@ async fn main() -> Result<()> {
         device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
     };
 
-    let port = std::env::var("OXIDITE_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(3000);
     let app = create_app(state);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     tracing::info!("Oxidite session gateway listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

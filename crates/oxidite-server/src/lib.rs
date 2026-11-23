@@ -102,6 +102,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/devices/grant", post(issue_device_grant_handler))
         .route("/api/devices", get(list_devices_handler))
         .route("/api/devices/:id", delete(revoke_device_handler))
+        .route("/api/runtime/shells", get(runtime_shells_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(middleware::from_fn_with_state(
@@ -403,6 +404,44 @@ async fn revoke_device_handler(
         Err(devices::DeviceAuthError::Unauthorized) => StatusCode::UNAUTHORIZED,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+async fn runtime_shells_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<oxidite_proto::ShellCapability>>, StatusCode> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let token = match auth_header.and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(t) => t.trim(),
+        None => return Err(StatusCode::UNAUTHORIZED),
+    };
+
+    let _user_id = if let Ok(principal) = state.devices.authenticate(token).await {
+        principal.user_id
+    } else if let Some(uid) = state.auth.validate_token(token) {
+        uid
+    } else if token == state.token && !token.is_empty() {
+        "admin".to_string()
+    } else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+
+    let pwsh_available = oxidite_pty::is_powershell_available();
+    let capabilities = vec![
+        oxidite_proto::ShellCapability {
+            id: "default".to_string(),
+            available: true,
+        },
+        oxidite_proto::ShellCapability {
+            id: "SystemPowerShell".to_string(),
+            available: pwsh_available,
+        },
+    ];
+
+    Ok(Json(capabilities))
 }
 
 async fn list_sessions(
@@ -728,6 +767,34 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
                 match backend {
                     oxidite_proto::BackendSpec::LocalPty { shell, cwd } => {
+                        if !state.security.is_local_pty_allowed() {
+                            let _ = server_tx
+                                .send(ServerMsg::Error {
+                                    code: ErrorCode::Unauthorized,
+                                    message: "Local PTY is disabled on non-loopback binds".into(),
+                                })
+                                .await;
+                            continue;
+                        }
+
+                        if let Err(e) = oxidite_pty::resolve_safe_shell(shell.as_deref()) {
+                            let code = match e {
+                                oxidite_pty::ShellError::ArbitraryPathRejected(_) => {
+                                    ErrorCode::InvalidMessage
+                                }
+                                oxidite_pty::ShellError::PowerShellUnavailable => {
+                                    ErrorCode::BackendError
+                                }
+                            };
+                            let _ = server_tx
+                                .send(ServerMsg::Error {
+                                    code,
+                                    message: e.to_string(),
+                                })
+                                .await;
+                            continue;
+                        }
+
                         match state
                             .manager
                             .create(oxidite_proto::BackendSpec::LocalPty { shell, cwd }, size)

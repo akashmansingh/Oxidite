@@ -92,11 +92,11 @@
 
 **Interfaces:** `ShellCapability { id, available }`; authenticated `GET /api/runtime/shells`; server-only mapping of `SystemPowerShell`.
 
-- [ ] Write RED tests for present/absent PowerShell and rejection of arbitrary browser paths.
-- [ ] Run focused PTY/server tests; confirm RED.
-- [ ] Implement capability endpoint and UI while retaining LocalPty policy.
-- [ ] Re-run focused tests and web checks; confirm GREEN.
-- [ ] Commit `feat(pty): expose safe system powershell selection`.
+- [x] Write RED tests for present/absent PowerShell and rejection of arbitrary browser paths.
+- [x] Run focused PTY/server tests; confirm RED.
+- [x] Implement capability endpoint and UI while retaining LocalPty policy.
+- [x] Re-run focused tests and web checks; confirm GREEN.
+- [x] Commit `feat(pty): expose safe system powershell selection`.
 
 ### Task 7: Capture real-traffic benchmark evidence
 

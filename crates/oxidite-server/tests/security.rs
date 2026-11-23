@@ -133,7 +133,7 @@ async fn test_per_user_ownership_enforcement() {
 
     let create = pack_client_msg(&ClientMsg::Create {
         backend: BackendSpec::LocalPty {
-            shell: Some("cmd.exe".into()),
+            shell: None,
             cwd: None,
         },
         size: TermSize { rows: 24, cols: 80 },

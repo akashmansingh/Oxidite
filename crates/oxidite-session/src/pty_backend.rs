@@ -3,7 +3,7 @@
 use super::{Backend, BackendEvent, Result, SessionError};
 use async_trait::async_trait;
 use oxidite_proto::TermSize;
-use oxidite_pty::{PtySize, PtyWriter, ShellCommand, spawn_in_directory};
+use oxidite_pty::{PtySize, PtyWriter, spawn_in_directory};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -14,11 +14,8 @@ pub struct LocalPtyBackend {
 
 impl LocalPtyBackend {
     pub fn spawn(shell: Option<String>, cwd: Option<String>, size: TermSize) -> Result<Self> {
-        let cmd = if let Some(prog) = shell {
-            ShellCommand::new(prog)
-        } else {
-            ShellCommand::default_shell()
-        };
+        let cmd = oxidite_pty::resolve_safe_shell(shell.as_deref())
+            .map_err(|e| SessionError::Backend(e.to_string()))?;
 
         let pty_size = PtySize {
             rows: size.rows,

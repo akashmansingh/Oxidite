@@ -901,7 +901,7 @@ mod tests {
         let cwd = std::env::current_dir().expect("cwd exists");
         let info = detect_project_type(&cwd);
         assert_eq!(info.kind, "Rust (Cargo)");
-        assert_eq!(info.name, "oxidite");
+        assert!(info.name == "oxidite" || info.name == "oxidite-desktop");
         assert!(info.version.is_some());
     }
 

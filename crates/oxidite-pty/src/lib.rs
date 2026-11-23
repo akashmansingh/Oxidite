@@ -66,6 +66,19 @@ fn detect_default_shell() -> (String, Vec<String>) {
 }
 
 #[cfg(not(windows))]
+fn which_in_path(binary: &str) -> bool {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let full = dir.join(binary);
+            if full.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
 fn detect_default_shell() -> (String, Vec<String>) {
     if let Ok(shell) = std::env::var("SHELL")
         && !shell.is_empty()
@@ -73,6 +86,60 @@ fn detect_default_shell() -> (String, Vec<String>) {
         return (shell, Vec::new());
     }
     ("/bin/sh".to_string(), Vec::new())
+}
+
+/// Detects if PowerShell (`pwsh.exe` or `powershell.exe` on Windows) is available.
+#[cfg(windows)]
+#[must_use]
+pub fn detect_powershell() -> Option<ShellCommand> {
+    if which_in_path("pwsh.exe") {
+        Some(ShellCommand::new("pwsh.exe"))
+    } else if which_in_path("powershell.exe") {
+        Some(ShellCommand::new("powershell.exe"))
+    } else {
+        None
+    }
+}
+
+/// Detects if PowerShell (`pwsh`) is available on Unix.
+#[cfg(not(windows))]
+#[must_use]
+pub fn detect_powershell() -> Option<ShellCommand> {
+    if which_in_path("pwsh") {
+        Some(ShellCommand::new("pwsh"))
+    } else {
+        None
+    }
+}
+
+/// Returns whether PowerShell is available on this host.
+#[must_use]
+pub fn is_powershell_available() -> bool {
+    detect_powershell().is_some()
+}
+
+/// Errors when resolving safe shells.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ShellError {
+    /// System PowerShell was requested but is not available on this host.
+    #[error("System PowerShell is not available on this host")]
+    PowerShellUnavailable,
+    /// An arbitrary executable path was provided by the client, which is rejected.
+    #[error("Arbitrary shell paths are rejected: {0}")]
+    ArbitraryPathRejected(String),
+}
+
+/// Resolves a requested shell identifier to a safe, server-controlled `ShellCommand`.
+///
+/// Under no circumstances is a browser allowed to pass an arbitrary executable path.
+pub fn resolve_safe_shell(shell_id: Option<&str>) -> Result<ShellCommand, ShellError> {
+    match shell_id {
+        None | Some("" | "default") => Ok(ShellCommand::default_shell()),
+        Some("SystemPowerShell" | "powershell") => {
+            detect_powershell().ok_or(ShellError::PowerShellUnavailable)
+        }
+        Some(other) => Err(ShellError::ArbitraryPathRejected(other.to_string())),
+    }
 }
 
 impl ShellCommand {
@@ -232,7 +299,6 @@ impl PtyReader {
     }
 
     /// Creates a `PtyReader` wrapping a channel receiver for testing.
-    #[cfg(test)]
     #[must_use]
     pub fn from_receiver(receiver: Receiver<Vec<u8>>) -> Self {
         Self {
@@ -426,5 +492,47 @@ mod tests {
         assert_eq!(native.cols, 120);
         assert_eq!(native.pixel_width, 960);
         assert_eq!(native.pixel_height, 800);
+    }
+
+    #[test]
+    fn test_resolve_safe_shell_default() {
+        let shell = resolve_safe_shell(None).unwrap();
+        assert_eq!(shell, ShellCommand::default_shell());
+
+        let shell = resolve_safe_shell(Some("default")).unwrap();
+        assert_eq!(shell, ShellCommand::default_shell());
+    }
+
+    #[test]
+    fn test_resolve_safe_shell_arbitrary_rejection() {
+        assert!(matches!(
+            resolve_safe_shell(Some("/bin/bash")),
+            Err(ShellError::ArbitraryPathRejected(_))
+        ));
+        assert!(matches!(
+            resolve_safe_shell(Some("C:\\evil.exe")),
+            Err(ShellError::ArbitraryPathRejected(_))
+        ));
+        assert!(matches!(
+            resolve_safe_shell(Some("cmd.exe")),
+            Err(ShellError::ArbitraryPathRejected(_))
+        ));
+        assert!(matches!(
+            resolve_safe_shell(Some("../pwsh")),
+            Err(ShellError::ArbitraryPathRejected(_))
+        ));
+    }
+
+    #[test]
+    fn test_resolve_safe_shell_powershell_selection() {
+        let available = is_powershell_available();
+        let res = resolve_safe_shell(Some("SystemPowerShell"));
+        if available {
+            assert!(res.is_ok());
+            let cmd = res.unwrap();
+            assert!(cmd.program.contains("pwsh") || cmd.program.contains("powershell"));
+        } else {
+            assert_eq!(res, Err(ShellError::PowerShellUnavailable));
+        }
     }
 }

@@ -73,6 +73,7 @@
   <form method="dialog">
     <h2>New session</h2>
     <label class="pick"><input type="radio" name="kind" value="local" id="k-local" checked> Shell on the gateway</label>
+    <label class="pick" id="lbl-powershell" hidden><input type="radio" name="kind" value="powershell" id="k-powershell"> System PowerShell</label>
     <label class="pick"><input type="radio" name="kind" value="ssh" id="k-ssh"> Remote host over SSH</label>
     <fieldset id="ssh">
       <label>Host <input name="host" autocomplete="off"></label>

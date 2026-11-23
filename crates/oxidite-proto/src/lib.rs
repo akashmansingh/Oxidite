@@ -48,6 +48,12 @@ pub enum AuthSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellCapability {
+    pub id: String,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendSpec {
     LocalPty {
         shell: Option<String>,

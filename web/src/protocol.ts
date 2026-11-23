@@ -5,6 +5,10 @@ import { encode, decode } from "@msgpack/msgpack";
 
 export const PROTOCOL_VERSION = 1;
 export type TermSize = { rows: number; cols: number };
+export interface ShellCapability {
+  id: string;
+  available: boolean;
+}
 export type BackendSpec =
   | { LocalPty: { shell: string | null; cwd: string | null } }
   | { Ssh: { host: string; port: number; user: string; auth: { Password: string }; multiplexer: "None" | "Tmux" } };

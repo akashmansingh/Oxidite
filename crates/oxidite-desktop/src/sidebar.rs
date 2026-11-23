@@ -423,16 +423,23 @@ impl Default for SidebarState {
 /// Quickly detects the current git branch by inspecting `.git/HEAD` without blocking or spawning processes.
 #[must_use]
 pub fn detect_git_branch(cwd: &Path) -> Option<String> {
-    let head_path = cwd.join(".git").join("HEAD");
-    let content = std::fs::read_to_string(head_path).ok()?;
-    let trimmed = content.trim();
-    if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
-        Some(branch.to_string())
-    } else if trimmed.len() >= 7 {
-        Some(trimmed[..7].to_string())
-    } else {
-        None
+    let mut cur = Some(cwd);
+    while let Some(dir) = cur {
+        let head_path = dir.join(".git").join("HEAD");
+        if head_path.is_file() {
+            let content = std::fs::read_to_string(head_path).ok()?;
+            let trimmed = content.trim();
+            if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
+                return Some(branch.to_string());
+            } else if trimmed.len() >= 7 {
+                return Some(trimmed[..7].to_string());
+            } else {
+                return None;
+            }
+        }
+        cur = dir.parent();
     }
+    None
 }
 
 /// Builds the navigation surface, active-session treatment, and subtle dividers.

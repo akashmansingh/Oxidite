@@ -1,7 +1,7 @@
 import "./style.css";
 import { makeTerminal } from "./terminal";
 import { Connection, type Handlers } from "./connection";
-import { stateName, type BackendSpec, type Msg, type SessionState } from "./protocol";
+import { stateName, type BackendSpec, type Msg, type SessionState, type ShellCapability } from "./protocol";
 import { DeviceVault } from "./device-vault";
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T => document.querySelector<T>(s) as T;
@@ -102,6 +102,17 @@ async function refresh(): Promise<void> {
       return b;
     }));
     say("");
+    try {
+      const shellsRes = await fetch("/api/runtime/shells", { headers: { Authorization: `Bearer ${token}` } });
+      if (shellsRes.ok) {
+        const caps = (await shellsRes.json()) as ShellCapability[];
+        const hasPwsh = caps.some((c) => c.id === "SystemPowerShell" && c.available);
+        const pwshLabel = document.querySelector<HTMLElement>("#lbl-powershell");
+        if (pwshLabel) pwshLabel.hidden = !hasPwsh;
+      }
+    } catch {
+      // Non-fatal probe failure
+    }
   } catch { say("Could not load sessions. Check the token and that the gateway is running."); }
 }
 
@@ -119,6 +130,8 @@ $<HTMLDialogElement>("#newdlg").onclose = (e) => {
   if (str("kind") === "ssh") {
     const spec: BackendSpec = { Ssh: { host: str("host"), port: Number(str("port")) || 22, user: str("user"), auth: { Password: str("pw") }, multiplexer: f.get("tmux") ? "Tmux" : "None" } };
     begin({ spec }, str("host"));
+  } else if (str("kind") === "powershell") {
+    begin({ spec: { LocalPty: { shell: "SystemPowerShell", cwd: null } } }, "powershell");
   } else begin({ spec: { LocalPty: { shell: null, cwd: null } } }, "local shell");
 };
 
