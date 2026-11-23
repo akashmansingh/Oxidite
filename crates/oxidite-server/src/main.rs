@@ -37,8 +37,12 @@ async fn main() -> Result<()> {
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
     };
 
+    let port = std::env::var("OXIDITE_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3000);
     let app = create_app(state);
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     tracing::info!("Oxidite session gateway listening on http://{addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
