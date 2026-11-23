@@ -32,11 +32,11 @@
 
 **Interfaces:** `RouteClass`, `classify_path(&Path) -> RouteClass`, and `cache_control(RouteClass) -> HeaderValue`; `static_handler` classifies the resolved file before opening it.
 
-- [ ] Write tests for fingerprinted static immutable caching, HTML no-cache, API/metrics no-store, and traversal rejection.
-- [ ] Run `cargo test -p oxidite-server --test routing`; confirm RED.
-- [ ] Implement route classification and headers with resolved paths only.
-- [ ] Re-run focused test; confirm GREEN.
-- [ ] Commit `feat(server): classify routes and apply safe cache policy`.
+- [x] Write tests for fingerprinted static immutable caching, HTML no-cache, API/metrics no-store, and traversal rejection.
+- [x] Run `cargo test -p oxidite-server --test routing`; confirm RED.
+- [x] Implement route classification and headers with resolved paths only.
+- [x] Re-run focused test; confirm GREEN.
+- [x] Commit `feat(server): classify routes and apply safe cache policy`.
 
 ### Task 2: Record redacted route and WebSocket measurements
 
@@ -44,11 +44,11 @@
 
 **Interfaces:** `MetricsCollector::observe_http(RouteClass, StatusCode, Duration, u64)` and `observe_websocket_handshake(Duration)`.
 
-- [ ] Write metric tests proving route-class counters contain no identifiers, paths, or body values.
-- [ ] Run `cargo test -p oxidite-server --test observability`; confirm RED.
-- [ ] Add bounded counters/timers at HTTP/WS boundaries only.
-- [ ] Re-run focused test; confirm GREEN.
-- [ ] Commit `feat(obs): record redacted route and websocket measurements`.
+- [x] Write metric tests proving route-class counters contain no identifiers, paths, or body values.
+- [x] Run `cargo test -p oxidite-server --test observability`; confirm RED.
+- [x] Add bounded counters/timers at HTTP/WS boundaries only.
+- [x] Re-run focused test; confirm GREEN.
+- [x] Commit `feat(obs): record redacted route and websocket measurements`.
 
 ### Task 3: Add durable device enrollment and authentication
 
