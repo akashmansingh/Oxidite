@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
         node_id: "node-gateway-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
         devices,
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
     };
 
     let port = std::env::var("OXIDITE_PORT")

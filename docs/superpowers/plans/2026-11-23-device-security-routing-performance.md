@@ -80,11 +80,11 @@
 
 **Interfaces:** `DeviceConnectionRegistry::{register,unregister,close_local,requires_revalidation}`.
 
-- [ ] Write RED integration tests for immediate local close and remote-node revalidation by 30 seconds.
-- [ ] Run `cargo test -p oxidite-server --test device_revocation`; confirm RED.
-- [ ] Implement bounded registry, close signals, and cancellation-safe 30-second checks.
-- [ ] Re-run focused test; document the proven guarantee.
-- [ ] Commit `feat(server): enforce device revocation on active connections`.
+- [x] Write RED integration tests for immediate local close and remote-node revalidation by 30 seconds.
+- [x] Run `cargo test -p oxidite-server --test device_revocation`; confirm RED.
+- [x] Implement bounded registry, close signals, and cancellation-safe 30-second checks.
+- [x] Re-run focused test; document the proven guarantee.
+- [x] Commit `feat(server): enforce device revocation on active connections`.
 
 ### Task 6: Expose safe system PowerShell choice
 

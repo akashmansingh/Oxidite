@@ -27,6 +27,7 @@ async fn test_websocket_session_lifecycle() {
         node_id: "node-test-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
         devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
     };
 
     let app = create_app(state);
@@ -143,6 +144,7 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
         node_id: "node-test-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
         devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
     };
 
     let app = create_app(state);

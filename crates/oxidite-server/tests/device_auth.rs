@@ -193,6 +193,7 @@ async fn test_device_api_endpoints_and_websocket_auth() {
         node_id: "node-dev-auth".into(),
         directory: Arc::new(InMemoryDirectory::new()),
         devices: store.clone(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
     };
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

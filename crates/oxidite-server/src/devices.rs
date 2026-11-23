@@ -345,6 +345,26 @@ impl DeviceStore {
         Ok(())
     }
 
+    /// Checks whether a device is marked as revoked or not found in the durable database.
+    pub async fn is_revoked(&self, device_id: Uuid) -> Result<bool, DeviceAuthError> {
+        self.ensure_migrated().await?;
+        let row = sqlx::query("SELECT revoked FROM devices WHERE device_id = ?")
+            .bind(device_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| DeviceAuthError::Storage(e.to_string()))?;
+
+        match row {
+            Some(r) => {
+                let revoked: i64 = r
+                    .try_get("revoked")
+                    .map_err(|e| DeviceAuthError::Storage(e.to_string()))?;
+                Ok(revoked != 0)
+            }
+            None => Ok(true), // Missing devices are treated as revoked
+        }
+    }
+
     /// Lists all active (non-revoked) devices for a user.
     pub async fn list_for_user(&self, user_id: &str) -> Result<Vec<DeviceInfo>, DeviceAuthError> {
         self.ensure_migrated().await?;

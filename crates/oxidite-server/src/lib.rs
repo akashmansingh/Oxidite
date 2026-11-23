@@ -3,6 +3,7 @@
 #![allow(clippy::collapsible_if, clippy::useless_conversion)]
 
 pub mod auth;
+pub mod device_connections;
 pub mod devices;
 pub mod metrics;
 pub mod routing;
@@ -52,6 +53,7 @@ pub struct AppState {
     pub node_id: String,
     pub directory: std::sync::Arc<dyn oxidite_directory::SessionDirectory>,
     pub devices: devices::DeviceStore,
+    pub device_connections: device_connections::DeviceConnectionRegistry,
 }
 
 #[derive(Serialize)]
@@ -393,7 +395,10 @@ async fn revoke_device_handler(
     };
 
     match state.devices.revoke(&user_id, device_id).await {
-        Ok(()) => StatusCode::NO_CONTENT,
+        Ok(()) => {
+            state.device_connections.close_local(device_id);
+            StatusCode::NO_CONTENT
+        }
         Err(devices::DeviceAuthError::NotFound) => StatusCode::NOT_FOUND,
         Err(devices::DeviceAuthError::Unauthorized) => StatusCode::UNAUTHORIZED,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -520,7 +525,7 @@ async fn ws_handler(
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
     let ws_start = std::time::Instant::now();
     // Handshake: Expect ClientMsg::Hello first
-    let (user_id, shared_access) = match socket.recv().await {
+    let (user_id, shared_access, device_id) = match socket.recv().await {
         Some(Ok(Message::Binary(bin))) => {
             match unpack_client_msg(&bin) {
                 Ok(ClientMsg::Hello {
@@ -547,12 +552,12 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             device_id: &dev_id_str,
                             user: &principal.user_id,
                         });
-                        (principal.user_id, None)
+                        (principal.user_id, None, Some(principal.device_id))
                     } else if token == state.token && !token.is_empty() {
-                        ("admin".to_string(), None)
+                        ("admin".to_string(), None, None)
                     } else if token.starts_with("share_") {
                         if let Some((sid, mode)) = state.shares.validate_share(&token) {
-                            (format!("viewer_{}", &token[6..14]), Some((sid, mode)))
+                            (format!("viewer_{}", &token[6..14]), Some((sid, mode)), None)
                         } else {
                             let err = pack_server_msg(&ServerMsg::Error {
                                 code: ErrorCode::Unauthorized,
@@ -564,7 +569,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             return;
                         }
                     } else if let Some(uid) = state.auth.validate_token(&token) {
-                        (uid, None)
+                        (uid, None, None)
                     } else {
                         let err = pack_server_msg(&ServerMsg::Error {
                             code: ErrorCode::Unauthorized,
@@ -604,6 +609,17 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
     // Client connection state
     let client_id = rand::random::<u64>();
+    let (close_tx, mut close_rx) = mpsc::channel::<()>(1);
+    if let Some(dev_id) = device_id {
+        if !state
+            .device_connections
+            .register(dev_id, client_id, close_tx)
+        {
+            let _ = ws_sink.close().await;
+            return;
+        }
+    }
+
     let mut current_session: Option<SessionId> = None;
     let mut current_tx: Option<mpsc::Sender<ActorCmd>> = None;
     let mut pending_ssh: Option<(oxidite_proto::BackendSpec, oxidite_proto::TermSize, String)> =
@@ -618,9 +634,41 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 break;
             }
         }
+        let _ = ws_sink.close().await;
     });
 
-    while let Some(Ok(msg)) = ws_stream.next().await {
+    let mut revalidate_interval = tokio::time::interval(Duration::from_secs(5));
+    revalidate_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        let msg = tokio::select! {
+            _ = close_rx.recv() => {
+                break;
+            }
+            _ = revalidate_interval.tick() => {
+                if let Some(dev_id) = device_id {
+                    if state.device_connections.requires_revalidation(client_id, Duration::from_secs(30)) {
+                        match state.devices.is_revoked(dev_id).await {
+                            Ok(true) | Err(_) => {
+                                state.device_connections.close_local(dev_id);
+                                break;
+                            }
+                            Ok(false) => {
+                                state.device_connections.mark_validated(client_id);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            res = ws_stream.next() => {
+                match res {
+                    Some(Ok(m)) => m,
+                    _ => break,
+                }
+            }
+        };
+
         let bytes = match msg {
             Message::Binary(b) => b,
             Message::Close(_) => break,
@@ -1018,6 +1066,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         }
     }
 
+    state.device_connections.unregister(client_id);
     if let Some(tx) = current_tx {
         let _ = tx
             .send(ActorCmd::Detach {
