@@ -7,6 +7,7 @@ use oxidite_proto::SessionId;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub type NodeId = String;
@@ -31,8 +32,8 @@ pub enum DirectoryError {
     AlreadyClaimed(SessionId),
     #[error("Lease expired or not found: {0}")]
     LeaseNotFound(SessionId),
-    #[error("Fencing token mismatch")]
-    FencingMismatch,
+    #[error("Fencing token mismatch: expected {expected}, got {got}")]
+    FencingMismatch { expected: u64, got: u64 },
     #[error("Storage error: {0}")]
     Storage(String),
 }
@@ -93,7 +94,10 @@ impl SessionDirectory for InMemoryDirectory {
             .ok_or(DirectoryError::LeaseNotFound(lease.session))?;
 
         if existing.fencing_token != lease.fencing_token {
-            return Err(DirectoryError::FencingMismatch);
+            return Err(DirectoryError::FencingMismatch {
+                expected: existing.fencing_token,
+                got: lease.fencing_token,
+            });
         }
 
         existing.expires_at = Instant::now() + ttl;
@@ -137,6 +141,78 @@ impl SessionDirectory for InMemoryDirectory {
     }
 }
 
+/// A wrapper around `InMemoryDirectory` that can simulate a network partition for chaos testing.
+#[derive(Clone)]
+pub struct PartitionableDirectory {
+    inner: InMemoryDirectory,
+    partitioned: Arc<AtomicBool>,
+}
+
+impl PartitionableDirectory {
+    pub fn new(inner: InMemoryDirectory) -> Self {
+        Self {
+            inner,
+            partitioned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_partitioned(&self, partitioned: bool) {
+        self.partitioned.store(partitioned, Ordering::SeqCst);
+    }
+
+    pub fn is_partitioned(&self) -> bool {
+        self.partitioned.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SessionDirectory for PartitionableDirectory {
+    async fn claim(&self, session: SessionId, node: NodeId, ttl: Duration) -> Result<Lease> {
+        if self.is_partitioned() {
+            return Err(DirectoryError::Storage(
+                "Network partition: unreachable".into(),
+            ));
+        }
+        self.inner.claim(session, node, ttl).await
+    }
+
+    async fn renew(&self, lease: &Lease, ttl: Duration) -> Result<Lease> {
+        if self.is_partitioned() {
+            return Err(DirectoryError::Storage(
+                "Network partition: unreachable".into(),
+            ));
+        }
+        self.inner.renew(lease, ttl).await
+    }
+
+    async fn release(&self, lease: Lease) -> Result<()> {
+        if self.is_partitioned() {
+            return Err(DirectoryError::Storage(
+                "Network partition: unreachable".into(),
+            ));
+        }
+        self.inner.release(lease).await
+    }
+
+    async fn lookup(&self, session: SessionId) -> Result<Option<Owner>> {
+        if self.is_partitioned() {
+            return Err(DirectoryError::Storage(
+                "Network partition: unreachable".into(),
+            ));
+        }
+        self.inner.lookup(session).await
+    }
+
+    async fn list_orphans(&self) -> Result<Vec<SessionId>> {
+        if self.is_partitioned() {
+            return Err(DirectoryError::Storage(
+                "Network partition: unreachable".into(),
+            ));
+        }
+        self.inner.list_orphans().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +237,35 @@ mod tests {
 
         dir.release(renewed).await.unwrap();
         assert!(dir.lookup(sid).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_partitionable_directory() {
+        let inner = InMemoryDirectory::new();
+        let part_dir = PartitionableDirectory::new(inner);
+        let sid = SessionId::new_v4();
+
+        let lease = part_dir
+            .claim(sid, "node-1".into(), Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        // Simulate partition
+        part_dir.set_partitioned(true);
+        assert!(
+            part_dir
+                .renew(&lease, Duration::from_secs(60))
+                .await
+                .is_err()
+        );
+
+        // Heal partition
+        part_dir.set_partitioned(false);
+        assert!(
+            part_dir
+                .renew(&lease, Duration::from_secs(60))
+                .await
+                .is_ok()
+        );
     }
 }
