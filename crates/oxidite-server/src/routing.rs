@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 /// A cache policy class independent of user or session identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RouteClass {
     /// A content-hashed static asset that may be cached indefinitely.
     FingerprintedAsset,
@@ -15,6 +15,20 @@ pub enum RouteClass {
     Metrics,
     /// Static content without a content hash.
     Static,
+}
+
+impl RouteClass {
+    /// Returns the low-cardinality metric label for this route class.
+    #[must_use]
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            RouteClass::FingerprintedAsset => "fingerprinted_asset",
+            RouteClass::Html => "html",
+            RouteClass::Api => "api",
+            RouteClass::Metrics => "metrics",
+            RouteClass::Static => "static",
+        }
+    }
 }
 
 /// Classifies a request path without retaining the path as metric data.
@@ -47,7 +61,10 @@ pub const fn cache_control(class: RouteClass) -> &'static str {
 #[must_use]
 pub fn resolve_static_path(static_dir: &Path, request_path: &str) -> Option<PathBuf> {
     let relative = Path::new(request_path);
-    if relative.components().all(|component| matches!(component, Component::Normal(_))) {
+    if relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
         Some(static_dir.join(relative))
     } else {
         None

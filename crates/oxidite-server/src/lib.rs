@@ -12,11 +12,11 @@ pub mod tls;
 use axum::{
     Json, Router,
     extract::{
-        Path, State,
+        Path, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
-    middleware,
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -96,9 +96,36 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/shares/:token", delete(revoke_share_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            route_metrics_middleware,
+        ))
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn route_metrics_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let start = std::time::Instant::now();
+    let path = request.uri().path().to_string();
+    let route_class = routing::classify_request_path(&path);
+    let response = next.run(request).await;
+    let duration = start.elapsed();
+    let status = response.status();
+    let bytes = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    state
+        .metrics
+        .observe_http(route_class, status, duration, bytes);
+    response
 }
 
 async fn health_check() -> &'static str {
@@ -283,7 +310,10 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
                 return (
                     [
                         (header::CONTENT_TYPE, mime.as_ref()),
-                        (header::CACHE_CONTROL, routing::cache_control(routing::classify_request_path(uri.path()))),
+                        (
+                            header::CACHE_CONTROL,
+                            routing::cache_control(routing::classify_request_path(uri.path())),
+                        ),
                     ],
                     content,
                 )
@@ -297,7 +327,10 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
     if index_path.exists() {
         if let Ok(content) = tokio::fs::read(&index_path).await {
             return (
-                [(header::CACHE_CONTROL, routing::cache_control(routing::RouteClass::Html))],
+                [(
+                    header::CACHE_CONTROL,
+                    routing::cache_control(routing::RouteClass::Html),
+                )],
                 Html(content),
             )
                 .into_response();
@@ -325,6 +358,7 @@ async fn ws_handler(
 }
 
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
+    let ws_start = std::time::Instant::now();
     // Handshake: Expect ClientMsg::Hello first
     let (user_id, shared_access) = match socket.recv().await {
         Some(Ok(Message::Binary(bin))) => {
@@ -399,6 +433,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
     if socket.send(Message::Binary(welcome.into())).await.is_err() {
         return;
     }
+    state
+        .metrics
+        .observe_websocket_handshake(ws_start.elapsed());
 
     let (mut ws_sink, mut ws_stream) = socket.split();
 

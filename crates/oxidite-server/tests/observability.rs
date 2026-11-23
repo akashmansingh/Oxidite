@@ -82,3 +82,69 @@ async fn test_prometheus_metrics_and_readiness_endpoints() {
     assert_eq!(status, 503);
     assert!(body.contains("NOT_READY"));
 }
+
+#[tokio::test]
+async fn test_route_class_metrics_contain_no_raw_identifiers() {
+    use axum::http::StatusCode;
+    use oxidite_server::routing::RouteClass;
+    use std::time::Duration;
+
+    let metrics = MetricsCollector::new();
+
+    // Observe various HTTP routes and WebSocket handshake
+    metrics.observe_http(
+        RouteClass::Api,
+        StatusCode::OK,
+        Duration::from_millis(15),
+        256,
+    );
+    metrics.observe_http(
+        RouteClass::FingerprintedAsset,
+        StatusCode::OK,
+        Duration::from_millis(5),
+        1024,
+    );
+    metrics.observe_http(
+        RouteClass::Html,
+        StatusCode::OK,
+        Duration::from_millis(8),
+        512,
+    );
+    metrics.observe_http(
+        RouteClass::Static,
+        StatusCode::NOT_FOUND,
+        Duration::from_millis(2),
+        0,
+    );
+    metrics.observe_websocket_handshake(Duration::from_millis(12));
+
+    let rendered = metrics.render_prometheus(0);
+
+    // Verify low-cardinality route-class metrics exist
+    assert!(rendered.contains("oxidite_http_requests_total{route_class=\"api\",status=\"200\"} 1"));
+    assert!(rendered.contains(
+        "oxidite_http_requests_total{route_class=\"fingerprinted_asset\",status=\"200\"} 1"
+    ));
+    assert!(
+        rendered.contains("oxidite_http_requests_total{route_class=\"html\",status=\"200\"} 1")
+    );
+    assert!(
+        rendered.contains("oxidite_http_requests_total{route_class=\"static\",status=\"404\"} 1")
+    );
+    assert!(rendered.contains("oxidite_http_response_bytes_total{route_class=\"api\"} 256"));
+    assert!(
+        rendered.contains(
+            "oxidite_http_response_bytes_total{route_class=\"fingerprinted_asset\"} 1024"
+        )
+    );
+    assert!(rendered.contains("oxidite_websocket_handshakes_total 1"));
+    assert!(rendered.contains("oxidite_websocket_handshake_duration_seconds_total"));
+
+    // Verify REDACTION: No paths, query strings, user IDs, or tokens in metrics output
+    assert!(!rendered.contains("/api/"));
+    assert!(!rendered.contains("/assets/"));
+    assert!(!rendered.contains("token="));
+    assert!(!rendered.contains("user_id="));
+    assert!(!rendered.contains("session_id="));
+    assert!(!rendered.contains("device_id="));
+}
