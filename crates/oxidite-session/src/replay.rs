@@ -47,3 +47,36 @@ impl ReplayBuffer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replay_buffer_capacity_and_offsets() {
+        let mut buf = ReplayBuffer::new(10);
+        assert_eq!(buf.head_offset(), 0);
+        assert_eq!(buf.tail_offset(), 0);
+
+        buf.append(b"hello");
+        assert_eq!(buf.head_offset(), 5);
+        assert_eq!(buf.tail_offset(), 0);
+        assert_eq!(buf.get_from(0).unwrap(), b"hello");
+        assert_eq!(buf.get_from(2).unwrap(), b"llo");
+
+        // Exceed capacity
+        buf.append(b"world123");
+        // total bytes = 13, capacity = 10 -> excess = 3 -> tail = 3, head = 13
+        assert_eq!(buf.head_offset(), 13);
+        assert_eq!(buf.tail_offset(), 3);
+
+        // Before tail returns None
+        assert!(buf.get_from(2).is_none());
+        // At tail returns available slice
+        assert_eq!(buf.get_from(3).unwrap(), b"loworld123");
+        // At head returns empty
+        assert_eq!(buf.get_from(13).unwrap(), b"");
+        // Beyond head returns None
+        assert!(buf.get_from(14).is_none());
+    }
+}
