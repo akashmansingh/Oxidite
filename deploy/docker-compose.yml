@@ -1,0 +1,61 @@
+services:
+  gateway-1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: oxidite-gateway-1
+    environment:
+      - OXIDITE_NODE_ID=gateway-node-1
+      - OXIDITE_TOKEN=dev-secret-token-12345
+      - OXIDITE_PORT=3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+      - test-sshd
+    restart: unless-stopped
+
+  gateway-2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: oxidite-gateway-2
+    environment:
+      - OXIDITE_NODE_ID=gateway-node-2
+      - OXIDITE_TOKEN=dev-secret-token-12345
+      - OXIDITE_PORT=3000
+    ports:
+      - "3001:3000"
+    depends_on:
+      - postgres
+      - test-sshd
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: oxidite-postgres
+    environment:
+      - POSTGRES_USER=oxidite
+      - POSTGRES_PASSWORD=oxidite_secret
+      - POSTGRES_DB=oxidite_directory
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  test-sshd:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: oxidite-test-sshd
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - PASSWORD_ACCESS=true
+      - USER_NAME=developer
+      - USER_PASSWORD=hunter2
+    ports:
+      - "2222:2222"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
