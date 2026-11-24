@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, pack, parse, bytesOf, type BackendSpec, type Msg, type SessionState, type TermSize } from "./protocol";
+import { PROTOCOL_VERSION, pack, parse, bytesOf, idBytes, idStr, type BackendSpec, type Msg, type SessionState, type TermSize } from "./protocol";
 
 export type Link = "ok" | "retry" | "down";
 export interface Handlers {
@@ -65,7 +65,7 @@ export class Connection {
   }
 
   private attach(): void {
-    this.ws?.send(pack("Attach", { session: this.id, last_offset: this.id ? this.offset || null : null, mode: "Writer" }));
+    this.ws?.send(pack("Attach", { session: this.id ? idBytes(this.id) : null, last_offset: this.id ? this.offset || null : null, mode: "Writer" }));
   }
 
   private ackTo(n: number): void {
@@ -84,7 +84,7 @@ export class Connection {
         }, 15_000);
         if (this.id) this.attach(); else this.ws?.send(pack("Create", { backend: this.spec, size: this.size() }));
         break;
-      case "Created": this.id = m.session as string; this.h.created(this.id); this.attach(); break;
+      case "Created": this.id = idStr(m.session); this.h.created(this.id); this.attach(); break;
       case "Attached": if ((m.start as Record<string, unknown>)["Snapshot"]) this.h.reset(); break;
       case "Snapshot": { const b = bytesOf(m.bytes); this.offset = m.offset as number; this.h.output(b, () => this.ackTo(this.offset)); break; }
       case "Output": {
