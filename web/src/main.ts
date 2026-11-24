@@ -123,14 +123,14 @@ function paint(): void {
 }
 
 function renderTabs(): void {
-  const add = el("button", "ib addtab", "+");
+  const add = el("button", "ib addtab");
   add.setAttribute("aria-label", "New session");
   add.onclick = () => $("#new").click();
   $("#tabs").replaceChildren(
     ...tabs.map((t) => {
       const b = el("div", "tab"),
         main = el("button", "tabmain", t.label),
-        x = el("button", "ib x", "×");
+        x = el("button", "ib x");
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", String(t === cur || t === cur?.pair));
       b.dataset.b = t.b;

@@ -147,7 +147,6 @@ dialog:has(#k-ssh:checked) #ssh { display: block; }
 .grip { position: absolute; top: 0; bottom: 0; z-index: 4; width: 8px; cursor: col-resize; touch-action: none; }
 .grip[data-edge="r"] { right: 0; } .grip[data-edge="l"] { left: 0; }
 .grip:hover, .grip:active { background: linear-gradient(90deg, transparent 3px, var(--acc) 3px 5px, transparent 5px); }
-#new { width: 1.9rem; height: 1.9rem; color: var(--fg); border: 1px solid var(--mute); font: 700 1.2rem/1 var(--mono); }
 .branch { display: flex; align-items: center; gap: .5rem; }
 .branch span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .branch::after { flex: none; }
@@ -180,23 +179,32 @@ dialog:has(#k-ssh:checked) #ssh { display: block; }
 .tabbar { display: flex; align-items: flex-end; height: 2.6rem; padding-left: .4rem; background: var(--bg2); border-bottom: 1px solid var(--line); }
 .tabbar > .ib { align-self: center; }
 #tabs { display: flex; flex: 1; align-items: flex-end; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.tab { --tabc: var(--acc); position: relative; flex: 0 1 9rem; min-width: 6.5rem; display: flex; align-items: center; gap: .5rem; height: 2.15rem; padding: 0 .3rem 0 .7rem; color: var(--mute); background: transparent; clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 0 100%); transition: background .15s, color .15s; }
+.tab { --tabc: var(--acc); position: relative; flex: 0 1 9rem; min-width: 7.5rem; display: flex; align-items: center; gap: .5rem; height: 2.15rem; padding: 0 .3rem 0 .7rem; color: var(--mute); background: transparent; clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 0 100%); transition: background .15s, color .15s; }
 .tab:hover { color: var(--fg); background: var(--bg3); }
 .tab[aria-selected="true"] { height: 2.35rem; color: var(--fg); background: var(--bg); box-shadow: inset 0 2px 0 var(--tabc); }
 .tab[data-b="warn"], .tab[data-b="retry"] { --tabc: var(--warn); }
 .tab[data-b="down"] { --tabc: var(--delbar); }
 .tab[data-pair] { background-image: repeating-linear-gradient(90deg, var(--acc2) 0 4px, transparent 4px 8px); background-size: 100% 2px; background-repeat: no-repeat; background-position: 0 100%; }
 .tabmain { flex: 1; min-width: 0; padding: 0; text-align: left; color: inherit; background: transparent; border: 0; font: 650 .84rem var(--sans); font-stretch: 112%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab .x { position: absolute; right: .3rem; top: 50%; transform: translateY(-50%); width: 1.4rem; min-width: 0; height: 1.4rem; font-size: 1.05rem; background: var(--bg3); opacity: 0; }
-.tab[aria-selected="true"] .x { background: var(--bg); }
 .tabbar > .ib.txt { padding: 0 .45rem; font-size: .8rem; }
-.tab:hover .x, .tab[aria-selected="true"] .x, .x:focus-visible { opacity: 1; }
 .tab[data-b="retry"] > .dot { animation: pulse 1s ease-in-out infinite; }
 .tab[data-b="warn"] > .dot { animation: flick .7s steps(2) infinite; }
 .tab[data-b="down"] > .dot { border-radius: 1px; }
-.addtab { flex: none; align-self: center; margin-left: .2rem; }
 @keyframes pulse { 50% { transform: scale(1.6); opacity: .5; } }
 #chain[data-b="ok"] .b { background: repeating-linear-gradient(90deg, var(--acc2) 0 8px, transparent 8px 12px); }
 ::selection { background: color-mix(in srgb, var(--acc) 40%, transparent); }
 * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .sess[data-open="1"] > span { color: var(--fg); }
+
+/* close, new-tab and new-session glyphs are drawn, not typed, so they stay crisp at any size */
+.x, .addtab, #new { font-size: 0; }
+.x::before, .addtab::before, #new::before { content: ""; width: .8rem; height: .8rem; background: currentColor; -webkit-mask: var(--g) center / contain no-repeat; mask: var(--g) center / contain no-repeat; }
+.x { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.6 1.6l6.8 6.8m0-6.8l-6.8 6.8' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.addtab, #new { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M5 1.2v7.6M1.2 5h7.6' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.tab .x { flex: none; width: 1.5rem; min-width: 0; height: 1.5rem; border-radius: 5px; color: var(--mute); }
+.tab:hover .x, .tab[aria-selected="true"] .x { color: var(--fg); }
+.tab .x:hover { color: var(--fg); background: var(--line); }
+.tab[data-b="down"] .x:hover { color: var(--delbar); }
+.addtab { position: sticky; right: 0; flex: none; align-self: center; width: 1.75rem; height: 1.75rem; margin-left: .3rem; color: var(--fg); background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; }
+.addtab:hover, #new:hover { color: var(--acc); border-color: var(--acc); }
+#new { width: 1.9rem; height: 1.9rem; color: var(--fg); border: 1px solid var(--mute); border-radius: 6px; }
