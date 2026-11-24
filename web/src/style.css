@@ -199,3 +199,4 @@ dialog:has(#k-ssh:checked) #ssh { display: block; }
 #chain[data-b="ok"] .b { background: repeating-linear-gradient(90deg, var(--acc2) 0 8px, transparent 8px 12px); }
 ::selection { background: color-mix(in srgb, var(--acc) 40%, transparent); }
 * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.sess[data-open="1"] > span { color: var(--fg); }
