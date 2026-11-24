@@ -30,3 +30,16 @@ export function parse(buf: ArrayBuffer): Msg {
 }
 export const bytesOf = (x: unknown): Uint8Array => (x instanceof Uint8Array ? x : Uint8Array.from(x as number[]));
 export const stateName = (s: SessionState): string => (typeof s === "string" ? s : Object.keys(s)[0] ?? "");
+
+const hex = (b: number): string => b.toString(16).padStart(2, "0");
+/** Session ids are 16 raw bytes on the wire but hyphenated strings in REST. The UI always holds the string form. */
+export function idStr(x: unknown): string {
+  if (typeof x === "string") return x;
+  const h = Array.from(bytesOf(x), hex).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+/** The server decodes a session id as 16 bytes and rejects the string form. */
+export function idBytes(s: string): Uint8Array {
+  const h = s.replace(/-/g, "");
+  return Uint8Array.from({ length: 16 }, (_, i) => parseInt(h.slice(i * 2, i * 2 + 2), 16));
+}
