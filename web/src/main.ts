@@ -43,6 +43,12 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""):
 const note = (n: HTMLElement, text: string): void => n.replaceChildren(el("p", "note", text));
 const enc = new TextEncoder();
 let token = sessionStorage.getItem("oxidite.token") ?? "";
+// The server labels every session "session-<id>". Remember what this browser called the ones it created.
+const names: Record<string, string> = (() => { try { return JSON.parse(localStorage.getItem("oxidite.names") ?? "{}"); } catch { return {}; } })();
+const rememberName = (id: string, label: string): void => {
+  names[id] = label;
+  localStorage.setItem("oxidite.names", JSON.stringify(Object.fromEntries(Object.entries(names).slice(-100))));
+};
 let theme = (localStorage.getItem("oxidite.theme") as ThemeName | null) ?? "onyx";
 const tabs: Tab[] = [];
 let cur: Tab | null = null;
@@ -215,6 +221,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     },
     created: (id) => {
       tab.id = id;
+      rememberName(id, tab.label);
       void refresh();
       void loadChanges();
     },
@@ -308,10 +315,12 @@ async function refresh(): Promise<void> {
         for (const s of items) {
           const b = el("button", "sess"),
             n = stateName(s.state),
-            nm = s.label ?? s.id.slice(0, 8);
+            nm = names[s.id] ?? s.label ?? s.id.slice(0, 8);
           b.dataset.s = n;
           b.setAttribute("aria-current", String(cur !== null && cur.id === s.id));
-          b.append(el("i", "dot"), el("b", "", nm), el("span", "", n));
+          const isOpen = tabs.some((t) => t.id === s.id);
+          b.dataset.open = isOpen ? "1" : "0";
+          b.append(el("i", "dot"), el("b", "", nm), el("span", "", isOpen ? `${n}, open` : n));
           b.onclick = () => {
             const open = tabs.find((t) => t.id === s.id);
             if (open) select(open);
@@ -700,3 +709,6 @@ if (token) void refresh();
 else gate.showModal();
 renderActivity();
 void loadChanges();
+
+// Keep the sidebar live while the tab is visible.
+setInterval(() => { if (token && document.visibilityState === "visible") void refresh(); }, 5000);
