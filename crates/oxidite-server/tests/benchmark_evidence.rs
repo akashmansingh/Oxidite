@@ -176,11 +176,31 @@ async fn test_benchmark_scenarios_and_redaction_invariants() {
 
     // Scenario 2: Warm fingerprinted static asset
     {
+        let manifest_static = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|root| root.join("web").join("dist"))
+            .unwrap_or_else(|| std::path::PathBuf::from("web/dist"));
+        let asset_name = if let Ok(entries) = std::fs::read_dir(manifest_static.join("assets")) {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.ends_with(".css") || name.ends_with(".js")
+                })
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .unwrap_or_else(|| "index-gmRLFR5Z.css".to_string())
+        } else {
+            "index-gmRLFR5Z.css".to_string()
+        };
+
         let trace_id = Uuid::new_v4().to_string();
         let start = Instant::now();
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let req = b"GET /assets/index-D5ZZ0eOA.css HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        stream.write_all(req).await.unwrap();
+        let req = format!(
+            "GET /assets/{asset_name} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
         let duration = start.elapsed().as_secs_f64() * 1000.0;

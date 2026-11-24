@@ -5,7 +5,7 @@
 [CmdletBinding()]
 param (
     [Parameter()]
-    [string]$Url = "http://127.0.0.1:3000",
+    [string]$Url = "http://127.0.0.1:3030",
 
     [Parameter()]
     [string]$Token = "",

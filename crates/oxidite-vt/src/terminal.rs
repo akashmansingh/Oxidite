@@ -837,7 +837,10 @@ mod tests {
             b"\x1b]133;A\x1b\\$ echo 2\r\n\x1b]133;B\x1b\\\x1b]133;C\x1b\\2\r\n\x1b]133;D;0\x1b\\",
         );
 
-        assert!(term.command_markers.len() >= 1);
+        assert!(
+            !term.command_markers.is_empty(),
+            "command markers should not be empty"
+        );
         // Jump back to previous prompt
         assert!(term.jump_to_prev_prompt());
         assert!(term.grid.display_offset > 0);

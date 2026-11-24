@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     let port = std::env::var("OXIDITE_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(3000);
+        .unwrap_or(3030);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let security = SecurityConfig {
         bind_addr: Some(addr),

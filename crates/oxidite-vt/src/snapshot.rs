@@ -164,7 +164,7 @@ mod tests {
         );
 
         let snapshot = serialize_snapshot(&term);
-        assert!(!snapshot.is_empty());
+        assert!(!snapshot.is_empty(), "snapshot should not be empty");
         assert!(snapshot.starts_with(b"\x1b[?25l\x1b[2J"));
         // When parsed into a second terminal, contents match visible screen
         let mut second = Terminal::new(80, 24);

@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod device_connections;
 pub mod devices;
+pub mod git_api;
 pub mod metrics;
 pub mod routing;
 pub mod security;
@@ -61,6 +62,7 @@ pub struct SessionInfo {
     pub id: String,
     pub state: SessionState,
     pub label: Option<String>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +105,14 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/devices", get(list_devices_handler))
         .route("/api/devices/:id", delete(revoke_device_handler))
         .route("/api/runtime/shells", get(runtime_shells_handler))
+        .route("/api/git/changes", get(git_api::git_changes_handler))
+        .route("/api/git/diff", get(git_api::git_diff_handler))
+        .route("/api/git/log", get(git_api::git_log_handler))
+        .route("/api/git/stage", post(git_api::git_stage_handler))
+        .route("/api/git/commit", post(git_api::git_commit_handler))
+        .route("/api/git/branches", get(git_api::git_branches_handler))
+        .route("/api/git/checkout", post(git_api::git_checkout_handler))
+        .route("/api/git/fetch", post(git_api::git_fetch_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(middleware::from_fn_with_state(
@@ -494,6 +504,7 @@ async fn list_sessions(
                         id: id.to_string(),
                         state: sess_state,
                         label: Some(format!("session-{}", &id.to_string()[..8])),
+                        workspace: Some("This gateway".to_string()),
                     });
                 }
             }

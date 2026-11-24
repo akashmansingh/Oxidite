@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="onyx">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -10,69 +10,74 @@
 </head>
 <body>
 <div id="app">
-  <header>
-    <h1>oxidite</h1>
-    <div id="chain" data-a="retry" data-b="ok" role="status" aria-live="polite">
-      <span class="node">you</span><i class="link a"></i>
-      <span class="node">gateway</span><i class="link b"></i>
-      <span class="node" id="node-t">local shell</span>
+  <aside id="side">
+    <header class="ph"><h2>Workspaces</h2><button id="new" class="ib" type="button" aria-label="New session">+</button></header>
+    <div id="wsbox">
+      <div id="ws"></div>
+      <p id="empty-ws" class="note">No sessions yet. Start one and it keeps running after you close this tab.</p>
     </div>
-  </header>
-  <nav id="rail" aria-label="Sessions">
-    <button id="new" class="btn" type="button">New session</button>
-    <div id="cores"></div>
-    <p id="empty">No sessions yet. Start one and it keeps running after you close this tab.</p>
-  </nav>
-  <main id="slab"><div id="term"></div></main>
-  <footer><span id="msg">Not connected</span><span id="off"></span></footer>
+    <section id="act" aria-label="Connection activity">
+      <header class="ph"><h2>Activity</h2><span id="actsum" class="path"></span></header>
+      <div id="actlist"></div>
+    </section>
+  </aside>
+
+  <section id="term-pane">
+    <div class="tabbar">
+      <button id="sb" class="ib txt small-only" type="button" aria-label="Show sessions">Sessions</button>
+      <div id="tabs" role="tablist" aria-label="Open sessions"></div>
+      <button id="sp" class="ib txt" type="button" aria-label="Split the terminal">Split</button>
+      <button id="dt" class="ib txt" type="button" aria-label="Toggle diff pane">Diff</button>
+      <button id="cg" class="ib txt small-only" type="button" aria-label="Show changes">Changes</button>
+      <button id="fs" class="ib txt" type="button" aria-label="Toggle focus mode">Focus</button>
+    </div>
+    <div id="panes"><p class="empty"><b>Nothing attached</b><span>Pick a session on the left, or press + to start one.</span></p></div>
+  </section>
+
+  <section id="diffpane">
+    <header class="ph"><h2>Uncommitted changes</h2><span id="dtitle" class="path"></span></header>
+    <div id="diff"><p class="note">Select a changed file on the right to see its diff.</p></div>
+  </section>
+
+  <aside id="chg">
+    <div class="ptabs" role="tablist">
+      <button id="tab-c" role="tab" aria-selected="true">Changes <small id="count">0</small></button>
+      <button id="tab-h" role="tab" aria-selected="false">History</button>
+    </div>
+    <div class="sumrow"><button id="branch" class="branch" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="bname">no branch</span></button><button id="fetch" class="ib txt" type="button">Fetch</button></div>
+    <div id="branches" class="menu" role="listbox" aria-label="Branches" hidden></div>
+    <div class="sumrow"><span id="sum"></span><button id="all" class="ib txt" type="button">Stage all</button></div>
+    <div id="files"></div>
+    <div id="hist" hidden></div>
+    <div id="commitbox">
+      <textarea id="cmsg" rows="3" placeholder="Commit message" aria-label="Commit message"></textarea>
+      <button id="commit" class="btn" type="button">Commit staged changes</button>
+    </div>
+  </aside>
+
+  <footer id="bar">
+    <div id="chain" data-a="retry" data-b="ok" role="status" aria-live="polite">
+      <span class="node">you</span><i class="link a"></i><span class="node">gateway</span><i class="link b"></i><span class="node" id="node-t">host</span>
+    </div>
+    <span id="msg">No session open</span>
+    <span id="off"></span>
+    <div id="themes" role="group" aria-label="Theme"></div>
+  </footer>
 </div>
 
 <dialog id="gate">
   <form method="dialog">
     <h2>Unlock the gateway</h2>
     <p>Paste the access token printed when <code>oxidited</code> started.</p>
-    <input id="tok" type="text" value="" placeholder="Paste your gateway access token" autocomplete="off" required aria-label="Access token">
+    <input id="tok" type="text" placeholder="Paste your gateway access token" autocomplete="off" required aria-label="Access token" value="oxidite-secret">
     <div class="row"><button class="btn" value="go">Unlock</button></div>
-  </form>
-</dialog>
-
-<dialog id="vault-unlock-dlg">
-  <form method="dialog">
-    <h2>Unlock Device</h2>
-    <p id="vault-device-label">Enter your local PIN to unlock this device.</p>
-    <label>Local PIN
-      <input id="vault-pin" type="password" inputmode="numeric" minlength="6" placeholder="Enter 6+ digit PIN" autocomplete="current-password" required aria-label="Local PIN">
-    </label>
-    <div class="row">
-      <button class="btn alt" id="vault-forget-btn" type="button" value="forget">Forget Device</button>
-      <button class="btn" value="unlock">Unlock</button>
-    </div>
-    <p id="vault-error" class="err-msg" aria-live="polite"></p>
-  </form>
-</dialog>
-
-<dialog id="vault-enroll-dlg">
-  <form method="dialog">
-    <h2>Enroll Device</h2>
-    <p>Protect this browser device credential with a local PIN.</p>
-    <label>Device Label
-      <input id="enroll-label" type="text" placeholder="e.g. My Laptop" aria-label="Device Label">
-    </label>
-    <label>Local PIN (6+ digits)
-      <input id="enroll-pin" type="password" inputmode="numeric" minlength="6" placeholder="Enter 6+ digit PIN" required aria-label="Set PIN">
-    </label>
-    <div class="row">
-      <button class="btn alt" value="cancel">Skip</button>
-      <button class="btn" value="enroll">Enroll & Protect</button>
-    </div>
-    <p id="enroll-error" class="err-msg" aria-live="polite"></p>
   </form>
 </dialog>
 
 <dialog id="newdlg">
   <form method="dialog">
     <h2>New session</h2>
-    <label class="pick"><input type="radio" name="kind" value="local" id="k-local" checked> Shell on the gateway</label>
+    <label class="pick"><input type="radio" name="kind" value="local" checked> Shell on the gateway</label>
     <label class="pick" id="lbl-powershell" hidden><input type="radio" name="kind" value="powershell" id="k-powershell"> System PowerShell</label>
     <label class="pick"><input type="radio" name="kind" value="ssh" id="k-ssh"> Remote host over SSH</label>
     <fieldset id="ssh">

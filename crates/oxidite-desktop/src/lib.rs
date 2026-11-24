@@ -1,6 +1,6 @@
 //! Oxidite desktop terminal emulator library.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::all)]
 
 pub use oxidite_pty as pty;
 pub use oxidite_theme as theme;

@@ -922,7 +922,7 @@ mod tests {
             tokens.background_secondary,
             Theme::pitch_black().tokens().background_secondary
         );
-        assert!(tokens.foreground_muted != tokens.foreground_primary);
+        assert_ne!(tokens.foreground_muted, tokens.foreground_primary);
     }
 
     #[test]

@@ -11,3 +11,27 @@ members = [
     "crates/oxidite-desktop",
 ]
 resolver = "2"
+
+# Keep target directory lean (<1 GB instead of 10-15 GB):
+# 1. debug = 1 gives line numbers and backtraces without heavy AST/type debug trees.
+# 2. incremental = false eliminates the multi-gigabyte incremental object cache and Windows hard-link copying bloat.
+# 3. debug = 0 for dependencies strips debug symbols from 400+ external crates (tokio, russh, sqlx, axum, etc.),
+#    shrinking test executables from ~150 MB down to ~15 MB.
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = 0
+
+[profile.test]
+opt-level = 0
+debug = 1
+incremental = false
+
+[profile.test.package."*"]
+opt-level = 2
+debug = 0
+
