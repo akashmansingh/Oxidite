@@ -75,12 +75,15 @@ fn is_fingerprinted_asset(path: &str) -> bool {
     let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let Some((_, suffix)) = file_name.rsplit_once('-') else {
-        return false;
-    };
-    let hash = suffix.split('.').next().unwrap_or_default();
-    hash.len() >= 8
-        && hash
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    let stem = file_name.split('.').next().unwrap_or_default();
+    stem.match_indices('-').any(|(idx, _)| {
+        if idx == 0 {
+            return false;
+        }
+        let hash = &stem[idx + 1..];
+        hash.len() >= 8
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    })
 }
