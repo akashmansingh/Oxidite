@@ -196,11 +196,10 @@ dialog:has(#k-ssh:checked) #ssh { display: block; }
 * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
 .sess[data-open="1"] > span { color: var(--fg); }
 
-/* close, new-tab and new-session glyphs are drawn, not typed, so they stay crisp at any size */
+/* close, new-tab and new-session glyphs are drawn with gradients: the CSP blocks data: images and typed glyphs go thin */
 .x, .addtab, #new { font-size: 0; }
-.x::before, .addtab::before, #new::before { content: ""; width: .8rem; height: .8rem; background: currentColor; -webkit-mask: var(--g) center / contain no-repeat; mask: var(--g) center / contain no-repeat; }
-.x { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.6 1.6l6.8 6.8m0-6.8l-6.8 6.8' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"); }
-.addtab, #new { --g: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M5 1.2v7.6M1.2 5h7.6' stroke='%23000' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.x::before, .addtab::before, #new::before { content: ""; width: .85rem; height: .85rem; background: linear-gradient(currentColor, currentColor) center / 100% 1.7px no-repeat, linear-gradient(currentColor, currentColor) center / 1.7px 100% no-repeat; }
+.x::before { transform: rotate(45deg); }
 .tab .x { flex: none; width: 1.5rem; min-width: 0; height: 1.5rem; border-radius: 5px; color: var(--mute); }
 .tab:hover .x, .tab[aria-selected="true"] .x { color: var(--fg); }
 .tab .x:hover { color: var(--fg); background: var(--line); }
