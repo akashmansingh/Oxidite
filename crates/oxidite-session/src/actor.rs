@@ -143,6 +143,14 @@ impl SessionActor {
                     match cmd {
                         ActorCmd::Attach { mode, last_offset, client_id, resp } => {
                             self.detached_at = None;
+                            if matches!(self.state, SessionState::Detached) {
+                                // Detached -> Running is a legal transition: a returning client makes the session live again.
+                                self.state = SessionState::Running;
+                                let _ = self.client_tx.send(ServerMsg::State {
+                                    session: self.id,
+                                    state: self.state.clone(),
+                                });
+                            }
                             let cid = client_id.unwrap_or_else(|| {
                                 let id = self.next_client_id;
                                 self.next_client_id += 1;
