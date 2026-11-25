@@ -84,6 +84,13 @@ impl vte::Perform for Dispatcher<'_> {
             let uri_bytes = params[1..].join(&b';');
             let uri = String::from_utf8_lossy(&uri_bytes);
             self.handler.set_working_directory(&uri);
+        } else if matches!(params.first().copied(), Some(b"9"))
+            && matches!(params.get(1).copied(), Some(b"9"))
+            && params.len() > 2
+        {
+            let path_bytes = params[2..].join(&b';');
+            let path = String::from_utf8_lossy(&path_bytes);
+            self.handler.set_working_directory(&path);
         } else if matches!(params.first().copied(), Some(b"133")) && params.len() > 1 {
             match params[1] {
                 b"A" => self.handler.shell_prompt_start(),
@@ -754,6 +761,13 @@ mod tests {
         assert_eq!(
             handler.events,
             vec!["set_working_directory(\"file://localhost/tmp/project\")"]
+        );
+
+        handler.events.clear();
+        parser.advance(&mut handler, b"\x1b]9;9;C:\\Work\\MyRepo\x1b\\");
+        assert_eq!(
+            handler.events,
+            vec!["set_working_directory(\"C:\\\\Work\\\\MyRepo\")"]
         );
     }
 
