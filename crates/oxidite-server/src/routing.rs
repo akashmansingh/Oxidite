@@ -57,18 +57,25 @@ pub const fn cache_control(class: RouteClass) -> &'static str {
     }
 }
 
-/// Resolves a static asset only when every path component is a normal child.
+/// Resolves a static asset only when every path component is a normal non-hidden child.
 #[must_use]
 pub fn resolve_static_path(static_dir: &Path, request_path: &str) -> Option<PathBuf> {
-    let relative = Path::new(request_path);
-    if relative
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-    {
-        Some(static_dir.join(relative))
-    } else {
-        None
+    if request_path.is_empty() || request_path.contains('\0') {
+        return None;
     }
+    let relative = Path::new(request_path);
+    let mut has_component = false;
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return None;
+        };
+        let s = segment.to_str()?;
+        if s.starts_with('.') && s != ".well-known" {
+            return None;
+        }
+        has_component = true;
+    }
+    has_component.then(|| static_dir.join(relative))
 }
 
 fn is_fingerprinted_asset(path: &str) -> bool {

@@ -264,3 +264,30 @@ async fn test_local_pty_disabled_on_non_loopback_bind() {
         other => panic!("Expected Unauthorized error on non-loopback bind, got: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_runtime_shells_disabled_on_non_loopback_bind() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut sec = SecurityConfig::default();
+    sec.allow_non_loopback_pty = false;
+    sec.bind_addr = Some("192.168.1.100:3000".parse().unwrap());
+
+    let (addr, token, _) = spawn_test_server(sec).await;
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /api/runtime/shells HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).await.unwrap();
+
+    let body = resp.split("\r\n\r\n").nth(1).expect("HTTP body");
+    let shells: Vec<serde_json::Value> = serde_json::from_str(body).unwrap();
+    assert_eq!(shells.len(), 2);
+    assert!(
+        shells
+            .iter()
+            .all(|s| s["available"] == serde_json::Value::Bool(false))
+    );
+}

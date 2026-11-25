@@ -23,26 +23,103 @@ async fn main() -> Result<()> {
     });
 
     let static_dir = std::env::var("OXIDITE_WEB_DIR").unwrap_or_else(|_| "web/dist".into());
-    let devices = oxidite_server::devices::DeviceStore::open("oxidite.db")
-        .await
-        .unwrap_or_else(|_| oxidite_server::devices::DeviceStore::default());
+    let db_path = std::env::var("OXIDITE_DB_PATH").unwrap_or_else(|_| "oxidite.db".into());
+    let devices = match oxidite_server::devices::DeviceStore::open(&db_path).await {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %db_path,
+                "Failed to open SQLite device store; using ephemeral in-memory store (paired devices will not survive restarts)"
+            );
+            oxidite_server::devices::DeviceStore::default()
+        }
+    };
     devices.register_bootstrap_grant(&token, "admin");
 
+    let known_hosts_path =
+        std::env::var("OXIDITE_KNOWN_HOSTS").unwrap_or_else(|_| "oxidite_known_hosts".into());
+    let known_hosts = oxidite_ssh::KnownHostsStore::open(&known_hosts_path);
+
+    let host = std::env::var("OXIDITE_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let ip: std::net::IpAddr = host.parse()?;
     let port = std::env::var("OXIDITE_PORT")
         .ok()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(3030);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let security = SecurityConfig {
+    let addr = SocketAddr::new(ip, port);
+
+    let mut security = SecurityConfig {
         bind_addr: Some(addr),
         ..Default::default()
+    };
+    if let Ok(origins) = std::env::var("OXIDITE_ALLOWED_ORIGINS") {
+        security.allowed_origins.extend(
+            origins
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from),
+        );
+    }
+    if let Ok(allow_local) = std::env::var("OXIDITE_ALLOW_LOCAL_PTY") {
+        security.allow_non_loopback_pty = matches!(
+            allow_local.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        );
+    }
+    if let Ok(roots) = std::env::var("OXIDITE_WORKSPACE_ROOTS") {
+        security.workspace_roots = std::env::split_paths(&roots)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+    }
+    if let Ok(def_cwd) = std::env::var("OXIDITE_DEFAULT_CWD")
+        && !def_cwd.trim().is_empty()
+    {
+        security.default_cwd = Some(std::path::PathBuf::from(def_cwd.trim()));
+    }
+    if let Ok(ssh_dir) = std::env::var("OXIDITE_SSH_KEY_DIR")
+        && !ssh_dir.trim().is_empty()
+    {
+        security.ssh_key_dir = Some(std::path::PathBuf::from(ssh_dir.trim()));
+    }
+    if security.allow_non_loopback_pty
+        && security.is_non_loopback()
+        && security.workspace_roots.is_empty()
+    {
+        tracing::warn!(
+            "OXIDITE_ALLOW_LOCAL_PTY is enabled on a non-loopback bind without OXIDITE_WORKSPACE_ROOTS confinement"
+        );
+    }
+
+    let tls_cert = std::env::var("OXIDITE_TLS_CERT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let tls_key = std::env::var("OXIDITE_TLS_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if oxidite_server::tls::requires_tls(&addr) && (tls_cert.is_none() || tls_key.is_none()) {
+        anyhow::bail!(
+            "Refusing to bind non-loopback address {addr} without TLS. Set OXIDITE_TLS_CERT and OXIDITE_TLS_KEY."
+        );
+    }
+    if tls_cert.is_some() != tls_key.is_some() {
+        anyhow::bail!("Both OXIDITE_TLS_CERT and OXIDITE_TLS_KEY must be set together.");
+    }
+
+    let tls_config = match (tls_cert.as_deref(), tls_key.as_deref()) {
+        (Some(cert), Some(key)) => Some(oxidite_server::tls::load_tls_config_from_pem(
+            std::path::Path::new(cert),
+            std::path::Path::new(key),
+        )?),
+        _ => None,
     };
 
     let state = AppState {
         manager: SessionManager::new(),
         token,
         static_dir,
-        known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        known_hosts,
         security,
         auth: UserStore::new(),
         shares: ShareStore::new(),
@@ -55,10 +132,51 @@ async fn main() -> Result<()> {
     };
 
     let app = create_app(state);
-    tracing::info!("Oxidite session gateway listening on http://{addr}");
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+
+    if let Some(cfg) = tls_config {
+        tracing::info!("Oxidite session gateway listening on https://{addr}");
+        serve_tls(listener, cfg, app).await?;
+    } else {
+        tracing::info!("Oxidite session gateway listening on http://{addr}");
+        axum::serve(listener, app).await?;
+    }
 
     Ok(())
+}
+
+async fn serve_tls(
+    listener: tokio::net::TcpListener,
+    tls_config: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
+    app: axum::Router,
+) -> Result<()> {
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tower::ServiceExt;
+
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    loop {
+        let (tcp_stream, _) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                return;
+            };
+            let io = TokioIo::new(tls_stream);
+            let service = service_fn(move |req: hyper::Request<Incoming>| {
+                let svc = app.clone();
+                async move { svc.oneshot(req.map(axum::body::Body::new)).await }
+            });
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(io, service)
+                .with_upgrades()
+                .await
+            {
+                tracing::debug!(error = %err, "HTTPS connection closed");
+            }
+        });
+    }
 }

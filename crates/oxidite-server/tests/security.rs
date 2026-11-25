@@ -189,3 +189,122 @@ async fn test_per_user_ownership_enforcement() {
     let kill = pack_client_msg(&ClientMsg::Kill).unwrap();
     alice_ws.send(Message::Binary(kill.into())).await.unwrap();
 }
+
+#[tokio::test]
+async fn test_same_origin_websocket_allowed_and_cross_origin_rejected() {
+    let sec = SecurityConfig::default();
+    assert!(sec.is_origin_allowed_for_host(Some("http://127.0.0.1:3030"), Some("127.0.0.1:3030")));
+    assert!(sec.is_origin_allowed_for_host(Some("https://localhost:8443"), Some("localhost:8443")));
+    assert!(sec.is_origin_allowed_for_host(
+        Some("https://gw.example.net:8443"),
+        Some("gw.example.net:8443")
+    ));
+    assert!(!sec.is_origin_allowed_for_host(
+        Some("http://localhost.evil.com:3030"),
+        Some("gw.example.net:8443")
+    ));
+    assert!(!sec.is_origin_allowed_for_host(Some("https://evil.com"), Some("gw.example.net:8443")));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = "origin-test-token".to_string();
+    let state = AppState {
+        manager: SessionManager::new(),
+        token,
+        static_dir: "web/dist".into(),
+        known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: SecurityConfig::default(),
+        auth: oxidite_server::auth::UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
+        rate_limiter: RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
+        node_id: "node-security-origin".into(),
+        directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
+    };
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(state)).await.unwrap();
+    });
+
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("ws://{addr}/ws");
+
+    // 1. Remote LAN/domain same-origin WebSocket upgrade succeeds
+    let mut same_origin_req = url.as_str().into_client_request().unwrap();
+    same_origin_req
+        .headers_mut()
+        .insert("host", "gateway.local:8443".parse().unwrap());
+    same_origin_req
+        .headers_mut()
+        .insert("origin", "https://gateway.local:8443".parse().unwrap());
+    let (mut ws_ok, _) = tokio_tungstenite::connect_async(same_origin_req)
+        .await
+        .unwrap();
+    let _ = ws_ok.close(None).await;
+
+    // 2. Cross-origin WebSocket upgrade is rejected with 403 Forbidden
+    let mut evil_req = url.as_str().into_client_request().unwrap();
+    evil_req
+        .headers_mut()
+        .insert("host", "gateway.local:8443".parse().unwrap());
+    evil_req
+        .headers_mut()
+        .insert("origin", "https://attacker.example".parse().unwrap());
+    let err = tokio_tungstenite::connect_async(evil_req)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("403"), "expected 403, got {err}");
+}
+
+#[tokio::test]
+async fn test_cors_and_security_headers_and_ssh_key_jail() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut sec = SecurityConfig::default();
+    sec.bind_addr = Some("0.0.0.0:3030".parse().unwrap());
+    sec.allow_non_loopback_pty = false;
+    sec.ssh_key_dir = None;
+
+    // Server-side SSH private key files must be blocked on non-loopback binds without ssh_key_dir
+    assert!(sec.validate_ssh_key_path("~/.ssh/id_ed25519").is_err());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = "cors-headers-token".to_string();
+    let state = AppState {
+        manager: SessionManager::new(),
+        token: token.clone(),
+        static_dir: "web/dist".into(),
+        known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: sec,
+        auth: oxidite_server::auth::UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
+        rate_limiter: RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
+        node_id: "node-security-cors".into(),
+        directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
+    };
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(state)).await.unwrap();
+    });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /api/sessions HTTP/1.1\r\nHost: gateway.example.com\r\nOrigin: https://evil.example\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+    let lower = raw.to_ascii_lowercase();
+    assert!(
+        !lower.contains("access-control-allow-origin:"),
+        "untrusted origin must not receive CORS header: {raw}"
+    );
+    assert!(lower.contains("cross-origin-resource-policy: same-origin"));
+    assert!(lower.contains("x-frame-options: deny"));
+    assert!(lower.contains("x-content-type-options: nosniff"));
+    assert!(lower.contains("strict-transport-security:"));
+}
