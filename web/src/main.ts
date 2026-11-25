@@ -45,6 +45,10 @@ const enc = new TextEncoder();
 let token = sessionStorage.getItem("oxidite.token") ?? "";
 // The server labels every session "session-<id>". Remember what this browser called the ones it created.
 const names: Record<string, string> = (() => { try { return JSON.parse(localStorage.getItem("oxidite.names") ?? "{}"); } catch { return {}; } })();
+function uniqueLabel(base: string): string {
+  const used = new Set([...Object.values(names), ...tabs.map((t) => t.label)]);
+  for (let i = 1; ; i++) { const l = i === 1 ? base : `${base} ${i}`; if (!used.has(l)) return l; }
+}
 const rememberName = (id: string, label: string): void => {
   names[id] = label;
   localStorage.setItem("oxidite.names", JSON.stringify(Object.fromEntries(Object.entries(names).slice(-100))));
@@ -178,6 +182,7 @@ function closeTab(t: Tab): void {
 }
 
 function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host: string): void {
+  if ("spec" in t) label = uniqueLabel(label);
   const pane = el("div", "pane");
   $("#panes").append(pane);
   const { term, fit } = makeTerminal(pane, theme);
@@ -303,6 +308,7 @@ async function refresh(): Promise<void> {
   if (!token) return;
   try {
     const list = await api<Sess[]>("/api/sessions");
+    for (const id of Object.keys(names)) if (!list.some((x) => x.id === id)) delete names[id];
     const groups = new Map<string, Sess[]>();
     for (const s of list) {
       const g = s.workspace ?? "Sessions";
