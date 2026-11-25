@@ -90,14 +90,110 @@ fn detect_default_shell() -> (String, Vec<String>) {
 
 /// Detects if PowerShell (`pwsh.exe` or `powershell.exe` on Windows) is available.
 #[cfg(windows)]
+fn windows_powershell_fallback_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    for env_var in ["ProgramFiles", "ProgramW6432"] {
+        if let Some(root) = std::env::var_os(env_var) {
+            candidates.push(
+                std::path::PathBuf::from(root)
+                    .join("PowerShell")
+                    .join("7")
+                    .join("pwsh.exe"),
+            );
+        }
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            std::path::PathBuf::from(local_app_data)
+                .join("Microsoft")
+                .join("powershell")
+                .join("pwsh.exe"),
+        );
+    }
+    let sys_root = std::env::var_os("SystemRoot").map_or_else(
+        || std::path::PathBuf::from(r"C:\Windows"),
+        std::path::PathBuf::from,
+    );
+    candidates.push(
+        sys_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe"),
+    );
+    candidates
+}
+
+#[cfg(windows)]
+fn resolve_powershell_with(
+    in_path: impl Fn(&str) -> bool,
+    fallback_candidates: &[std::path::PathBuf],
+) -> Option<String> {
+    if in_path("pwsh.exe") {
+        return Some("pwsh.exe".to_string());
+    }
+    if let Some(found) = fallback_candidates
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("pwsh.exe") && p.is_file())
+    {
+        return Some(found.to_string_lossy().into_owned());
+    }
+    if in_path("powershell.exe") {
+        return Some("powershell.exe".to_string());
+    }
+    if let Some(found) = fallback_candidates
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some("powershell.exe") && p.is_file())
+    {
+        return Some(found.to_string_lossy().into_owned());
+    }
+    None
+}
+
+#[cfg(windows)]
 #[must_use]
 pub fn detect_powershell() -> Option<ShellCommand> {
-    if which_in_path("pwsh.exe") {
-        Some(ShellCommand::new("pwsh.exe"))
-    } else if which_in_path("powershell.exe") {
-        Some(ShellCommand::new("powershell.exe"))
-    } else {
-        None
+    let fallbacks = windows_powershell_fallback_candidates();
+    resolve_powershell_with(which_in_path, &fallbacks).map(ShellCommand::new)
+}
+
+#[cfg(all(test, windows))]
+mod powershell_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_powershell_uses_standard_install_paths_when_missing_from_path() {
+        let root = std::env::temp_dir().join(format!("oxidite-pwsh-test-{}", std::process::id()));
+        let pwsh_dir = root.join("PowerShell").join("7");
+        let win_ps_dir = root.join("WindowsPowerShell").join("v1.0");
+        std::fs::create_dir_all(&pwsh_dir).unwrap();
+        std::fs::create_dir_all(&win_ps_dir).unwrap();
+
+        let fake_pwsh = pwsh_dir.join("pwsh.exe");
+        let fake_win_ps = win_ps_dir.join("powershell.exe");
+        std::fs::write(&fake_win_ps, b"").unwrap();
+
+        // Falls back to Windows PowerShell when nothing is in PATH and pwsh.exe is absent
+        let resolved_win =
+            resolve_powershell_with(|_| false, &[fake_pwsh.clone(), fake_win_ps.clone()]);
+        assert_eq!(
+            resolved_win.as_deref(),
+            Some(fake_win_ps.to_string_lossy().as_ref())
+        );
+
+        // Prefers PowerShell 7 fallback when present even if not in PATH
+        std::fs::write(&fake_pwsh, b"").unwrap();
+        let resolved_pwsh = resolve_powershell_with(|_| false, &[fake_pwsh.clone(), fake_win_ps]);
+        assert_eq!(
+            resolved_pwsh.as_deref(),
+            Some(fake_pwsh.to_string_lossy().as_ref())
+        );
+
+        // Uses PATH first when available
+        let resolved_path = resolve_powershell_with(|bin| bin == "pwsh.exe", &[]);
+        assert_eq!(resolved_path.as_deref(), Some("pwsh.exe"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -257,6 +353,336 @@ impl PtyWriter {
             .map(|s| s.exit_code())
             .map_err(|e| PtyError::Wait(e.to_string()))
     }
+
+    /// Queries the operating system for the child shell's live working directory.
+    #[must_use]
+    pub fn current_working_directory(&self) -> Option<std::path::PathBuf> {
+        let pid = self.child.process_id()?;
+        query_process_cwd(pid)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn query_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    let p = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    if p.is_dir() { Some(p) } else { None }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+mod win_peb {
+    use core::ffi::c_void;
+    use std::mem::size_of;
+
+    pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    pub const PROCESS_VM_READ: u32 = 0x0010;
+    pub const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct ProcessBasicInformation {
+        pub exit_status: isize,
+        pub peb_base_address: usize,
+        pub affinity_mask: usize,
+        pub base_priority: isize,
+        pub unique_process_id: usize,
+        pub inherited_from_unique_process_id: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct UnicodeString64 {
+        pub length: u16,
+        pub maximum_length: u16,
+        pub _pad: u32,
+        pub buffer: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn OpenProcess(
+            desired_access: u32,
+            inherit_handle: i32,
+            process_id: u32,
+        ) -> *mut c_void;
+        fn ReadProcessMemory(
+            process: *mut c_void,
+            base_address: *const c_void,
+            buffer: *mut c_void,
+            size: usize,
+            bytes_read: *mut usize,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        pub fn NtQueryInformationProcess(
+            process_handle: *mut c_void,
+            process_information_class: u32,
+            process_information: *mut c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+
+    pub struct ProcessHandle(pub *mut c_void);
+    impl Drop for ProcessHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    pub unsafe fn read_exact(handle: *mut c_void, addr: usize, dst: &mut [u8]) -> bool {
+        let mut read = 0usize;
+        let ok = unsafe {
+            ReadProcessMemory(
+                handle,
+                addr as *const c_void,
+                dst.as_mut_ptr().cast::<c_void>(),
+                dst.len(),
+                &raw mut read,
+            )
+        };
+        ok != 0 && read == dst.len()
+    }
+
+    pub fn read_usize(handle: *mut c_void, addr: usize) -> Option<usize> {
+        let mut bytes = [0u8; size_of::<usize>()];
+        unsafe { read_exact(handle, addr, &mut bytes) }.then(|| usize::from_ne_bytes(bytes))
+    }
+}
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+fn query_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    use core::ffi::c_void;
+    use std::mem::size_of;
+    use win_peb::{
+        NtQueryInformationProcess, OpenProcess, PROCESS_BASIC_INFORMATION_CLASS,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, ProcessBasicInformation, ProcessHandle,
+        UnicodeString64, read_exact,
+    };
+
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+    if raw.is_null() {
+        return None;
+    }
+    let handle = ProcessHandle(raw);
+
+    let mut pbi = ProcessBasicInformation::default();
+    let mut ret_len = 0u32;
+    let info_len = u32::try_from(size_of::<ProcessBasicInformation>()).ok()?;
+    let status = unsafe {
+        NtQueryInformationProcess(
+            handle.0,
+            PROCESS_BASIC_INFORMATION_CLASS,
+            (&raw mut pbi).cast::<c_void>(),
+            info_len,
+            &raw mut ret_len,
+        )
+    };
+    if status != 0 || pbi.peb_base_address == 0 {
+        return None;
+    }
+
+    let params_ptr = win_peb::read_usize(handle.0, pbi.peb_base_address + 0x20)?;
+    if params_ptr == 0 {
+        return None;
+    }
+
+    let mut us_bytes = [0u8; size_of::<UnicodeString64>()];
+    if !unsafe { read_exact(handle.0, params_ptr + 0x38, &mut us_bytes) } {
+        return None;
+    }
+    let us: UnicodeString64 =
+        unsafe { std::ptr::read_unaligned(us_bytes.as_ptr().cast::<UnicodeString64>()) };
+    if us.length == 0 || !us.length.is_multiple_of(2) || us.length > 32768 || us.buffer == 0 {
+        return None;
+    }
+
+    let mut raw_utf16_bytes = vec![0u8; usize::from(us.length)];
+    if !unsafe { read_exact(handle.0, us.buffer, &mut raw_utf16_bytes) } {
+        return None;
+    }
+    let u16s: Vec<u16> = raw_utf16_bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&chunk| u16::from_ne_bytes(chunk))
+        .collect();
+    let raw_str = String::from_utf16_lossy(&u16s);
+    let trimmed = raw_str.trim_end_matches('\0');
+    if trimmed.is_empty() {
+        return None;
+    }
+    std::fs::canonicalize(trimmed)
+        .ok()
+        .map(strip_win_verbatim_prefix)
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            let p = strip_win_verbatim_prefix(std::path::PathBuf::from(trimmed));
+            p.is_dir().then_some(p)
+        })
+}
+
+#[must_use]
+fn strip_win_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return std::path::PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    path
+}
+
+#[cfg(not(any(target_os = "linux", all(windows, target_pointer_width = "64"))))]
+fn query_process_cwd(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(all(test, windows))]
+mod cwd_probe_tests {
+    use super::*;
+
+    #[test]
+    fn test_live_shell_cwd_tracks_cd_command() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("oxidite-cwd-probe-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let expected = std::fs::canonicalize(&temp_dir).unwrap();
+
+        let cmd = ShellCommand::new("cmd.exe");
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            px_w: 0,
+            px_h: 0,
+        };
+        let (mut writer, mut reader) = spawn(cmd, size).unwrap();
+        let pid = writer.child.process_id();
+        let initial = writer.current_working_directory();
+
+        // Drain ConPTY startup output and answer ESC[6n cursor position query if requested.
+        for _ in 0..10 {
+            if let Ok(chunk) = reader.recv_timeout(std::time::Duration::from_millis(200)) {
+                if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                    let _ = writer.write(b"\x1b[1;1R");
+                }
+                if chunk.contains(&b'>') {
+                    break;
+                }
+            }
+        }
+        std::thread::spawn(move || while reader.recv().is_some() {});
+
+        let cd_cmd = format!("cd /d \"{}\"\r\n", temp_dir.display());
+        writer.write(cd_cmd.as_bytes()).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut last_live = None;
+        let mut matched = false;
+        while std::time::Instant::now() < deadline {
+            last_live = writer.current_working_directory();
+            if let Some(ref live) = last_live
+                && let Ok(canon) = std::fs::canonicalize(live)
+                && canon == expected
+            {
+                matched = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = writer.kill();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(
+            matched,
+            "expected OS CWD probe to follow `cd /d` (pid={pid:?}, initial={initial:?}, last_live={last_live:?}, expected={expected:?})"
+        );
+    }
+
+    #[test]
+    fn test_powershell_prompt_hook_updates_cwd_without_verbatim_prefix() {
+        let Some(cmd) = detect_powershell() else {
+            return;
+        };
+        let temp_dir =
+            std::env::temp_dir().join(format!("oxidite-pwsh-cwd-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let start_dir =
+            strip_win_verbatim_prefix(std::fs::canonicalize(std::env::temp_dir()).unwrap());
+        let expected = strip_win_verbatim_prefix(std::fs::canonicalize(&temp_dir).unwrap());
+
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            px_w: 0,
+            px_h: 0,
+        };
+        let (mut writer, mut reader) = spawn_in_directory(cmd, size, Some(&start_dir)).unwrap();
+        let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            while let Some(chunk) = reader.recv() {
+                let _ = tx_out.send(chunk);
+            }
+        });
+
+        let mut banner = Vec::new();
+        let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < start_deadline {
+            if let Ok(chunk) = rx_out.recv_timeout(std::time::Duration::from_millis(200)) {
+                if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                    let _ = writer.write(b"\x1b[1;1R");
+                }
+                banner.extend_from_slice(&chunk);
+                if banner.contains(&b'>') {
+                    break;
+                }
+            }
+        }
+        let banner_text = String::from_utf8_lossy(&banner);
+        assert!(
+            !banner_text.contains("Microsoft.PowerShell.Core\\FileSystem::\\\\?\\"),
+            "PowerShell prompt must not expose \\\\?\\ verbatim prefix: {banner_text:?}"
+        );
+
+        let cd_cmd = format!("Set-Location \"{}\"\r\n", expected.display());
+        writer.write(cd_cmd.as_bytes()).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut matched = false;
+        let mut last_live = None;
+        while std::time::Instant::now() < deadline {
+            while let Ok(chunk) = rx_out.try_recv() {
+                if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                    let _ = writer.write(b"\x1b[1;1R");
+                }
+            }
+            last_live = writer.current_working_directory();
+            if let Some(ref live) = last_live
+                && live
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&expected.to_string_lossy())
+            {
+                matched = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+        let _ = writer.kill();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        assert!(
+            matched,
+            "expected PowerShell Set-Location to update OS CWD (last_live={last_live:?}, expected={expected:?})"
+        );
+    }
 }
 
 /// Read side of the PTY master.
@@ -308,6 +734,20 @@ impl PtyReader {
     }
 }
 
+const POWERSHELL_PROMPT_HOOK: &str = r#"$__oxOrig = $function:prompt; function global:prompt { try { $l = $executionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq 'FileSystem') { [System.IO.Directory]::SetCurrentDirectory($l.ProviderPath); [Console]::Write(([char]27) + ']9;9;' + $l.ProviderPath + ([char]27) + '\') } } catch {}; if ($__oxOrig) { & $__oxOrig } else { "PS $($executionContext.SessionState.Path.CurrentLocation)> " } }"#;
+
+fn is_powershell_binary(program: &str) -> bool {
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "pwsh" | "pwsh.exe" | "powershell.exe" | "powershell"
+    )
+}
+
 /// Spawns a shell on a PTY with the given size.
 pub fn spawn(cmd: ShellCommand, size: PtySize) -> Result<(PtyWriter, PtyReader), PtyError> {
     spawn_in_directory(cmd, size, None)
@@ -324,10 +764,16 @@ pub fn spawn_in_directory(
         .openpty(size.into())
         .map_err(|e| PtyError::Open(e.to_string()))?;
 
+    let is_pwsh_interactive = cmd.args.is_empty() && is_powershell_binary(&cmd.program);
     let mut builder = CommandBuilder::new(cmd.program);
-    builder.args(cmd.args);
+    if is_pwsh_interactive {
+        builder.args(["-NoLogo", "-NoExit", "-Command", POWERSHELL_PROMPT_HOOK]);
+    } else {
+        builder.args(cmd.args);
+    }
     if let Some(cwd) = cwd {
-        builder.cwd(cwd);
+        let clean_cwd = strip_win_verbatim_prefix(cwd.to_path_buf());
+        builder.cwd(clean_cwd);
     }
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
