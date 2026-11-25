@@ -305,11 +305,17 @@ function ask(kind: "hostkey" | "auth", m: Msg, tab: Tab): void {
   dlg.showModal();
 }
 
+// Names are pruned only for sessions the server once listed, so a stale in-flight list cannot erase a new one.
+const seen = new Set<string>();
+let primed = false;
 async function refresh(): Promise<void> {
   if (!token) return;
   try {
     const list = await api<Sess[]>("/api/sessions");
-    for (const id of Object.keys(names)) if (!list.some((x) => x.id === id)) delete names[id];
+    const live = new Set(list.map((x) => x.id));
+    for (const id of Object.keys(names)) if (!live.has(id) && (!primed || seen.has(id))) delete names[id];
+    for (const id of live) seen.add(id);
+    primed = true;
     const groups = new Map<string, Sess[]>();
     for (const s of list) {
       const g = s.workspace ?? "Sessions";
