@@ -10,6 +10,7 @@ export interface Handlers {
   prompt(kind: "hostkey" | "auth", m: Msg): void;
   created(id: string): void;
   error(msg: string): void;
+  unauthorized?(): void;
   exit(code: number | null): void;
 }
 
@@ -38,6 +39,13 @@ export class Connection {
   trust(accept: boolean): void { this.tx(pack("HostKeyDecision", { accept })); }
   answer(answers: string[]): void { this.tx(pack("AuthResponse", { answers })); }
   kill(): void { this.tx(pack("Kill")); }
+  setToken(token: string): void { this.token = token; }
+  reconnectNow(): void {
+    if (this.done) return;
+    clearTimeout(this.retryT);
+    this.retryT = undefined;
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this.connect();
+  }
   detach(): void {
     this.done = true;
     this.tx(pack("Detach"));
@@ -63,7 +71,7 @@ export class Connection {
     this.attempt += 1;
     this.h.link("retry");
     this.h.error(`Connection lost. Retrying (attempt ${this.attempt}).`);
-    const ceiling = Math.min(30_000, 1000 * 2 ** this.attempt);
+    const ceiling = Math.min(30_000, 1000 * 2 ** Math.min(this.attempt, 6));
     this.retryT = window.setTimeout(() => this.connect(), Math.max(250, Math.random() * ceiling));
   }
 
@@ -106,7 +114,15 @@ export class Connection {
       case "Title": this.h.title(m.v as string); break;
       case "Pong": this.lastPong = Date.now(); break;
       case "Exit": this.done = true; this.stop(); this.h.exit(m.code as number | null); break;
-      case "Error": this.h.error(String(m.message)); break;
+      case "Error":
+        this.h.error(String(m.message));
+        if (m.code === "Unauthorized") {
+          this.done = true;
+          this.stop();
+          this.ws?.close();
+          this.h.unauthorized?.();
+        }
+        break;
     }
   }
 }

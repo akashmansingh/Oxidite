@@ -9,9 +9,13 @@ export interface ShellCapability {
   id: string;
   available: boolean;
 }
+export type SshAuthSpec =
+  | { Password: string }
+  | { PublicKey: { key_path: string; passphrase: string | null } }
+  | "Interactive";
 export type BackendSpec =
   | { LocalPty: { shell: string | null; cwd: string | null } }
-  | { Ssh: { host: string; port: number; user: string; auth: { Password: string }; multiplexer: "None" | "Tmux" } };
+  | { Ssh: { host: string; port: number; user: string; auth: SshAuthSpec; multiplexer: "None" | "Tmux" } };
 export type SessionState =
   | "Starting" | "Running" | "Degraded" | "Detached"
   | { Reconnecting: { attempt: number } } | { Exited: { code: number | null } } | { Failed: { reason: string } };
