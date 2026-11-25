@@ -88,7 +88,8 @@ export class Connection {
         if (this.id) this.attach(); else this.tx(pack("Create", { backend: this.spec, size: this.size() }));
         break;
       case "Created": this.id = idStr(m.session); this.h.created(this.id); this.attach(); break;
-      case "Attached": if ((m.start as Record<string, unknown>)["Snapshot"]) this.h.reset(); break;
+      case "Attached": if ((m.start as Record<string, unknown>)["Snapshot"]) this.h.reset();
+        this.h.state("Running"); break;
       case "Snapshot": { const b = bytesOf(m.bytes); this.offset = m.offset as number; this.h.output(b, () => this.ackTo(this.offset)); break; }
       case "Output": {
         const b = bytesOf(m.bytes), end = (m.offset as number) + b.length;
