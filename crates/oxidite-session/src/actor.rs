@@ -37,6 +37,9 @@ pub struct SessionActor {
     pub low_watermark: usize,
     pub detached_at: Option<std::time::Instant>,
     pub idle_timeout: std::time::Duration,
+    pub active_cwd: Option<std::path::PathBuf>,
+    last_os_cwd: Option<std::path::PathBuf>,
+    last_osc_cwd: Option<std::path::PathBuf>,
 }
 
 pub enum ActorCmd {
@@ -74,6 +77,9 @@ pub enum ActorCmd {
     GetPresence {
         resp: oneshot::Sender<(Option<u64>, usize)>,
     },
+    GetCwd {
+        resp: oneshot::Sender<Option<std::path::PathBuf>>,
+    },
 }
 
 pub struct AttachResult {
@@ -110,8 +116,32 @@ impl SessionActor {
             low_watermark: LOW_WATERMARK,
             detached_at: None,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            active_cwd: None,
+            last_os_cwd: None,
+            last_osc_cwd: None,
         };
         (actor, client_tx)
+    }
+
+    #[must_use]
+    pub fn with_initial_cwd(mut self, cwd: Option<std::path::PathBuf>) -> Self {
+        self.active_cwd = cwd;
+        self
+    }
+
+    /// Synchronizes live working directory from either the OS child process or OSC sequences.
+    fn sync_cwd(&mut self) -> Option<std::path::PathBuf> {
+        let os_cwd = self.backend.current_cwd();
+        if os_cwd.is_some() && os_cwd != self.last_os_cwd {
+            self.last_os_cwd = os_cwd.clone();
+            self.active_cwd = os_cwd;
+        }
+        let osc_cwd = self.terminal.cwd.clone();
+        if osc_cwd.is_some() && osc_cwd != self.last_osc_cwd {
+            self.last_osc_cwd = osc_cwd.clone();
+            self.active_cwd = osc_cwd;
+        }
+        self.active_cwd.clone()
     }
 
     fn viewers_count(&self) -> usize {
@@ -143,6 +173,14 @@ impl SessionActor {
                     match cmd {
                         ActorCmd::Attach { mode, last_offset, client_id, resp } => {
                             self.detached_at = None;
+                            if matches!(self.state, SessionState::Detached) {
+                                // Detached -> Running is a legal transition: a returning client makes the session live again.
+                                self.state = SessionState::Running;
+                                let _ = self.client_tx.send(ServerMsg::State {
+                                    session: self.id,
+                                    state: self.state.clone(),
+                                });
+                            }
                             let cid = client_id.unwrap_or_else(|| {
                                 let id = self.next_client_id;
                                 self.next_client_id += 1;
@@ -288,6 +326,9 @@ impl SessionActor {
                         ActorCmd::GetPresence { resp } => {
                             let _ = resp.send((self.active_writer, self.viewers_count()));
                         }
+                        ActorCmd::GetCwd { resp } => {
+                            let _ = resp.send(self.sync_cwd());
+                        }
                     }
                 }
                 // Invariant: Flow control checks writer_unacked_bytes only!
@@ -306,6 +347,7 @@ impl SessionActor {
                             // Feed into VT parser / terminal
                             let mut parser = oxidite_vt::parser::Parser::new();
                             parser.advance(&mut self.terminal, &bytes);
+                            self.sync_cwd();
 
                             self.writer_unacked_bytes += bytes.len();
 

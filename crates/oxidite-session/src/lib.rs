@@ -33,6 +33,10 @@ pub trait Backend: Send {
     async fn resize(&mut self, size: TermSize) -> Result<()>;
     fn events(&mut self) -> mpsc::Receiver<BackendEvent>;
     async fn kill(&mut self) -> Result<()>;
+    /// Returns the backend's current local filesystem working directory, if applicable.
+    fn current_cwd(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 pub mod actor;

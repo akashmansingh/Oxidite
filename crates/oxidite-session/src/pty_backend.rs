@@ -90,4 +90,11 @@ impl Backend for LocalPtyBackend {
             .kill()
             .map_err(|e| SessionError::Backend(e.to_string()))
     }
+
+    fn current_cwd(&self) -> Option<std::path::PathBuf> {
+        self.writer
+            .try_lock()
+            .ok()
+            .and_then(|writer| writer.current_working_directory())
+    }
 }

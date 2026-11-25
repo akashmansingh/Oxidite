@@ -402,24 +402,28 @@ impl Handler for Terminal {
         self.title = title;
     }
 
-    /// Sets the current working directory from an OSC 7 sequence.
+    /// Sets the current working directory from an OSC 7 or OSC 9;9 sequence.
     fn set_working_directory(&mut self, uri: &str) {
-        let path_str = if let Some(stripped) = uri.strip_prefix("file://") {
-            if let Some(slash_idx) = stripped.find('/') {
-                &stripped[slash_idx..]
+        let stripped = uri.trim();
+        let raw_path = if let Some(after_scheme) = stripped.strip_prefix("file://") {
+            if let Some(slash_idx) = after_scheme.find('/') {
+                &after_scheme[slash_idx..]
             } else {
-                stripped
+                after_scheme
             }
         } else {
-            uri
+            stripped
         };
+        let decoded = percent_decode_utf8(raw_path);
         #[cfg(windows)]
         let path_str =
-            if path_str.starts_with('/') && path_str.len() > 3 && path_str.as_bytes()[2] == b':' {
-                &path_str[1..]
+            if decoded.starts_with('/') && decoded.len() > 3 && decoded.as_bytes()[2] == b':' {
+                &decoded[1..]
             } else {
-                path_str
+                decoded.as_str()
             };
+        #[cfg(not(windows))]
+        let path_str = decoded.as_str();
         let p = std::path::PathBuf::from(path_str);
         if p.is_dir() {
             self.cwd = Some(p);
@@ -548,6 +552,34 @@ impl Handler for Terminal {
             self.current_hyperlink = None;
             self.current_hyperlink_id = 0;
         }
+    }
+}
+
+fn percent_decode_utf8(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+const fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 

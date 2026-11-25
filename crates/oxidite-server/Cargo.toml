@@ -30,6 +30,8 @@ serde_json = "1.0"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 argon2 = "0.5"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 rustls-pki-types = "1.16"
 anyhow = "1.0"
 thiserror = "2.0"

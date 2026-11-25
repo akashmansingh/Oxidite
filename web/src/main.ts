@@ -4,6 +4,15 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { makeTerminal, THEMES, type ThemeName } from "./terminal";
 import { Connection, type Handlers } from "./connection";
 import { stateName, type BackendSpec, type Msg, type SessionState, type ShellCapability } from "./protocol";
+import { DeviceVault } from "./device-vault";
+import {
+  buildPairShareUrl,
+  buildSshAuthSpec,
+  classifyGatewayStatus,
+  computeRefreshDelayMs,
+  defaultDeviceLabel,
+  parsePairGrantFromHash,
+} from "./auth-helpers";
 
 // Gateway endpoints this UI expects:
 //   GET  /api/sessions                      -> Sess[]
@@ -17,8 +26,11 @@ import { stateName, type BackendSpec, type Msg, type SessionState, type ShellCap
 //   POST /api/git/checkout { session, branch }
 //   POST /api/git/fetch    { session }
 // Missing endpoints show an empty state; nothing is faked.
-type Sess = { id: string; state: SessionState; label?: string; workspace?: string };
+type Sess = { id: string; state: SessionState; label?: string; workspace?: string; cwd_id?: string | null };
 type FileChg = { path: string; add: number; del: number; staged: boolean };
+const sessionCwds = new Map<string, string | null>();
+let cwdRefreshTimer: number | undefined;
+let cwdFollowupTimer: number | undefined;
 interface Tab {
   id: string | null;
   label: string;
@@ -42,7 +54,32 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""):
 };
 const note = (n: HTMLElement, text: string): void => n.replaceChildren(el("p", "note", text));
 const enc = new TextEncoder();
-let token = sessionStorage.getItem("oxidite.token") ?? "";
+// Credentials stay strictly in memory (or encrypted in IndexedDB via DeviceVault when a PIN is set).
+let token = "";
+let authPrompted = false;
+let localShellAvailable = true;
+let powershellAvailable = false;
+let shellsProbed = false;
+let refreshing: Promise<void> | null = null;
+let refreshFailures = 0;
+let retryRefreshTimer: number | undefined;
+let lastAuthError = "";
+
+class ApiError extends Error {
+  constructor(public readonly status: number | null, message: string) {
+    super(message);
+  }
+}
+// The server labels every session "session-<id>". Remember what this browser called the ones it created.
+const names: Record<string, string> = (() => { try { return JSON.parse(localStorage.getItem("oxidite.names") ?? "{}"); } catch { return {}; } })();
+function uniqueLabel(base: string): string {
+  const used = new Set([...Object.values(names), ...tabs.map((t) => t.label)]);
+  for (let i = 1; ; i++) { const l = i === 1 ? base : `${base} ${i}`; if (!used.has(l)) return l; }
+}
+const rememberName = (id: string, label: string): void => {
+  names[id] = label;
+  localStorage.setItem("oxidite.names", JSON.stringify(Object.fromEntries(Object.entries(names).slice(-100))));
+};
 let theme = (localStorage.getItem("oxidite.theme") as ThemeName | null) ?? "onyx";
 const tabs: Tab[] = [];
 let cur: Tab | null = null;
@@ -85,19 +122,26 @@ function fitVisible(): void {
   for (const t of tabs) if (!t.el.hidden) t.fit.fit();
 }
 
-async function api<T>(path: string, body?: unknown): Promise<T> {
-  const r = await fetch(path, {
-    method: body ? "POST" : "GET",
-    headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+async function api<T>(path: string, body?: unknown, methodOverride?: string): Promise<T> {
+  const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(8000) : undefined;
+  let r: Response;
+  try {
+    r = await fetch(path, {
+      method: methodOverride ?? (body !== undefined ? "POST" : "GET"),
+      headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
+    });
+  } catch {
+    throw new ApiError(null, "Gateway unreachable");
+  }
   if (r.status === 401) {
     token = "";
-    sessionStorage.removeItem("oxidite.token");
-    $<HTMLDialogElement>("#gate").showModal();
-    throw new Error("401");
+    if (!authPrompted) void promptUnlock("Your gateway token was rejected or revoked.");
+    throw new ApiError(401, "Unauthorized");
   }
-  if (!r.ok) throw new Error(String(r.status));
+  if (!r.ok) throw new ApiError(r.status, String(r.status));
+  if (r.status === 204) return undefined as T;
   return (r.headers.get("content-type")?.includes("json") ? r.json() : r.text()) as Promise<T>;
 }
 
@@ -117,14 +161,14 @@ function paint(): void {
 }
 
 function renderTabs(): void {
-  const add = el("button", "ib addtab", "+");
+  const add = el("button", "ib addtab");
   add.setAttribute("aria-label", "New session");
   add.onclick = () => $("#new").click();
   $("#tabs").replaceChildren(
     ...tabs.map((t) => {
       const b = el("div", "tab"),
         main = el("button", "tabmain", t.label),
-        x = el("button", "ib x", "×");
+        x = el("button", "ib x");
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", String(t === cur || t === cur?.pair));
       b.dataset.b = t.b;
@@ -150,6 +194,10 @@ function select(t: Tab | null): void {
   $("#panes").classList.toggle("split", !!t?.pair);
   $("#panes").classList.toggle("v", splitDir === "v");
   $("#sp").textContent = !t?.pair ? "Split" : splitDir === "h" ? "Stack" : "Unsplit";
+  $("#branches").hidden = true;
+  $("#branch").setAttribute("aria-expanded", "false");
+  $("#dtitle").textContent = "";
+  note($("#diff"), "Select a changed file on the right to see its diff.");
   if (t)
     requestAnimationFrame(() => {
       fitVisible();
@@ -158,6 +206,7 @@ function select(t: Tab | null): void {
   renderTabs();
   paint();
   void loadChanges();
+  if (!$("#hist").hidden) void loadHistory();
   void refresh();
 }
 
@@ -172,6 +221,7 @@ function closeTab(t: Tab): void {
 }
 
 function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host: string): void {
+  if ("spec" in t) label = uniqueLabel(label);
   const pane = el("div", "pane");
   $("#panes").append(pane);
   const { term, fit } = makeTerminal(pane, theme);
@@ -211,10 +261,21 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       if (m) {
         tab.msg = m;
         paint();
+      } else if (tab.msg.startsWith("Connection lost") || tab.msg === "Connecting") {
+        tab.msg = "Running";
+        paint();
       }
+    },
+    unauthorized: () => {
+      token = "";
+      tab.b = "down";
+      tab.msg = "Unauthorized: unlock with a valid device token";
+      paint();
+      if (!authPrompted) void promptUnlock("Session WebSocket rejected your token.");
     },
     created: (id) => {
       tab.id = id;
+      rememberName(id, tab.label);
       void refresh();
       void loadChanges();
     },
@@ -233,11 +294,24 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       renderTabs();
       paint();
       logEvent(tab, stateText(s));
+      void refresh();
     },
     prompt: (k, m) => ask(k, m, tab),
   };
   tab.conn = new Connection(token, h, () => ({ rows: term.rows, cols: term.cols }));
-  term.onData((d) => tab.conn.input(enc.encode(d)));
+  term.onData((d) => {
+    tab.conn.input(enc.encode(d));
+    if (d.includes("\r") || d.includes("\n")) {
+      clearTimeout(cwdRefreshTimer);
+      clearTimeout(cwdFollowupTimer);
+      cwdRefreshTimer = window.setTimeout(() => {
+        if (token && !gate.open && !vaultDlg.open && cur?.id === tab.id) void refresh();
+      }, 350);
+      cwdFollowupTimer = window.setTimeout(() => {
+        if (token && !gate.open && !vaultDlg.open && cur?.id === tab.id) void refresh();
+      }, 1100);
+    }
+  });
   term.onBinary((d) => tab.conn.input(Uint8Array.from(d, (c) => c.charCodeAt(0))));
   term.onResize(({ rows, cols }) => tab.conn.resize({ rows, cols }));
   tabs.push(tab);
@@ -292,71 +366,215 @@ function ask(kind: "hostkey" | "auth", m: Msg, tab: Tab): void {
   dlg.showModal();
 }
 
-async function refresh(): Promise<void> {
+function renderOfflineFallback(reason: string, canRetry: boolean): void {
+  const box = $("#ws-fallback");
+  box.hidden = false;
+  const actions = el("div", "row");
+  if (canRetry) {
+    const retryBtn = el("button", "btn alt", "Retry now");
+    retryBtn.type = "button";
+    retryBtn.onclick = () => void refresh();
+    actions.append(retryBtn);
+  }
+  const authBtn = el("button", "btn alt", token ? "Switch token" : "Unlock / Pair");
+  authBtn.type = "button";
+  authBtn.onclick = () => void promptUnlock("", true);
+  actions.append(authBtn);
+  box.replaceChildren(el("p", "", reason), actions);
+
+  if (tabs.length > 0 && $("#ws").children.length === 0) {
+    const g = el("section", "wsg");
+    g.append(el("h3", "", "Open in this browser"));
+    for (const t of tabs) {
+      const b = el("button", "sess");
+      b.dataset.s = t.b;
+      b.dataset.open = "1";
+      b.setAttribute("aria-current", String(cur === t));
+      b.append(el("i", "dot"), el("b", "", t.label), el("span", "", t.a === "ok" ? "open" : "offline"));
+      b.onclick = () => select(t);
+      g.append(b);
+    }
+    $("#ws").replaceChildren(g);
+    $("#empty-ws").hidden = true;
+  }
+}
+
+async function probeShellCapabilities(): Promise<void> {
   if (!token) return;
   try {
-    const list = await api<Sess[]>("/api/sessions");
-    const groups = new Map<string, Sess[]>();
-    for (const s of list) {
-      const g = s.workspace ?? "Sessions";
-      groups.set(g, [...(groups.get(g) ?? []), s]);
-    }
-    $("#ws").replaceChildren(
-      ...[...groups].map(([name, items]) => {
-        const g = el("section", "wsg");
-        g.append(el("h3", "", name));
-        for (const s of items) {
-          const b = el("button", "sess"),
-            n = stateName(s.state),
-            nm = s.label ?? s.id.slice(0, 8);
-          b.dataset.s = n;
-          b.setAttribute("aria-current", String(cur !== null && cur.id === s.id));
-          b.append(el("i", "dot"), el("b", "", nm), el("span", "", n));
-          b.onclick = () => {
-            const open = tabs.find((t) => t.id === s.id);
-            if (open) select(open);
-            else openTab({ id: s.id }, nm, nm);
-          };
-          g.append(b);
-        }
-        return g;
-      }),
-    );
-    $("#empty-ws").hidden = list.length > 0;
-
-    // Check PowerShell capabilities
-    try {
-      const shellsRes = await fetch("/api/runtime/shells", { headers: { Authorization: `Bearer ${token}` } });
-      if (shellsRes.ok) {
-        const caps = (await shellsRes.json()) as ShellCapability[];
-        const hasPwsh = caps.some((c) => c.id === "SystemPowerShell" && c.available);
-        const pwshLabel = document.querySelector<HTMLElement>("#lbl-powershell");
-        if (pwshLabel) pwshLabel.hidden = !hasPwsh;
-      }
-    } catch {
-      // Non-fatal probe failure
-    }
+    const caps = await api<ShellCapability[]>("/api/runtime/shells");
+    localShellAvailable = caps.some((c) => c.id === "default" && c.available);
+    powershellAvailable = caps.some((c) => c.id === "SystemPowerShell" && c.available);
+    shellsProbed = true;
+    applyShellAvailabilityUi();
   } catch {
-    $("#msg").textContent = "Could not load sessions. Check the token and that the gateway is running.";
+    // Non-fatal fallback: keep defaults usable when local probe fails temporarily
   }
+}
+
+function applyShellAvailabilityUi(): void {
+  const pwshLabel = document.querySelector<HTMLElement>("#lbl-powershell");
+  const kLocal = document.querySelector<HTMLInputElement>("#k-local");
+  const kPwsh = document.querySelector<HTMLInputElement>("#k-powershell");
+  const kSsh = document.querySelector<HTMLInputElement>("#k-ssh");
+  const cwdWrap = document.querySelector<HTMLElement>("#local-cwd-wrap");
+  const disabledNote = document.querySelector<HTMLElement>("#local-disabled-note");
+
+  if (pwshLabel) pwshLabel.hidden = !powershellAvailable;
+  if (kLocal) kLocal.disabled = !localShellAvailable;
+  if (kPwsh) kPwsh.disabled = !powershellAvailable;
+  if (cwdWrap) cwdWrap.hidden = !localShellAvailable && !powershellAvailable;
+  if (disabledNote) disabledNote.hidden = localShellAvailable || powershellAvailable;
+  if (!localShellAvailable && kLocal?.checked && kSsh) kSsh.checked = true;
+}
+
+// Names are pruned only for sessions the server once listed, so a stale in-flight list cannot erase a new one.
+const seen = new Set<string>();
+let primed = false;
+async function refresh(): Promise<void> {
+  if (!token) {
+    renderOfflineFallback("Gateway is locked. Pair this device or unlock with a token.", false);
+    return;
+  }
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    try {
+      const list = await api<Sess[]>("/api/sessions");
+      refreshFailures = 0;
+      lastAuthError = "";
+      clearTimeout(retryRefreshTimer);
+      retryRefreshTimer = undefined;
+      $("#ws-fallback").hidden = true;
+
+      const live = new Set(list.map((x) => x.id));
+      for (const id of Object.keys(names)) if (!live.has(id) && (!primed || seen.has(id))) delete names[id];
+      for (const id of sessionCwds.keys()) if (!live.has(id)) sessionCwds.delete(id);
+      for (const id of live) seen.add(id);
+      primed = true;
+      let activeCwdChanged = false;
+      for (const s of list) {
+        const nextCwd = s.cwd_id ?? null;
+        if (!sessionCwds.has(s.id) || sessionCwds.get(s.id) !== nextCwd) {
+          sessionCwds.set(s.id, nextCwd);
+          if (cur?.id === s.id) activeCwdChanged = true;
+        }
+      }
+      const groups = new Map<string, Sess[]>();
+      for (const s of list) {
+        const g = s.workspace ?? "Sessions";
+        groups.set(g, [...(groups.get(g) ?? []), s]);
+      }
+      $("#ws").replaceChildren(
+        ...[...groups].map(([name, items]) => {
+          const g = el("section", "wsg");
+          g.append(el("h3", "", name));
+          for (const s of items) {
+            const b = el("button", "sess"),
+              n = stateName(s.state),
+              nm = names[s.id] ?? s.label ?? s.id.slice(0, 8);
+            b.dataset.s = n;
+            b.setAttribute("aria-current", String(cur !== null && cur.id === s.id));
+            const isOpen = tabs.some((t) => t.id === s.id);
+            b.dataset.open = isOpen ? "1" : "0";
+            b.append(el("i", "dot"), el("b", "", nm), el("span", "", isOpen ? `${n}, open` : n));
+            b.onclick = () => {
+              const open = tabs.find((t) => t.id === s.id);
+              if (open) select(open);
+              else openTab({ id: s.id }, nm, nm);
+            };
+            g.append(b);
+          }
+          return g;
+        }),
+      );
+      $("#empty-ws").hidden = list.length > 0;
+      paint();
+      void probeShellCapabilities();
+      if (cur?.id) {
+        if (activeCwdChanged) {
+          $("#dtitle").textContent = "";
+          note($("#diff"), "Select a changed file on the right to see its diff.");
+        }
+        void loadChanges();
+        if (!$("#hist").hidden) void loadHistory();
+        if (!$("#branches").hidden) void loadBranches();
+      }
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : null;
+      const kind = classifyGatewayStatus(status);
+      if (kind === "unauthorized") {
+        lastAuthError = "Access token was rejected or revoked.";
+        renderOfflineFallback(lastAuthError, false);
+        $("#msg").textContent = "Gateway token expired or revoked. Unlock or switch token.";
+      } else {
+        refreshFailures += 1;
+        const delay = computeRefreshDelayMs(refreshFailures);
+        renderOfflineFallback(
+          status === null
+            ? `Cannot reach gateway. Retrying in ${Math.round(delay / 1000)}s...`
+            : `Gateway error (${status}). Retrying in ${Math.round(delay / 1000)}s...`,
+          true,
+        );
+        if (!cur || cur.msg === "No session open") {
+          $("#msg").textContent = "Gateway unreachable — retrying automatically.";
+        }
+        clearTimeout(retryRefreshTimer);
+        retryRefreshTimer = window.setTimeout(() => {
+          if (token && document.visibilityState === "visible") void refresh();
+        }, delay);
+      }
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
 }
 
 async function loadChanges(): Promise<void> {
   const list = $("#files");
+  if (!token) {
+    $("#bname").textContent = "no branch";
+    $("#sum").textContent = "";
+    $("#count").textContent = "0";
+    note(list, "Unlock the gateway to view session changes.");
+    return;
+  }
   if (!cur?.id) {
-    note(list, "Open a session to see its changes.");
+    $("#bname").textContent = "no branch";
+    $("#sum").textContent = "";
+    $("#count").textContent = "0";
+    note(list, "Open a session in a Git folder to view its changes.");
     return;
   }
   try {
-    const r = await api<{ branch: string; files: FileChg[] }>(`/api/git/changes?session=${cur.id}`);
+    const sessionId = cur.id;
+    const r = await api<{ is_repo?: boolean; folder?: string | null; branch: string; files: FileChg[] }>(
+      `/api/git/changes?session=${encodeURIComponent(sessionId)}`,
+    );
+    if (cur?.id !== sessionId) return;
+    if (r.is_repo === false) {
+      $("#bname").textContent = "no git repo";
+      $("#sum").textContent = "";
+      $("#count").textContent = "0";
+      note(
+        list,
+        r.folder
+          ? `Folder "${r.folder}" is not inside a Git repository. Open or cd into a Git folder to inspect changes.`
+          : "No local Git repository in this session.",
+      );
+      return;
+    }
     const add = r.files.reduce((a, f) => a + f.add, 0),
       del = r.files.reduce((a, f) => a + f.del, 0);
-    $("#bname").textContent = r.branch;
+    $("#bname").textContent = r.branch || "HEAD";
     $("#sum").textContent = `+${add} −${del}`;
     $("#count").textContent = String(r.files.length);
-    list.replaceChildren(...(r.files.length ? r.files.map(fileRow) : [el("p", "note", "No changes in this workspace.")]));
+    list.replaceChildren(...(r.files.length ? r.files.map(fileRow) : [el("p", "note", "No changes in this folder.")]));
   } catch {
-    note(list, "Git data is not available. The gateway needs its /api/git endpoints.");
+    $("#bname").textContent = "no branch";
+    $("#sum").textContent = "";
+    $("#count").textContent = "0";
+    note(list, "Git data is unavailable for this session.");
   }
 }
 
@@ -376,8 +594,9 @@ function fileRow(f: FileChg): HTMLElement {
 }
 
 async function stage(paths: string[], staged: boolean): Promise<void> {
+  if (!cur?.id) return;
   try {
-    await api("/api/git/stage", { session: cur?.id, paths, staged });
+    await api("/api/git/stage", { session: cur.id, paths, staged });
   } catch {
     $("#msg").textContent = "Could not change staging.";
   }
@@ -386,8 +605,18 @@ async function stage(paths: string[], staged: boolean): Promise<void> {
 
 async function loadHistory(): Promise<void> {
   const box = $("#hist");
+  if (!cur?.id) {
+    note(box, "Open a session in a Git folder to view its commit history.");
+    return;
+  }
   try {
-    const log = await api<{ hash: string; subject: string }[]>(`/api/git/log?session=${cur?.id}`);
+    const log = await api<{ hash: string; subject: string }[]>(
+      `/api/git/log?session=${encodeURIComponent(cur.id)}`,
+    );
+    if (!log.length) {
+      note(box, "No commit history in the current session folder.");
+      return;
+    }
     box.replaceChildren(
       ...log.map((c) => {
         const r = el("div", "commit");
@@ -396,11 +625,12 @@ async function loadHistory(): Promise<void> {
       }),
     );
   } catch {
-    note(box, "History is not available. The gateway needs /api/git/log.");
+    note(box, "History is unavailable for this session.");
   }
 }
 
 async function loadDiff(path: string): Promise<void> {
+  if (!cur?.id) return;
   $("#dtitle").textContent = path;
   $("#app").classList.remove("nodiff");
   if (small()) {
@@ -408,7 +638,11 @@ async function loadDiff(path: string): Promise<void> {
     $("#app").classList.add("show-diff");
   }
   try {
-    renderDiff(await api<string>(`/api/git/diff?session=${cur?.id}&path=${encodeURIComponent(path)}`));
+    renderDiff(
+      await api<string>(
+        `/api/git/diff?session=${encodeURIComponent(cur.id)}&path=${encodeURIComponent(path)}`,
+      ),
+    );
   } catch {
     note($("#diff"), "Could not load this diff.");
   }
@@ -557,16 +791,27 @@ $("#sp").onclick = () => {
 
 async function loadBranches(): Promise<void> {
   const m = $("#branches");
+  if (!cur?.id) {
+    note(m, "Open a session in a Git folder to list branches.");
+    return;
+  }
   try {
-    const r = await api<{ current: string; branches: string[] }>(`/api/git/branches?session=${cur?.id}`);
+    const r = await api<{ is_repo?: boolean; current: string; branches: string[] }>(
+      `/api/git/branches?session=${encodeURIComponent(cur.id)}`,
+    );
+    if (r.is_repo === false || r.branches.length === 0) {
+      note(m, "No local Git branches for this session folder.");
+      return;
+    }
     m.replaceChildren(
       ...r.branches.map((n) => {
         const b = el("button", "", n);
         b.setAttribute("role", "option");
         b.setAttribute("aria-selected", String(n === r.current));
         b.onclick = async () => {
+          if (!cur?.id) return;
           try {
-            await api("/api/git/checkout", { session: cur?.id, branch: n });
+            await api("/api/git/checkout", { session: cur.id, branch: n });
             $("#msg").textContent = `Switched to ${n}.`;
           } catch {
             $("#msg").textContent = `Could not switch to ${n}. Commit or stash your changes first.`;
@@ -577,7 +822,7 @@ async function loadBranches(): Promise<void> {
       }),
     );
   } catch {
-    note(m, "Branches are not available. The gateway needs /api/git/branches.");
+    note(m, "Branches are unavailable for this session.");
   }
 }
 $("#branch").onclick = (e) => {
@@ -595,11 +840,15 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") $("#branches").hidden = true;
 });
 $("#fetch").onclick = async () => {
+  if (!cur?.id) {
+    $("#msg").textContent = "Open a session in a Git folder first.";
+    return;
+  }
   const b = $<HTMLButtonElement>("#fetch");
   b.disabled = true;
   b.textContent = "Fetching";
   try {
-    await api("/api/git/fetch", { session: cur?.id });
+    await api("/api/git/fetch", { session: cur.id });
     $("#msg").textContent = "Fetched from the remote.";
   } catch {
     $("#msg").textContent = "Fetch failed. Check the remote and its credentials on the gateway.";
@@ -609,13 +858,17 @@ $("#fetch").onclick = async () => {
   await loadChanges();
 };
 $("#commit").onclick = async () => {
+  if (!cur?.id) {
+    $("#msg").textContent = "Open a session in a Git folder first.";
+    return;
+  }
   const m = $<HTMLTextAreaElement>("#cmsg");
   if (!m.value.trim()) {
     m.focus();
     return;
   }
   try {
-    await api("/api/git/commit", { session: cur?.id, message: m.value });
+    await api("/api/git/commit", { session: cur.id, message: m.value });
     m.value = "";
   } catch {
     $("#msg").textContent = "Commit failed. Stage at least one file first.";
@@ -658,7 +911,22 @@ for (const [sel, v, dir] of [
   };
 }
 
-$("#new").onclick = () => $<HTMLDialogElement>("#newdlg").showModal();
+$("#new").onclick = () => {
+  if (!shellsProbed && token) void probeShellCapabilities();
+  applyShellAvailabilityUi();
+  $<HTMLDialogElement>("#newdlg").showModal();
+};
+
+const sshAuthSel = $<HTMLSelectElement>("#ssh-auth-kind");
+function syncSshAuthFields(): void {
+  const k = sshAuthSel.value;
+  $("#ssh-pw-wrap").hidden = k !== "password";
+  $("#ssh-key-wrap").hidden = k !== "publickey";
+  $("#ssh-passphrase-wrap").hidden = k !== "publickey";
+}
+sshAuthSel.onchange = syncSshAuthFields;
+syncSshAuthFields();
+
 $<HTMLDialogElement>("#newdlg").onclose = () => {
   const dlg = $<HTMLDialogElement>("#newdlg");
   if (dlg.returnValue !== "go") {
@@ -667,36 +935,338 @@ $<HTMLDialogElement>("#newdlg").onclose = () => {
   }
   const f = new FormData($<HTMLFormElement>("#newdlg form")),
     s = (k: string): string => String(f.get(k) ?? "");
+  const cwd = s("cwd").trim() || null;
   if (s("kind") === "ssh") {
+    const auth = buildSshAuthSpec(s("auth_kind"), s("pw"), s("key_path"), s("passphrase"));
     openTab(
       {
         spec: {
           Ssh: {
-            host: s("host"),
+            host: s("host").trim(),
             port: Number(s("port")) || 22,
-            user: s("user"),
-            auth: { Password: s("pw") },
+            user: s("user").trim(),
+            auth,
             multiplexer: f.get("tmux") ? "Tmux" : "None",
           },
         },
       },
-      s("host"),
-      s("host"),
+      s("host").trim(),
+      s("host").trim(),
     );
   } else if (s("kind") === "powershell") {
-    openTab({ spec: { LocalPty: { shell: "SystemPowerShell", cwd: null } } }, "powershell", "powershell");
+    openTab({ spec: { LocalPty: { shell: "SystemPowerShell", cwd } } }, "powershell", "powershell");
   } else {
-    openTab({ spec: { LocalPty: { shell: null, cwd: null } } }, "local shell", "local shell");
+    openTab({ spec: { LocalPty: { shell: null, cwd } } }, "local shell", "local shell");
   }
 };
 
 const gate = $<HTMLDialogElement>("#gate");
-gate.onclose = () => {
-  token = $<HTMLInputElement>("#tok").value.trim();
-  sessionStorage.setItem("oxidite.token", token);
+const gateForm = $<HTMLFormElement>("#gate form");
+const gateErr = $("#gate-err");
+const vaultDlg = $<HTMLDialogElement>("#vault-unlock-dlg");
+const vaultForm = $<HTMLFormElement>("#vault-unlock-dlg form");
+const vaultErr = $("#vault-err");
+const devicesDlg = $<HTMLDialogElement>("#devicesdlg");
+
+function applyAuthenticatedToken(newToken: string): void {
+  token = newToken;
+  authPrompted = false;
+  for (const t of tabs) {
+    t.conn.setToken(newToken);
+    t.conn.reconnectNow();
+  }
   void refresh();
+  void loadChanges();
+}
+
+async function tryStoreInVault(deviceId: string | null, tokVal: string, label: string, pin: string): Promise<string | null> {
+  if (!pin) return null;
+  if (pin.length < 6) return "PIN must be at least 6 characters.";
+  if (!deviceId) return null;
+  if (!DeviceVault.isAvailable() || !window.isSecureContext) {
+    $("#msg").textContent = "Browser vault requires HTTPS or localhost; token held in memory only for this tab.";
+    return null;
+  }
+  await DeviceVault.enroll(deviceId, tokVal, label, pin);
+  return null;
+}
+
+function bindVisibilityToggle(btnSel: string, inputSel: string): void {
+  const btn = document.querySelector<HTMLButtonElement>(btnSel);
+  const input = document.querySelector<HTMLInputElement>(inputSel);
+  if (!btn || !input) return;
+  const sync = (): void => { btn.textContent = input.type === "password" ? "Show" : "Hide"; };
+  sync();
+  btn.onclick = () => {
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    input.type = input.type === "password" ? "text" : "password";
+    sync();
+    input.focus();
+    if (start !== null && end !== null) {
+      try { input.setSelectionRange(start, end); } catch { /* ignore */ }
+    }
+  };
+}
+bindVisibilityToggle("#tok-vis", "#tok");
+bindVisibilityToggle("#pin-vis", "#tok-pin");
+bindVisibilityToggle("#vault-pin-vis", "#vault-pin");
+
+gateForm.onsubmit = async (e) => {
+  e.preventDefault();
+  gateErr.hidden = true;
+  const raw = $<HTMLInputElement>("#tok").value.trim();
+  const label = $<HTMLInputElement>("#tok-label").value.trim() || defaultDeviceLabel();
+  const pin = $<HTMLInputElement>("#tok-pin").value;
+  if (!raw) {
+    gateErr.textContent = "Enter a token or pairing grant.";
+    gateErr.hidden = false;
+    return;
+  }
+  if (pin && pin.length < 6) {
+    gateErr.textContent = "Local vault PIN must be at least 6 characters (or leave blank).";
+    gateErr.hidden = false;
+    return;
+  }
+
+  try {
+    // 1. Try treating input directly as a single-use pairing grant (bootstrap or issued eg_...)
+    const enrollRes = await fetch("/api/devices/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ grant: raw, label }),
+    });
+    if (enrollRes.status >= 500) {
+      gateErr.textContent = `Gateway error (HTTP ${enrollRes.status}). Make sure oxidited is running on the same port as this UI / Vite proxy.`;
+      gateErr.hidden = false;
+      return;
+    }
+    if (enrollRes.ok) {
+      const enrolled = (await enrollRes.json()) as { device_id: string; token: string; label: string };
+      await tryStoreInVault(enrolled.device_id, enrolled.token, enrolled.label, pin);
+      $<HTMLInputElement>("#tok").value = "";
+      $<HTMLInputElement>("#tok-pin").value = "";
+      gate.close();
+      applyAuthenticatedToken(enrolled.token);
+      return;
+    }
+
+    // 2. Otherwise verify raw as an existing bearer / od1 device / gateway token
+    const verifyRes = await fetch("/api/sessions", {
+      headers: { Authorization: `Bearer ${raw}` },
+    });
+    if (!verifyRes.ok) {
+      gateErr.textContent =
+        verifyRes.status === 401
+          ? "Token rejected. Check the startup token or ask another paired device for a fresh pairing link."
+          : `Gateway error (HTTP ${verifyRes.status}). Make sure oxidited is running on the same port as this UI / Vite proxy.`;
+      gateErr.hidden = false;
+      return;
+    }
+
+    let finalToken = raw;
+    let finalDeviceId: string | null = raw.startsWith("od1.") ? raw.split(".")[1] ?? null : null;
+    if (!raw.startsWith("od1.")) {
+      // Automatically convert a bootstrap/gateway token into a unique persistent token for this device
+      try {
+        const grantRes = await fetch("/api/devices/grant", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${raw}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ ttl_secs: 300 }),
+        });
+        if (grantRes.ok) {
+          const { grant } = (await grantRes.json()) as { grant: string };
+          const devRes = await fetch("/api/devices/enroll", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ grant, label }),
+          });
+          if (devRes.ok) {
+            const enrolled = (await devRes.json()) as { device_id: string; token: string };
+            finalToken = enrolled.token;
+            finalDeviceId = enrolled.device_id;
+          }
+        }
+      } catch {
+        // Fallback: keep raw verified token in memory
+      }
+    }
+
+    await tryStoreInVault(finalDeviceId, finalToken, label, pin);
+    $<HTMLInputElement>("#tok").value = "";
+    $<HTMLInputElement>("#tok-pin").value = "";
+    gate.close();
+    applyAuthenticatedToken(finalToken);
+  } catch {
+    gateErr.textContent = "Cannot reach the gateway server. Is oxidited running?";
+    gateErr.hidden = false;
+  }
 };
-if (token) void refresh();
-else gate.showModal();
+
+gate.oncancel = () => {
+  authPrompted = false;
+  renderOfflineFallback("Gateway locked. Click Unlock / Pair when ready.", false);
+};
+
+vaultForm.onsubmit = async (e) => {
+  e.preventDefault();
+  vaultErr.hidden = true;
+  const pinInput = $<HTMLInputElement>("#vault-pin");
+  try {
+    const unlocked = await DeviceVault.unlock(pinInput.value);
+    pinInput.value = "";
+    vaultDlg.close();
+    applyAuthenticatedToken(unlocked);
+  } catch (err) {
+    vaultErr.textContent = err instanceof Error ? err.message : "Could not unlock device vault.";
+    vaultErr.hidden = false;
+  }
+};
+
+$("#vault-forget-btn").onclick = async () => {
+  await DeviceVault.forget();
+  $<HTMLInputElement>("#vault-pin").value = "";
+  vaultDlg.close();
+  openGate();
+};
+
+vaultDlg.oncancel = () => {
+  authPrompted = false;
+  renderOfflineFallback("Device vault locked. Click Unlock / Pair to enter your PIN or token.", false);
+};
+
+function openGate(errText = "", prefillGrant = ""): void {
+  if (vaultDlg.open) vaultDlg.close();
+  gateErr.hidden = !errText;
+  gateErr.textContent = errText;
+  $<HTMLInputElement>("#tok").value = prefillGrant;
+  const lblInput = $<HTMLInputElement>("#tok-label");
+  if (!lblInput.value) lblInput.value = defaultDeviceLabel();
+  if (!gate.open) gate.showModal();
+  $<HTMLInputElement>(prefillGrant ? "#tok-label" : "#tok").focus();
+}
+
+async function promptUnlock(errText = "", forceGate = false): Promise<void> {
+  if (authPrompted && !forceGate) return;
+  authPrompted = true;
+  if (!forceGate && DeviceVault.isAvailable() && window.isSecureContext && (await DeviceVault.hasEnrolledDevice())) {
+    const info = await DeviceVault.getEnrolledInfo();
+    $("#vault-device-label").textContent = info
+      ? `Paired device: ${info.label} (${info.deviceId.slice(0, 8)})`
+      : "Unlock your encrypted local device token.";
+    vaultErr.hidden = !errText;
+    vaultErr.textContent = errText;
+    if (!vaultDlg.open) vaultDlg.showModal();
+    $<HTMLInputElement>("#vault-pin").focus();
+    return;
+  }
+  openGate(errText);
+}
+
+type ListedDevice = {
+  device_id: string;
+  user_id: string;
+  label: string;
+  created_at_secs: number;
+  last_seen_at_secs: number | null;
+  revoked: boolean;
+};
+
+async function loadDevicesList(): Promise<void> {
+  const listEl = $("#devices-list");
+  const devErr = $("#dev-err");
+  devErr.hidden = true;
+  if (!token) {
+    note(listEl, "Unlock first to view paired devices.");
+    return;
+  }
+  try {
+    const list = await api<ListedDevice[]>("/api/devices");
+    if (!list.length) {
+      note(listEl, "No paired devices yet. Enter or generate a pairing link below.");
+      return;
+    }
+    listEl.replaceChildren(
+      ...list.map((d) => {
+        const row = el("div", "dev-row");
+        const meta = el("div", "dev-meta");
+        meta.append(
+          el("strong", "", `${d.label} (${d.device_id.slice(0, 8)})`),
+          el("span", "", d.revoked ? "Revoked" : `Active • ${d.user_id}`),
+        );
+        const btn = el("button", "btn alt", d.revoked ? "Revoked" : "Revoke");
+        btn.type = "button";
+        btn.disabled = d.revoked;
+        btn.onclick = async () => {
+          try {
+            await api(`/api/devices/${encodeURIComponent(d.device_id)}`, undefined, "DELETE");
+            await loadDevicesList();
+          } catch {
+            devErr.textContent = "Could not revoke device.";
+            devErr.hidden = false;
+          }
+        };
+        row.append(meta, btn);
+        return row;
+      }),
+    );
+  } catch {
+    note(listEl, "Could not fetch paired devices. Ensure gateway is reachable.");
+  }
+}
+
+$("#devs").onclick = () => {
+  if (!token) {
+    void promptUnlock("", true);
+    return;
+  }
+  $("#pair-result").hidden = true;
+  if (!devicesDlg.open) devicesDlg.showModal();
+  void loadDevicesList();
+};
+
+$("#pair-new-btn").onclick = async () => {
+  const devErr = $("#dev-err");
+  devErr.hidden = true;
+  try {
+    const res = await api<{ grant: string; expires_in_secs: number }>("/api/devices/grant", { ttl_secs: 300 });
+    $("#pair-ttl").textContent = `${Math.max(1, Math.round(res.expires_in_secs / 60))}m`;
+    $<HTMLInputElement>("#pair-link").value = buildPairShareUrl(location.origin, location.pathname, res.grant);
+    $<HTMLInputElement>("#pair-grant").value = res.grant;
+    $("#pair-result").hidden = false;
+  } catch {
+    devErr.textContent = "Failed to generate pairing link. Verify gateway access.";
+    devErr.hidden = false;
+  }
+};
+
+$("#copy-pair-link").onclick = () => {
+  void navigator.clipboard?.writeText($<HTMLInputElement>("#pair-link").value);
+};
+$("#copy-pair-grant").onclick = () => {
+  void navigator.clipboard?.writeText($<HTMLInputElement>("#pair-grant").value);
+};
+$("#switch-tok-btn").onclick = () => {
+  devicesDlg.close();
+  openGate();
+};
+
+async function initAuth(): Promise<void> {
+  const pairGrant = parsePairGrantFromHash(location.hash);
+  if (pairGrant) {
+    history.replaceState(null, "", location.pathname + location.search);
+    openGate("Pairing link detected. Give this device a name and optional PIN.", pairGrant);
+    return;
+  }
+  await promptUnlock();
+}
+
 renderActivity();
+$("#ws-fallback").hidden = true;
 void loadChanges();
+void initAuth();
+
+// Keep the sidebar and active session folder/git state live while the tab is visible.
+setInterval(() => {
+  if (token && !gate.open && !vaultDlg.open && document.visibilityState === "visible") void refresh();
+}, 2500);

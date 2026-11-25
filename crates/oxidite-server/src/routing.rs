@@ -57,30 +57,40 @@ pub const fn cache_control(class: RouteClass) -> &'static str {
     }
 }
 
-/// Resolves a static asset only when every path component is a normal child.
+/// Resolves a static asset only when every path component is a normal non-hidden child.
 #[must_use]
 pub fn resolve_static_path(static_dir: &Path, request_path: &str) -> Option<PathBuf> {
-    let relative = Path::new(request_path);
-    if relative
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-    {
-        Some(static_dir.join(relative))
-    } else {
-        None
+    if request_path.is_empty() || request_path.contains('\0') {
+        return None;
     }
+    let relative = Path::new(request_path);
+    let mut has_component = false;
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return None;
+        };
+        let s = segment.to_str()?;
+        if s.starts_with('.') && s != ".well-known" {
+            return None;
+        }
+        has_component = true;
+    }
+    has_component.then(|| static_dir.join(relative))
 }
 
 fn is_fingerprinted_asset(path: &str) -> bool {
     let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let Some((_, suffix)) = file_name.rsplit_once('-') else {
-        return false;
-    };
-    let hash = suffix.split('.').next().unwrap_or_default();
-    hash.len() >= 8
-        && hash
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    let stem = file_name.split('.').next().unwrap_or_default();
+    stem.match_indices('-').any(|(idx, _)| {
+        if idx == 0 {
+            return false;
+        }
+        let hash = &stem[idx + 1..];
+        hash.len() >= 8
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    })
 }

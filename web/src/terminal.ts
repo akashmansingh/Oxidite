@@ -139,6 +139,9 @@ export function makeTerminal(host: HTMLElement, themeName: ThemeName = "onyx"): 
     const gl = new WebglAddon();
     gl.onContextLoss(() => gl.dispose());
     term.loadAddon(gl);
+    // xterm throws from a pending frame when a terminal is disposed before its WebGL renderer.
+    const dispose = term.dispose.bind(term);
+    term.dispose = () => { try { gl.dispose(); } catch { /* already gone */ } dispose(); };
   } catch {
     /* falls back to default canvas renderer */
   }

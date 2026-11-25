@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, pack, parse, bytesOf, type BackendSpec, type Msg, type SessionState, type TermSize } from "./protocol";
+import { PROTOCOL_VERSION, pack, parse, bytesOf, idBytes, idStr, type BackendSpec, type Msg, type SessionState, type TermSize } from "./protocol";
 
 export type Link = "ok" | "retry" | "down";
 export interface Handlers {
@@ -10,6 +10,7 @@ export interface Handlers {
   prompt(kind: "hostkey" | "auth", m: Msg): void;
   created(id: string): void;
   error(msg: string): void;
+  unauthorized?(): void;
   exit(code: number | null): void;
 }
 
@@ -33,17 +34,27 @@ export class Connection {
     if ("id" in t) this.id = t.id; else this.spec = t.spec;
     this.connect();
   }
-  input(b: Uint8Array): void { this.ws?.send(pack("Input", b)); }
-  resize(s: TermSize): void { this.ws?.send(pack("Resize", s)); }
-  trust(accept: boolean): void { this.ws?.send(pack("HostKeyDecision", { accept })); }
-  answer(answers: string[]): void { this.ws?.send(pack("AuthResponse", { answers })); }
-  kill(): void { this.ws?.send(pack("Kill")); }
+  input(b: Uint8Array): void { this.tx(pack("Input", b)); }
+  resize(s: TermSize): void { this.tx(pack("Resize", s)); }
+  trust(accept: boolean): void { this.tx(pack("HostKeyDecision", { accept })); }
+  answer(answers: string[]): void { this.tx(pack("AuthResponse", { answers })); }
+  kill(): void { this.tx(pack("Kill")); }
+  setToken(token: string): void { this.token = token; }
+  reconnectNow(): void {
+    if (this.done) return;
+    clearTimeout(this.retryT);
+    this.retryT = undefined;
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this.connect();
+  }
   detach(): void {
     this.done = true;
-    this.ws?.send(pack("Detach"));
+    this.tx(pack("Detach"));
     this.ws?.close();
     this.stop();
   }
+
+  /** Send only on an open socket; typing during a reconnect must not throw. */
+  private tx(b: Uint8Array): void { if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(b); }
 
   private stop(): void { clearInterval(this.pingT); clearTimeout(this.retryT); clearTimeout(this.ackT); }
 
@@ -60,18 +71,18 @@ export class Connection {
     this.attempt += 1;
     this.h.link("retry");
     this.h.error(`Connection lost. Retrying (attempt ${this.attempt}).`);
-    const ceiling = Math.min(30_000, 1000 * 2 ** this.attempt);
+    const ceiling = Math.min(30_000, 1000 * 2 ** Math.min(this.attempt, 6));
     this.retryT = window.setTimeout(() => this.connect(), Math.max(250, Math.random() * ceiling));
   }
 
   private attach(): void {
-    this.ws?.send(pack("Attach", { session: this.id, last_offset: this.id ? this.offset || null : null, mode: "Writer" }));
+    this.tx(pack("Attach", { session: this.id ? idBytes(this.id) : null, last_offset: this.id ? this.offset || null : null, mode: "Writer" }));
   }
 
   private ackTo(n: number): void {
     this.acked = n;
     if (this.ackT) return;
-    this.ackT = window.setTimeout(() => { this.ackT = undefined; this.ws?.send(pack("Ack", { offset: this.acked })); }, 30);
+    this.ackT = window.setTimeout(() => { this.ackT = undefined; this.tx(pack("Ack", { offset: this.acked })); }, 30);
   }
 
   private on(m: Msg): void {
@@ -80,12 +91,13 @@ export class Connection {
         this.attempt = 0; this.lastPong = Date.now(); this.h.link("ok"); this.h.error("");
         this.pingT = window.setInterval(() => {
           if (Date.now() - this.lastPong > 35_000) { this.ws?.close(); return; }
-          this.ws?.send(pack("Ping", { nonce: Date.now() }));
+          this.tx(pack("Ping", { nonce: Date.now() }));
         }, 15_000);
-        if (this.id) this.attach(); else this.ws?.send(pack("Create", { backend: this.spec, size: this.size() }));
+        if (this.id) this.attach(); else this.tx(pack("Create", { backend: this.spec, size: this.size() }));
         break;
-      case "Created": this.id = m.session as string; this.h.created(this.id); this.attach(); break;
-      case "Attached": if ((m.start as Record<string, unknown>)["Snapshot"]) this.h.reset(); break;
+      case "Created": this.id = idStr(m.session); this.h.created(this.id); this.attach(); break;
+      case "Attached": if ((m.start as Record<string, unknown>)["Snapshot"]) this.h.reset();
+        this.h.state("Running"); break;
       case "Snapshot": { const b = bytesOf(m.bytes); this.offset = m.offset as number; this.h.output(b, () => this.ackTo(this.offset)); break; }
       case "Output": {
         const b = bytesOf(m.bytes), end = (m.offset as number) + b.length;
@@ -102,7 +114,15 @@ export class Connection {
       case "Title": this.h.title(m.v as string); break;
       case "Pong": this.lastPong = Date.now(); break;
       case "Exit": this.done = true; this.stop(); this.h.exit(m.code as number | null); break;
-      case "Error": this.h.error(String(m.message)); break;
+      case "Error":
+        this.h.error(String(m.message));
+        if (m.code === "Unauthorized") {
+          this.done = true;
+          this.stop();
+          this.ws?.close();
+          this.h.unauthorized?.();
+        }
+        break;
     }
   }
 }
