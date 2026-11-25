@@ -14,6 +14,7 @@ thiserror = "2.0"
 tracing = "0.1"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 parking_lot = "0.12"
+russh = { version = "0.65.4", default-features = false, features = ["ring", "flate2", "rsa"] }
 
 [[test]]
 name = "connection_drop"
