@@ -245,6 +245,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       renderTabs();
       paint();
       logEvent(tab, stateText(s));
+      void refresh();
     },
     prompt: (k, m) => ask(k, m, tab),
   };
