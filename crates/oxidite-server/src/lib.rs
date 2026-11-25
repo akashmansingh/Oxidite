@@ -18,7 +18,7 @@ use axum::{
         Path, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
@@ -32,7 +32,7 @@ use oxidite_session::{actor::ActorCmd, manager::SessionManager};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::auth::UserStore;
 use crate::security::{
@@ -63,6 +63,17 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub label: Option<String>,
     pub workspace: Option<String>,
+    pub cwd_id: Option<String>,
+}
+
+fn short_cwd_hash(path: &std::path::Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[derive(Deserialize)]
@@ -92,6 +103,22 @@ pub struct CreateShareResponse {
 }
 
 pub fn create_app(state: AppState) -> Router {
+    let cors_sec = state.security.clone();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, request_parts| {
+            let origin_str = origin.to_str().ok();
+            let host = request_parts
+                .headers
+                .get("x-forwarded-host")
+                .or_else(|| request_parts.headers.get(header::HOST))
+                .and_then(|h| h.to_str().ok())
+                .and_then(|raw| raw.split(',').next())
+                .map(str::trim);
+            cors_sec.is_origin_allowed_for_host(origin_str, host)
+        }))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+
     Router::new()
         .route("/health", get(health_check))
         .route("/ready", get(metrics::readiness_handler))
@@ -119,8 +146,11 @@ pub fn create_app(state: AppState) -> Router {
             state.clone(),
             route_metrics_middleware,
         ))
-        .layer(middleware::from_fn(security_headers_middleware))
-        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers_middleware,
+        ))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -293,8 +323,20 @@ pub struct DeviceGrantResponse {
 
 async fn enroll_device_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<EnrollDeviceRequest>,
 ) -> Result<Json<EnrollDeviceResponse>, StatusCode> {
+    let rl_key = security::rate_limit_key(&headers, "enroll");
+    if !state
+        .rate_limiter
+        .check_limit(&rl_key, 20, Duration::from_secs(60))
+    {
+        AuditLogger::record(AuditEvent::SecurityViolation {
+            reason: "Rate limit exceeded on device enrollment",
+            remote_ip: &rl_key,
+        });
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let label = payload
         .label
         .unwrap_or_else(|| "Browser Device".to_string());
@@ -321,6 +363,13 @@ async fn issue_device_grant_handler(
     headers: HeaderMap,
     Json(payload): Json<DeviceGrantRequest>,
 ) -> Result<Json<DeviceGrantResponse>, StatusCode> {
+    let rl_key = security::rate_limit_key(&headers, "grant");
+    if !state
+        .rate_limiter
+        .check_limit(&rl_key, 30, Duration::from_secs(60))
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let auth_header = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok());
@@ -446,11 +495,12 @@ async fn runtime_shells_handler(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
-    let pwsh_available = oxidite_pty::is_powershell_available();
+    let allow_local = state.security.is_local_pty_allowed();
+    let pwsh_available = allow_local && oxidite_pty::is_powershell_available();
     let capabilities = vec![
         oxidite_proto::ShellCapability {
             id: "default".to_string(),
-            available: true,
+            available: allow_local,
         },
         oxidite_proto::ShellCapability {
             id: "SystemPowerShell".to_string(),
@@ -498,15 +548,47 @@ async fn list_sessions(
                 .send(ActorCmd::GetState { resp: tx })
                 .await
                 .is_ok()
+                && let Ok(sess_state) = rx.await
             {
-                if let Ok(sess_state) = rx.await {
-                    list.push(SessionInfo {
-                        id: id.to_string(),
-                        state: sess_state,
-                        label: Some(format!("session-{}", &id.to_string()[..8])),
-                        workspace: Some("This gateway".to_string()),
-                    });
-                }
+                let (cwd_tx, cwd_rx) = oneshot::channel();
+                let live_cwd = if handle
+                    .tx
+                    .send(ActorCmd::GetCwd { resp: cwd_tx })
+                    .await
+                    .is_ok()
+                {
+                    cwd_rx.await.ok().flatten()
+                } else {
+                    None
+                };
+                let effective_cwd = match live_cwd {
+                    Some(p) if state.security.is_workspace_path_allowed(&p) => {
+                        state.manager.set_cwd(id, p.clone());
+                        Some(p)
+                    }
+                    _ => state
+                        .manager
+                        .get_cwd(id)
+                        .filter(|p| state.security.is_workspace_path_allowed(p)),
+                };
+                let (workspace, cwd_id) = match effective_cwd {
+                    Some(ref p) => {
+                        let name = p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .filter(|s| !s.is_empty())
+                            .map_or_else(|| "Workspace".to_string(), String::from);
+                        (Some(name), Some(short_cwd_hash(p)))
+                    }
+                    None => (Some("Remote".to_string()), None),
+                };
+                list.push(SessionInfo {
+                    id: id.to_string(),
+                    state: sess_state,
+                    label: Some(format!("session-{}", &id.to_string()[..8])),
+                    workspace,
+                    cwd_id,
+                });
             }
         }
     }
@@ -525,9 +607,18 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
         }
     };
 
-    if target.exists() && target.is_file() {
-        let mime = mime_guess::from_path(&target).first_or_octet_stream();
-        match tokio::fs::read(&target).await {
+    if target.exists()
+        && target.is_file()
+        && let (Ok(canon_dir), Ok(canon_target)) = (
+            tokio::fs::canonicalize(static_dir).await,
+            tokio::fs::canonicalize(&target).await,
+        )
+    {
+        if !canon_target.starts_with(&canon_dir) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let mime = mime_guess::from_path(&canon_target).first_or_octet_stream();
+        match tokio::fs::read(&canon_target).await {
             Ok(content) => {
                 return (
                     [
@@ -546,17 +637,22 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
     }
 
     let index_path = static_dir.join("index.html");
-    if index_path.exists() {
-        if let Ok(content) = tokio::fs::read(&index_path).await {
-            return (
-                [(
-                    header::CACHE_CONTROL,
-                    routing::cache_control(routing::RouteClass::Html),
-                )],
-                Html(content),
-            )
-                .into_response();
-        }
+    if index_path.exists()
+        && let (Ok(canon_dir), Ok(canon_index)) = (
+            tokio::fs::canonicalize(static_dir).await,
+            tokio::fs::canonicalize(&index_path).await,
+        )
+        && canon_index.starts_with(&canon_dir)
+        && let Ok(content) = tokio::fs::read(&canon_index).await
+    {
+        return (
+            [(
+                header::CACHE_CONTROL,
+                routing::cache_control(routing::RouteClass::Html),
+            )],
+            Html(content),
+        )
+            .into_response();
     }
 
     StatusCode::NOT_FOUND.into_response()
@@ -567,8 +663,27 @@ async fn ws_handler(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
+    let rl_key = security::rate_limit_key(&headers, "ws");
+    if !state.rate_limiter.check_limit(
+        &rl_key,
+        state.security.rate_limit_per_minute,
+        Duration::from_secs(60),
+    ) {
+        AuditLogger::record(AuditEvent::SecurityViolation {
+            reason: "Rate limit exceeded on WebSocket upgrade",
+            remote_ip: &rl_key,
+        });
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|h| h.to_str().ok())
+        .and_then(|raw| raw.split(',').next())
+        .map(str::trim);
     let origin = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok());
-    if !state.security.is_origin_allowed(origin) {
+    if !state.security.is_origin_allowed_for_host(origin, host) {
         AuditLogger::record(AuditEvent::SecurityViolation {
             reason: "Rejected WebSocket upgrade: unauthorized origin",
             remote_ip: origin.unwrap_or("unknown"),
@@ -679,8 +794,15 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
     let mut current_session: Option<SessionId> = None;
     let mut current_tx: Option<mpsc::Sender<ActorCmd>> = None;
-    let mut pending_ssh: Option<(oxidite_proto::BackendSpec, oxidite_proto::TermSize, String)> =
-        None;
+    let mut pending_ssh_sid: Option<SessionId> = None;
+    let mut ssh_hostkey_reply: Option<oneshot::Sender<bool>> = None;
+    let mut ssh_auth_reply: Option<oneshot::Sender<Vec<String>>> = None;
+    let (ssh_prompt_tx, mut ssh_prompt_rx) = mpsc::channel::<oxidite_ssh::SshPrompt>(8);
+    let (ssh_done_tx, mut ssh_done_rx) = mpsc::channel::<(
+        SessionId,
+        oxidite_proto::TermSize,
+        std::result::Result<oxidite_ssh::SshBackend, String>,
+    )>(4);
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMsg>(256);
 
     // Forward messages from server_rx to WebSocket client
@@ -715,6 +837,67 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             }
                         }
                     }
+                }
+                continue;
+            }
+            Some(prompt) = ssh_prompt_rx.recv() => {
+                match prompt {
+                    oxidite_ssh::SshPrompt::HostKey {
+                        host,
+                        fingerprint,
+                        known,
+                        reply,
+                    } => {
+                        ssh_hostkey_reply = Some(reply);
+                        let _ = server_tx
+                            .send(ServerMsg::HostKeyPrompt {
+                                host,
+                                fingerprint,
+                                known,
+                            })
+                            .await;
+                    }
+                    oxidite_ssh::SshPrompt::Auth { prompts, reply } => {
+                        ssh_auth_reply = Some(reply);
+                        let _ = server_tx.send(ServerMsg::AuthPrompt { prompts }).await;
+                    }
+                }
+                continue;
+            }
+            Some((sid, size, res)) = ssh_done_rx.recv() => {
+                if pending_ssh_sid == Some(sid) {
+                    pending_ssh_sid = None;
+                    ssh_hostkey_reply = None;
+                    ssh_auth_reply = None;
+                    match res {
+                        Ok(backend) => {
+                            state
+                                .manager
+                                .create_with_backend(sid, size, Box::new(backend));
+                            let _ = state
+                                .directory
+                                .claim(sid, state.node_id.clone(), Duration::from_secs(60))
+                                .await;
+                            state.auth.set_session_owner(sid, &user_id);
+                            AuditLogger::record(AuditEvent::SessionCreated {
+                                session_id: &sid.to_string(),
+                                backend_kind: "ssh",
+                                user: &user_id,
+                            });
+                            current_session = Some(sid);
+                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                        }
+                        Err(message) => {
+                            let code = if message.contains("not accepted") {
+                                ErrorCode::Unauthorized
+                            } else {
+                                ErrorCode::BackendError
+                            };
+                            let _ = server_tx.send(ServerMsg::Error { code, message }).await;
+                        }
+                    }
+                } else if let Ok(mut superseded) = res {
+                    let _ = oxidite_session::Backend::kill(&mut superseded).await;
                 }
                 continue;
             }
@@ -813,12 +996,95 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             continue;
                         }
 
+                        let sec_for_cwd = state.security.clone();
+                        let resolved_cwd = match cwd {
+                            Some(raw) if !raw.trim().is_empty() => {
+                                let raw_trimmed = raw.trim().to_string();
+                                match tokio::task::spawn_blocking(move || {
+                                    let canon = security::canonical_clean_path(
+                                        std::path::Path::new(&raw_trimmed),
+                                    )
+                                    .ok_or_else(|| {
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::NotFound,
+                                            "working directory does not exist",
+                                        )
+                                    })?;
+                                    if !canon.is_dir() {
+                                        return Err(std::io::Error::new(
+                                            std::io::ErrorKind::NotADirectory,
+                                            "working directory is not a directory",
+                                        ));
+                                    }
+                                    if !sec_for_cwd.is_workspace_path_allowed(&canon) {
+                                        return Err(std::io::Error::new(
+                                            std::io::ErrorKind::PermissionDenied,
+                                            "working directory outside permitted workspace roots",
+                                        ));
+                                    }
+                                    Ok(canon)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(canon)) => Some(canon),
+                                    Ok(Err(e))
+                                        if e.kind() == std::io::ErrorKind::PermissionDenied =>
+                                    {
+                                        let _ = server_tx
+                                            .send(ServerMsg::Error {
+                                                code: ErrorCode::Unauthorized,
+                                                message: "Working directory is outside allowed workspace roots".into(),
+                                            })
+                                            .await;
+                                        continue;
+                                    }
+                                    Ok(Err(e)) => {
+                                        let _ = server_tx
+                                            .send(ServerMsg::Error {
+                                                code: ErrorCode::InvalidMessage,
+                                                message: format!("Invalid working directory: {e}"),
+                                            })
+                                            .await;
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        let _ = server_tx
+                                            .send(ServerMsg::Error {
+                                                code: ErrorCode::BackendError,
+                                                message: e.to_string(),
+                                            })
+                                            .await;
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => tokio::task::spawn_blocking(move || {
+                                sec_for_cwd.resolve_default_cwd()
+                            })
+                            .await
+                            .ok()
+                            .flatten(),
+                        };
+
+                        let cwd_for_pty = resolved_cwd
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned());
+
                         match state
                             .manager
-                            .create(oxidite_proto::BackendSpec::LocalPty { shell, cwd }, size)
+                            .create(
+                                oxidite_proto::BackendSpec::LocalPty {
+                                    shell,
+                                    cwd: cwd_for_pty,
+                                },
+                                size,
+                            )
                             .await
                         {
                             Ok(sid) => {
+                                if let Some(cwd_path) = resolved_cwd {
+                                    state.manager.set_cwd(sid, cwd_path);
+                                }
                                 let _ = state
                                     .directory
                                     .claim(sid, state.node_id.clone(), Duration::from_secs(60))
@@ -849,114 +1115,70 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         auth,
                         multiplexer,
                     } => {
-                        let fp = format!("SHA256:{:x}", host.len() * 31 + port as usize);
-                        let status = state.known_hosts.check(&host, &fp);
-                        match status {
-                            oxidite_proto::HostKeyStatus::Unknown => {
-                                pending_ssh = Some((
-                                    oxidite_proto::BackendSpec::Ssh {
-                                        host: host.clone(),
-                                        port,
-                                        user,
-                                        auth,
-                                        multiplexer,
-                                    },
-                                    size,
-                                    fp.clone(),
-                                ));
-                                let _ = server_tx
-                                    .send(ServerMsg::HostKeyPrompt {
-                                        host,
-                                        fingerprint: fp,
-                                        known: oxidite_proto::HostKeyStatus::Unknown,
-                                    })
-                                    .await;
-                            }
-                            oxidite_proto::HostKeyStatus::Mismatch => {
+                        if let oxidite_proto::AuthSpec::PublicKey { ref key_path, .. } = auth {
+                            let sec_ssh = state.security.clone();
+                            let kp = key_path.clone();
+                            let check = tokio::task::spawn_blocking(move || {
+                                sec_ssh.validate_ssh_key_path(&kp)
+                            })
+                            .await;
+                            if let Ok(Err(msg)) = check {
                                 let _ = server_tx
                                     .send(ServerMsg::Error {
-                                        code: ErrorCode::BackendError,
-                                        message: format!(
-                                            "Host key mismatch for {host}! Connection refused."
-                                        ),
+                                        code: ErrorCode::Unauthorized,
+                                        message: msg.to_string(),
                                     })
                                     .await;
-                            }
-                            oxidite_proto::HostKeyStatus::Trusted => {
-                                let ssh_cfg = oxidite_ssh::SshConfig {
-                                    host,
-                                    port,
-                                    user,
-                                    auth,
-                                    multiplexer,
-                                    keepalive_interval_secs: 15,
-                                    keepalive_max_misses: 3,
-                                };
-                                let (backend, _, _) = oxidite_ssh::SshBackend::new(ssh_cfg, size);
-                                let sid = oxidite_proto::SessionId::new_v4();
-                                state
-                                    .manager
-                                    .create_with_backend(sid, size, Box::new(backend));
-                                let _ = state
-                                    .directory
-                                    .claim(sid, state.node_id.clone(), Duration::from_secs(60))
-                                    .await;
-                                state.auth.set_session_owner(sid, &user_id);
-                                AuditLogger::record(AuditEvent::SessionCreated {
-                                    session_id: &sid.to_string(),
-                                    backend_kind: "ssh",
-                                    user: &user_id,
-                                });
-                                current_session = Some(sid);
-                                let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
+                                continue;
                             }
                         }
-                    }
-                }
-            }
-            ClientMsg::HostKeyDecision { accept } => {
-                if let Some((spec, size, fp)) = pending_ssh.take() {
-                    if accept {
-                        if let oxidite_proto::BackendSpec::Ssh {
+
+                        let sid = oxidite_proto::SessionId::new_v4();
+                        pending_ssh_sid = Some(sid);
+                        ssh_hostkey_reply = None;
+                        ssh_auth_reply = None;
+
+                        let ssh_cfg = oxidite_ssh::SshConfig {
                             host,
                             port,
                             user,
                             auth,
                             multiplexer,
-                        } = spec
-                        {
-                            state.known_hosts.trust(host.clone(), fp);
-                            let ssh_cfg = oxidite_ssh::SshConfig {
-                                host,
-                                port,
-                                user,
-                                auth,
-                                multiplexer,
-                                keepalive_interval_secs: 15,
-                                keepalive_max_misses: 3,
-                            };
-                            let (backend, _, _) = oxidite_ssh::SshBackend::new(ssh_cfg, size);
-                            let sid = oxidite_proto::SessionId::new_v4();
-                            state
-                                .manager
-                                .create_with_backend(sid, size, Box::new(backend));
-                            state.auth.set_session_owner(sid, &user_id);
-                            AuditLogger::record(AuditEvent::SessionCreated {
-                                session_id: &sid.to_string(),
-                                backend_kind: "ssh",
-                                user: &user_id,
-                            });
-                            current_session = Some(sid);
-                            let _ = server_tx.send(ServerMsg::Created { session: sid }).await;
-                        }
-                    } else {
-                        let _ = server_tx
-                            .send(ServerMsg::Error {
-                                code: ErrorCode::Unauthorized,
-                                message: "Host key was not accepted by user".into(),
-                            })
+                            keepalive_interval_secs: 15,
+                            keepalive_max_misses: 3,
+                        };
+                        let known_hosts = state.known_hosts.clone();
+                        let ptx = ssh_prompt_tx.clone();
+                        let dtx = ssh_done_tx.clone();
+                        tokio::spawn(async move {
+                            let res = oxidite_ssh::SshBackend::connect(
+                                sid,
+                                ssh_cfg,
+                                size,
+                                known_hosts,
+                                ptx,
+                            )
                             .await;
+                            if let Err(tokio::sync::mpsc::error::SendError((
+                                _,
+                                _,
+                                Ok(mut backend),
+                            ))) = dtx.send((sid, size, res)).await
+                            {
+                                let _ = oxidite_session::Backend::kill(&mut backend).await;
+                            }
+                        });
                     }
+                }
+            }
+            ClientMsg::HostKeyDecision { accept } => {
+                if let Some(reply) = ssh_hostkey_reply.take() {
+                    let _ = reply.send(accept);
+                }
+            }
+            ClientMsg::AuthResponse { answers } => {
+                if let Some(reply) = ssh_auth_reply.take() {
+                    let _ = reply.send(answers);
                 }
             }
             ClientMsg::Attach {
@@ -1141,6 +1363,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         user: &user_id,
                     });
                     state.auth.remove_session_owner(sid);
+                    state.manager.remove_cwd(sid);
                 }
                 if let Some(tx) = &current_tx {
                     let _ = tx.send(ActorCmd::Kill).await;

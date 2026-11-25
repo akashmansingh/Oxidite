@@ -129,6 +129,9 @@ async fn test_websocket_session_lifecycle() {
 
 #[tokio::test]
 async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
+    let (ssh_addr, expected_fp) =
+        oxidite_ssh::test_support::spawn_test_ssh_server("deploy", "hunter2").await;
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -169,8 +172,8 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
 
     // Create SSH backend
     let ssh_spec = oxidite_proto::BackendSpec::Ssh {
-        host: "remote-gateway.lan".into(),
-        port: 22,
+        host: ssh_addr.ip().to_string(),
+        port: ssh_addr.port(),
         user: "deploy".into(),
         auth: oxidite_proto::AuthSpec::Password("hunter2".into()),
         multiplexer: oxidite_proto::Multiplexer::Tmux,
@@ -186,10 +189,23 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
         .unwrap();
 
     // Expect HostKeyPrompt
-    let msg = ws_stream.next().await.unwrap().unwrap();
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     let server_msg = unpack_server_msg(&msg.into_data()).unwrap();
+    let expected_host = ssh_addr.ip().to_string();
     assert!(
-        matches!(server_msg, ServerMsg::HostKeyPrompt { ref host, .. } if host == "remote-gateway.lan")
+        matches!(
+            server_msg,
+            ServerMsg::HostKeyPrompt {
+                ref host,
+                ref fingerprint,
+                known: oxidite_proto::HostKeyStatus::Unknown
+            } if host == &expected_host && fingerprint == &expected_fp
+        ),
+        "unexpected server message: {server_msg:?}"
     );
 
     // Accept host key
@@ -200,7 +216,173 @@ async fn test_websocket_ssh_host_key_prompt_and_acceptance() {
         .unwrap();
 
     // Expect Created
-    let msg = ws_stream.next().await.unwrap().unwrap();
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     let server_msg = unpack_server_msg(&msg.into_data()).unwrap();
-    assert!(matches!(server_msg, ServerMsg::Created { .. }));
+    let session_id = match server_msg {
+        ServerMsg::Created { session } => session,
+        other => panic!("expected Created, got {other:?}"),
+    };
+
+    // Attach and verify real SSH echo output
+    let attach = pack_client_msg(&ClientMsg::Attach {
+        session: session_id,
+        last_offset: None,
+        mode: oxidite_proto::AttachMode::Writer,
+    })
+    .unwrap();
+    ws_stream
+        .send(Message::Binary(attach.into()))
+        .await
+        .unwrap();
+
+    let input = pack_client_msg(&ClientMsg::Input(b"hello-ssh\n".to_vec())).unwrap();
+    ws_stream.send(Message::Binary(input.into())).await.unwrap();
+
+    let mut collected = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(Message::Binary(data)))) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), ws_stream.next()).await
+            && let Ok(ServerMsg::Output { bytes, .. }) = unpack_server_msg(&data)
+        {
+            collected.extend_from_slice(&bytes);
+            if String::from_utf8_lossy(&collected).contains("hello-ssh") {
+                break;
+            }
+        }
+    }
+    let output = String::from_utf8_lossy(&collected);
+    assert!(
+        output.contains("ready") && output.contains("hello-ssh"),
+        "expected SSH banner and echo output, got {output:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_websocket_ssh_mismatch_and_bad_password_refused() {
+    let (ssh_addr, _fp) =
+        oxidite_ssh::test_support::spawn_test_ssh_server("deploy", "hunter2").await;
+
+    let known_hosts = oxidite_ssh::KnownHostsStore::new();
+    known_hosts.trust(
+        oxidite_ssh::host_key_id(&ssh_addr.ip().to_string(), ssh_addr.port()),
+        "SHA256:stale-wrong-key".into(),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = "test-token-ssh-mismatch".to_string();
+    let state = AppState {
+        manager: SessionManager::new(),
+        token: token.clone(),
+        static_dir: "web/dist".into(),
+        known_hosts,
+        security: oxidite_server::security::SecurityConfig::default(),
+        auth: oxidite_server::auth::UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
+        rate_limiter: oxidite_server::security::RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
+        node_id: "node-test-1".into(),
+        directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
+    };
+
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(state)).await.unwrap();
+    });
+
+    let url = format!("ws://{addr}/ws");
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let hello = pack_client_msg(&ClientMsg::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        token,
+    })
+    .unwrap();
+    ws_stream.send(Message::Binary(hello.into())).await.unwrap();
+    let _ = ws_stream.next().await.unwrap().unwrap();
+
+    // 1. Mismatched host key is refused without prompting
+    let create_mismatch = pack_client_msg(&ClientMsg::Create {
+        backend: oxidite_proto::BackendSpec::Ssh {
+            host: ssh_addr.ip().to_string(),
+            port: ssh_addr.port(),
+            user: "deploy".into(),
+            auth: oxidite_proto::AuthSpec::Password("hunter2".into()),
+            multiplexer: oxidite_proto::Multiplexer::None,
+        },
+        size: TermSize { rows: 24, cols: 80 },
+    })
+    .unwrap();
+    ws_stream
+        .send(Message::Binary(create_mismatch.into()))
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let err_msg = unpack_server_msg(&msg.into_data()).unwrap();
+    assert!(
+        matches!(err_msg, ServerMsg::Error { ref message, .. } if message.to_lowercase().contains("mismatch")),
+        "expected mismatch error, got {err_msg:?}"
+    );
+
+    // 2. Unknown host key accepted + wrong password must fail with Error
+    let (ssh_addr2, _) =
+        oxidite_ssh::test_support::spawn_test_ssh_server("deploy", "hunter2").await;
+    let create_bad_pw = pack_client_msg(&ClientMsg::Create {
+        backend: oxidite_proto::BackendSpec::Ssh {
+            host: ssh_addr2.ip().to_string(),
+            port: ssh_addr2.port(),
+            user: "deploy".into(),
+            auth: oxidite_proto::AuthSpec::Password("wrong-pw".into()),
+            multiplexer: oxidite_proto::Multiplexer::None,
+        },
+        size: TermSize { rows: 24, cols: 80 },
+    })
+    .unwrap();
+    ws_stream
+        .send(Message::Binary(create_bad_pw.into()))
+        .await
+        .unwrap();
+
+    let prompt = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        unpack_server_msg(&prompt.into_data()).unwrap(),
+        ServerMsg::HostKeyPrompt { .. }
+    ));
+
+    let accept = pack_client_msg(&ClientMsg::HostKeyDecision { accept: true }).unwrap();
+    ws_stream
+        .send(Message::Binary(accept.into()))
+        .await
+        .unwrap();
+
+    let err = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let err_msg = unpack_server_msg(&err.into_data()).unwrap();
+    assert!(
+        matches!(
+            err_msg,
+            ServerMsg::Error {
+                code: oxidite_proto::ErrorCode::BackendError,
+                ..
+            }
+        ),
+        "expected BackendError for bad password, got {err_msg:?}"
+    );
 }

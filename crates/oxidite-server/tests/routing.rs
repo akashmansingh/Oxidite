@@ -28,6 +28,8 @@ fn static_resolution_rejects_parent_components() {
     assert!(resolve_static_path(public, "assets/app-0123456789abcdef.js").is_some());
     assert!(resolve_static_path(public, "../Cargo.toml").is_none());
     assert!(resolve_static_path(public, "assets/../../Cargo.toml").is_none());
+    assert!(resolve_static_path(public, ".env").is_none());
+    assert!(resolve_static_path(public, ".git/config").is_none());
 }
 
 #[test]
