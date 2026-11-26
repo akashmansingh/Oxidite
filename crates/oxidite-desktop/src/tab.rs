@@ -672,9 +672,9 @@ pub fn clean_shell_title(raw: &str) -> String {
         return trimmed.to_string();
     }
 
-    let filename = std::path::Path::new(trimmed)
-        .file_name()
-        .and_then(|f| f.to_str())
+    let filename = trimmed
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
         .unwrap_or(trimmed);
 
     let lower = filename.to_lowercase();
