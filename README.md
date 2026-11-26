@@ -72,7 +72,6 @@ flowchart TD
 - **`crates/oxidite-ssh`**: `russh` connection manager, TOFU host-key store, keepalive failure detection, connection pooling, and tmux reattach.
 - **`crates/oxidite-directory`**: Distributed `SessionDirectory` trait with TTL leases, fencing tokens, and partition simulation.
 - **`crates/oxidite-server`**: Axum web server and WebSocket gateway binary (`oxidited`), Argon2 auth, rate limiter, share tokens, and Prometheus metrics.
-- **`crates/oxidite-desktop`**: Frozen native desktop terminal emulator (Phases 0–8 complete).
 - **`web/`**: Browser client built with TypeScript, Vite, `@xterm/xterm`, and `@msgpack/msgpack`.
 
 ---

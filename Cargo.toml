@@ -8,7 +8,6 @@ members = [
     "crates/oxidite-ssh",
     "crates/oxidite-directory",
     "crates/oxidite-server",
-    "crates/oxidite-desktop",
 ]
 resolver = "2"
 

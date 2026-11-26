@@ -1,7 +1,6 @@
 # Oxidite Architecture
 
 Oxidite is a browser-based terminal platform backed by a Rust session server (`oxidited`).
-The desktop GPU terminal emulator (Phases 0 to 8) is frozen in `crates/oxidite-desktop`.
 Its VT parser, terminal grid, and PTY abstractions form the core engine for server-side persistent sessions.
 
 ## Workspace Layout
@@ -14,7 +13,6 @@ Its VT parser, terminal grid, and PTY abstractions form the core engine for serv
 - `crates/oxidite-ssh`: SSH connection management, host-key verification, keepalives, and tmux persistence.
 - `crates/oxidite-directory`: Distributed `SessionDirectory` trait with TTL leases and fencing tokens.
 - `crates/oxidite-server`: Axum web server and WebSocket gateway binary (`oxidited`).
-- `crates/oxidite-desktop`: Frozen native desktop terminal emulator.
 - `web/`: Browser frontend built with TypeScript, Vite, `@xterm/xterm`, and `@msgpack/msgpack`.
 
 ## Runtime Pipeline
