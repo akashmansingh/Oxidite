@@ -168,6 +168,77 @@ async fn test_git_api_session_cwd_spaces_and_path_traversal_protection() {
     .await;
     assert_eq!(status_git_cfg, 400);
 
+    // 8. Autocomplete completes directories, files with spaces, and Git branches for the session
+    let (status_comp_dir, comp_dir_body) = http_get(
+        addr,
+        &format!("/api/complete?session={repo_sid}&line=cat%20file&cursor=8"),
+        &token,
+    )
+    .await;
+    assert_eq!(status_comp_dir, 200);
+    let comp_dir: serde_json::Value = serde_json::from_str(&comp_dir_body).unwrap();
+    let dir_cands = comp_dir["candidates"].as_array().unwrap();
+    assert!(
+        dir_cands
+            .iter()
+            .any(|c| c["value"].as_str() == Some("'file with spaces.txt'")),
+        "expected quoted space-containing filename completion, got {dir_cands:?}"
+    );
+
+    let (status_comp_br, comp_br_body) = http_get(
+        addr,
+        &format!("/api/complete?session={repo_sid}&line=git%20switch%20&cursor=11"),
+        &token,
+    )
+    .await;
+    assert_eq!(status_comp_br, 200);
+    let comp_br: serde_json::Value = serde_json::from_str(&comp_br_body).unwrap();
+    let br_cands = comp_br["candidates"].as_array().unwrap();
+    assert!(
+        br_cands
+            .iter()
+            .any(|c| c["kind"].as_str() == Some("branch")),
+        "expected git branch completion, got {br_cands:?}"
+    );
+
+    // 9. `cd ..` completes parent directory and sibling folders inside parent
+    let (status_comp_up, comp_up_body) = http_get(
+        addr,
+        &format!("/api/complete?session={repo_sid}&line=cd%20..&cursor=5"),
+        &token,
+    )
+    .await;
+    assert_eq!(status_comp_up, 200);
+    let comp_up: serde_json::Value = serde_json::from_str(&comp_up_body).unwrap();
+    let up_cands = comp_up["candidates"].as_array().unwrap();
+    assert!(
+        up_cands
+            .iter()
+            .any(|c| c["value"].as_str().is_some_and(|v| v.contains("plain"))),
+        "expected parent sibling dir `plain` when typing `cd ..`, got {up_cands:?}"
+    );
+
+    // 10. Commit tracked mode commits modified tracked files without explicit git add
+    let mut commit_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let commit_body = serde_json::json!({
+        "session": repo_sid.to_string(),
+        "message": "commit tracked changes",
+        "mode": "tracked"
+    })
+    .to_string();
+    let req = format!(
+        "POST /api/git/commit HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        commit_body.len(),
+        commit_body
+    );
+    commit_stream.write_all(req.as_bytes()).await.unwrap();
+    let mut commit_raw = String::new();
+    commit_stream.read_to_string(&mut commit_raw).await.unwrap();
+    assert!(
+        commit_raw.starts_with("HTTP/1.1 200"),
+        "expected 200 from tracked commit, got: {commit_raw}"
+    );
+
     let _ = std::fs::remove_dir_all(&temp_root);
 }
 

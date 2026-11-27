@@ -52,7 +52,9 @@ pub fn build_server_config(
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    // `serve_tls` uses hyper HTTP/1.1 + WebSocket upgrades (`http1::Builder`), so advertising
+    // `h2` here would make mobile/desktop browsers send HTTP/2 frames to an HTTP/1.1 parser.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }
 

@@ -57,6 +57,8 @@ pub struct GitStageRequest {
 pub struct GitCommitRequest {
     pub session: Option<String>,
     pub message: String,
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,7 +79,10 @@ pub struct GitFetchRequest {
     pub session: Option<String>,
 }
 
-async fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<String, StatusCode> {
+pub(crate) async fn check_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, StatusCode> {
     let rl_key = security::rate_limit_key(headers, "git");
     if !state.rate_limiter.check_limit(
         &rl_key,
@@ -109,7 +114,7 @@ async fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<String, Sta
 
 /// Resolves the live working directory exclusively for a specific authorized session.
 /// Never falls back to the gateway server's own working directory.
-async fn resolve_session_cwd(
+pub(crate) async fn resolve_session_cwd(
     state: &AppState,
     user_id: &str,
     session_param: Option<&str>,
@@ -185,14 +190,14 @@ fn validate_relative_repo_path(raw: &str) -> Result<PathBuf, StatusCode> {
     Ok(clean)
 }
 
-async fn run_git_output(cwd: PathBuf, args: Vec<String>) -> Result<Output, StatusCode> {
+pub(crate) async fn run_git_output(cwd: PathBuf, args: Vec<String>) -> Result<Output, StatusCode> {
     tokio::task::spawn_blocking(move || Command::new("git").current_dir(&cwd).args(&args).output())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn resolve_git_toplevel(
+pub(crate) async fn resolve_git_toplevel(
     state: &AppState,
     cwd: PathBuf,
 ) -> Result<Option<PathBuf>, StatusCode> {
@@ -222,6 +227,10 @@ fn folder_display_name(dir: &Path) -> Option<String> {
         .and_then(|n| n.to_str())
         .filter(|s| !s.is_empty())
         .map(String::from)
+        .or_else(|| {
+            let full = dir.to_string_lossy();
+            (!full.is_empty()).then(|| full.into_owned())
+        })
 }
 
 fn parse_numstat(text: &str, into: &mut HashMap<String, (u32, u32)>) {
@@ -553,7 +562,22 @@ pub async fn git_commit_handler(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let output = run_git_output(repo_root, vec!["commit".into(), "-m".into(), msg]).await?;
+    let mode = payload.mode.as_deref().map(str::trim).unwrap_or("staged");
+    let args = match mode {
+        "tracked" => vec!["commit".into(), "-a".into(), "-m".into(), msg],
+        "all" => {
+            let add_out =
+                run_git_output(repo_root.clone(), vec!["add".into(), "-A".into()]).await?;
+            if !add_out.status.success() {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            vec!["commit".into(), "-m".into(), msg]
+        }
+        "staged" | "" => vec!["commit".into(), "-m".into(), msg],
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let output = run_git_output(repo_root, args).await?;
     if output.status.success() {
         Ok(StatusCode::OK)
     } else {

@@ -29,8 +29,8 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             allowed_origins: vec![
-                "http://localhost:3000".into(),
-                "http://127.0.0.1:3000".into(),
+                "http://localhost:3030".into(),
+                "http://127.0.0.1:3030".into(),
             ],
             allow_non_loopback_pty: false,
             max_message_size: 64 * 1024,
@@ -265,9 +265,6 @@ fn normalize_path_str(p: &std::path::Path) -> String {
 }
 
 fn is_sensitive_system_path(path: &std::path::Path) -> bool {
-    if path.parent().is_none() {
-        return true;
-    }
     let norm = normalize_path_str(path);
     #[cfg(windows)]
     {
@@ -474,4 +471,27 @@ pub async fn security_headers_middleware(
     );
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SecurityConfig;
+    use std::path::Path;
+
+    #[test]
+    fn root_directory_is_navigable_workspace_but_never_git_root() {
+        let cfg = SecurityConfig::default();
+        #[cfg(windows)]
+        let root = Path::new("C:\\");
+        #[cfg(not(windows))]
+        let root = Path::new("/");
+
+        assert!(cfg.is_workspace_path_allowed(root));
+        assert!(!cfg.is_git_root_allowed(root));
+
+        #[cfg(windows)]
+        assert!(!cfg.is_workspace_path_allowed(Path::new("C:\\Windows\\System32")));
+        #[cfg(not(windows))]
+        assert!(!cfg.is_workspace_path_allowed(Path::new("/etc")));
+    }
 }

@@ -3,6 +3,7 @@
 #![allow(clippy::collapsible_if, clippy::useless_conversion)]
 
 pub mod auth;
+pub mod complete_api;
 pub mod device_connections;
 pub mod devices;
 pub mod git_api;
@@ -63,6 +64,8 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub label: Option<String>,
     pub workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub cwd_id: Option<String>,
 }
 
@@ -140,6 +143,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/git/branches", get(git_api::git_branches_handler))
         .route("/api/git/checkout", post(git_api::git_checkout_handler))
         .route("/api/git/fetch", post(git_api::git_fetch_handler))
+        .route("/api/complete", get(complete_api::complete_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .layer(middleware::from_fn_with_state(
@@ -571,22 +575,24 @@ async fn list_sessions(
                         .get_cwd(id)
                         .filter(|p| state.security.is_workspace_path_allowed(p)),
                 };
-                let (workspace, cwd_id) = match effective_cwd {
+                let (workspace, cwd, cwd_id) = match effective_cwd {
                     Some(ref p) => {
+                        let full = p.to_string_lossy().into_owned();
                         let name = p
                             .file_name()
                             .and_then(|n| n.to_str())
                             .filter(|s| !s.is_empty())
-                            .map_or_else(|| "Workspace".to_string(), String::from);
-                        (Some(name), Some(short_cwd_hash(p)))
+                            .map_or_else(|| full.clone(), String::from);
+                        (Some(name), Some(full), Some(short_cwd_hash(p)))
                     }
-                    None => (Some("Remote".to_string()), None),
+                    None => (Some("Remote".to_string()), None, None),
                 };
                 list.push(SessionInfo {
                     id: id.to_string(),
                     state: sess_state,
                     label: Some(format!("session-{}", &id.to_string()[..8])),
                     workspace,
+                    cwd,
                     cwd_id,
                 });
             }
