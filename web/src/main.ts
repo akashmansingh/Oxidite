@@ -5,6 +5,8 @@ import { makeTerminal, THEMES, type ThemeName } from "./terminal";
 import { Connection, type Handlers } from "./connection";
 import { stateName, type BackendSpec, type Msg, type SessionState, type ShellCapability } from "./protocol";
 import { DeviceVault } from "./device-vault";
+import { createComposer, type Composer } from "./composer";
+import { icon, type IconName } from "./icons";
 import {
   buildPairShareUrl,
   buildSshAuthSpec,
@@ -43,7 +45,20 @@ interface Tab {
   b: string;
   msg: string;
   pair: Tab | null;
+  composer: Composer;
+  /** Folder name the gateway reports for this session; null until the first refresh. */
+  ws: string | null;
 }
+
+/** Git facts for the open session, shared by the changes panel and the input bar chips. */
+interface GitCtx {
+  id: string;
+  branch: string;
+  files: number;
+  add: number;
+  del: number;
+}
+let gitCtx: GitCtx | null = null;
 
 const $ = <T extends HTMLElement = HTMLElement>(s: string): T => document.querySelector<T>(s) as T;
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] => {
@@ -158,6 +173,21 @@ function paint(): void {
   $("#node-t").textContent = cur?.host ?? "host";
   $("#msg").textContent = cur?.msg ?? "No session open";
   $("#off").textContent = cur ? `${(cur.conn.offset / 1024).toFixed(0)} KiB` : "";
+  for (const t of tabs) if (!t.el.hidden) syncComposer(t);
+}
+
+function syncComposer(t: Tab): void {
+  t.composer.setHealth(t.b);
+  t.composer.setEnabled(t.b !== "down", t.msg);
+  const folder = t.ws === "Remote" ? t.host : t.ws;
+  const git = gitCtx !== null && gitCtx.id === t.id ? gitCtx : null;
+  t.composer.setContext({
+    folder,
+    branch: git?.branch ?? null,
+    files: git?.files ?? 0,
+    add: git?.add ?? 0,
+    del: git?.del ?? 0,
+  });
 }
 
 function renderTabs(): void {
@@ -193,7 +223,10 @@ function select(t: Tab | null): void {
   $("#panes").classList.toggle("has", tabs.length > 0);
   $("#panes").classList.toggle("split", !!t?.pair);
   $("#panes").classList.toggle("v", splitDir === "v");
-  $("#sp").textContent = !t?.pair ? "Split" : splitDir === "h" ? "Stack" : "Unsplit";
+  const spLabel = !t?.pair ? "Split terminal" : splitDir === "h" ? "Stack terminals" : "Unsplit";
+  $("#sp").title = spLabel;
+  $("#sp").setAttribute("aria-label", spLabel);
+  $("#sp").setAttribute("aria-pressed", String(!!t?.pair));
   $("#branches").hidden = true;
   $("#branch").setAttribute("aria-expanded", "false");
   $("#dtitle").textContent = "";
@@ -201,7 +234,8 @@ function select(t: Tab | null): void {
   if (t)
     requestAnimationFrame(() => {
       fitVisible();
-      t.term.focus();
+      if (t.composer.isRaw()) t.term.focus();
+      else t.composer.focus();
     });
   renderTabs();
   paint();
@@ -222,9 +256,15 @@ function closeTab(t: Tab): void {
 
 function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host: string): void {
   if ("spec" in t) label = uniqueLabel(label);
-  const pane = el("div", "pane");
+  const pane = el("div", "pane"),
+    screen = el("div", "screen");
+  pane.append(screen);
   $("#panes").append(pane);
-  const { term, fit } = makeTerminal(pane, theme);
+  const { term, fit } = makeTerminal(screen, theme);
+  // The input bar grows with its text, so the terminal above it refits whenever its own box changes.
+  new ResizeObserver(() => {
+    if (!pane.hidden) fit.fit();
+  }).observe(screen);
   const tab = {
     id: "id" in t ? t.id : null,
     label,
@@ -235,6 +275,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     a: "retry",
     b: "ok",
     msg: "Connecting",
+    ws: null,
     pair: null,
   } as unknown as Tab;
   const h: Handlers = {
@@ -299,7 +340,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     prompt: (k, m) => ask(k, m, tab),
   };
   tab.conn = new Connection(token, h, () => ({ rows: term.rows, cols: term.cols }));
-  term.onData((d) => {
+  const sendInput = (d: string): void => {
     tab.conn.input(enc.encode(d));
     if (d.includes("\r") || d.includes("\n")) {
       clearTimeout(cwdRefreshTimer);
@@ -311,6 +352,23 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
         if (token && !gate.open && !vaultDlg.open && cur?.id === tab.id) void refresh();
       }, 1100);
     }
+  };
+  term.onData(sendInput);
+  tab.composer = createComposer({
+    send: sendInput,
+    focusTerminal: () => term.focus(),
+    openChanges: () => {
+      const hidden = small() ? !$("#app").classList.contains("show-diff") : $("#app").classList.contains("nodiff");
+      if (hidden) $("#dt").click();
+    },
+  });
+  pane.append(tab.composer.el);
+  // Full-screen programs (vim, htop) switch to the alternate screen: hide the input bar and type straight into the terminal.
+  term.buffer.onBufferChange((b) => {
+    const raw = b.type === "alternate";
+    tab.composer.setRaw(raw);
+    if (raw) term.focus();
+    else if (screen.contains(document.activeElement)) tab.composer.focus();
   });
   term.onBinary((d) => tab.conn.input(Uint8Array.from(d, (c) => c.charCodeAt(0))));
   term.onResize(({ rows, cols }) => tab.conn.resize({ rows, cols }));
@@ -324,7 +382,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       autoHid = true;
     }
     select(cur);
-    requestAnimationFrame(() => tab.term.focus());
+    requestAnimationFrame(() => tab.composer.focus());
   } else select(tab);
 }
 
@@ -453,6 +511,8 @@ async function refresh(): Promise<void> {
       primed = true;
       let activeCwdChanged = false;
       for (const s of list) {
+        const open = tabs.find((x) => x.id === s.id);
+        if (open) open.ws = s.workspace ?? null;
         const nextCwd = s.cwd_id ?? null;
         if (!sessionCwds.has(s.id) || sessionCwds.get(s.id) !== nextCwd) {
           sessionCwds.set(s.id, nextCwd);
@@ -530,19 +590,23 @@ async function refresh(): Promise<void> {
   return refreshing;
 }
 
+function clearGit(branch = "no branch"): void {
+  $("#bname").textContent = branch;
+  $("#sum").textContent = "";
+  $("#count").textContent = "0";
+  gitCtx = null;
+  paint();
+}
+
 async function loadChanges(): Promise<void> {
   const list = $("#files");
   if (!token) {
-    $("#bname").textContent = "no branch";
-    $("#sum").textContent = "";
-    $("#count").textContent = "0";
+    clearGit();
     note(list, "Unlock the gateway to view session changes.");
     return;
   }
   if (!cur?.id) {
-    $("#bname").textContent = "no branch";
-    $("#sum").textContent = "";
-    $("#count").textContent = "0";
+    clearGit();
     note(list, "Open a session in a Git folder to view its changes.");
     return;
   }
@@ -553,9 +617,7 @@ async function loadChanges(): Promise<void> {
     );
     if (cur?.id !== sessionId) return;
     if (r.is_repo === false) {
-      $("#bname").textContent = "no git repo";
-      $("#sum").textContent = "";
-      $("#count").textContent = "0";
+      clearGit("no git repo");
       note(
         list,
         r.folder
@@ -567,13 +629,13 @@ async function loadChanges(): Promise<void> {
     const add = r.files.reduce((a, f) => a + f.add, 0),
       del = r.files.reduce((a, f) => a + f.del, 0);
     $("#bname").textContent = r.branch || "HEAD";
-    $("#sum").textContent = `+${add} −${del}`;
+    $("#sum").textContent = `+${add} \u2212${del}`;
     $("#count").textContent = String(r.files.length);
     list.replaceChildren(...(r.files.length ? r.files.map(fileRow) : [el("p", "note", "No changes in this folder.")]));
+    gitCtx = { id: sessionId, branch: r.branch || "HEAD", files: r.files.length, add, del };
+    paint();
   } catch {
-    $("#bname").textContent = "no branch";
-    $("#sum").textContent = "";
-    $("#count").textContent = "0";
+    clearGit();
     note(list, "Git data is unavailable for this session.");
   }
 }
@@ -758,6 +820,26 @@ $("#themes").replaceChildren(
   }),
 );
 setTheme(theme);
+
+for (const b of document.querySelectorAll<HTMLElement>("[data-icon]")) b.prepend(icon(b.dataset.icon as IconName));
+
+// Pressed state for the ribbon toggles follows the real layout classes, whichever code changed them.
+const appEl = $("#app");
+const syncRibbon = (): void => {
+  const c = appEl.classList;
+  $("#dt").setAttribute("aria-pressed", String(small() ? c.contains("show-diff") : !c.contains("nodiff") && !c.contains("focus")));
+  $("#fs").setAttribute("aria-pressed", String(c.contains("focus")));
+};
+new MutationObserver(syncRibbon).observe(appEl, { attributes: true, attributeFilter: ["class"] });
+syncRibbon();
+
+// Ctrl+Shift+L moves between the input bar and raw typing in the terminal.
+document.addEventListener("keydown", (e) => {
+  if (!cur || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.key.toLowerCase() !== "l") return;
+  e.preventDefault();
+  if (cur.composer.hasFocus()) cur.term.focus();
+  else if (!cur.composer.isRaw()) cur.composer.focus();
+});
 
 $("#tab-c").onclick = () => showTab(true);
 $("#tab-h").onclick = () => showTab(false);

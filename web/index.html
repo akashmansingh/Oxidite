@@ -12,7 +12,7 @@
 <body>
 <div id="app">
   <aside id="side">
-    <header class="ph"><h2>Workspaces</h2><div class="ph-acts"><button id="devs" class="ib txt" type="button" title="Paired devices & access tokens" aria-label="Manage devices">Devices</button><button id="new" class="ib" type="button" aria-label="New session"></button></div></header>
+    <header class="ph"><h2>Workspaces</h2><div class="ph-acts"><button id="devs" class="ib" type="button" data-icon="devices" title="Paired devices and access tokens" aria-label="Manage devices"></button><button id="new" class="ib" type="button" title="New session" aria-label="New session"></button></div></header>
     <div id="wsbox">
       <div id="ws"></div>
       <div id="ws-fallback" class="ws-fallback" hidden></div>
@@ -26,12 +26,15 @@
 
   <section id="term-pane">
     <div class="tabbar">
-      <button id="sb" class="ib txt small-only" type="button" aria-label="Show sessions">Sessions</button>
+      <button id="sb" class="ib small-only" type="button" data-icon="sessions" title="Sessions" aria-label="Show sessions"></button>
       <div id="tabs" role="tablist" aria-label="Open sessions"></div>
-      <button id="sp" class="ib txt" type="button" aria-label="Split the terminal">Split</button>
-      <button id="dt" class="ib txt" type="button" aria-label="Toggle diff pane">Diff</button>
-      <button id="cg" class="ib txt small-only" type="button" aria-label="Show changes">Changes</button>
-      <button id="fs" class="ib txt" type="button" aria-label="Toggle focus mode">Focus</button>
+      <div class="rib" role="toolbar" aria-label="Terminal layout">
+        <button id="sp" class="ib" type="button" data-icon="split" title="Split terminal" aria-label="Split the terminal" aria-pressed="false"></button>
+        <button id="dt" class="ib" type="button" data-icon="diff" title="Diff pane" aria-label="Toggle diff pane" aria-pressed="true"></button>
+        <button id="cg" class="ib small-only" type="button" data-icon="changes" title="Changes" aria-label="Show changes"></button>
+        <i class="rib-sep" aria-hidden="true"></i>
+        <button id="fs" class="ib" type="button" data-icon="expand" title="Focus mode" aria-label="Toggle focus mode" aria-pressed="false"></button>
+      </div>
     </div>
     <div id="panes"><p class="empty"><b>Nothing attached</b><span>Pick a session on the left, or press + to start one.</span></p></div>
   </section>
