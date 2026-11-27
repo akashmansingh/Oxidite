@@ -84,12 +84,12 @@ Spin up the full distributed cluster with two gateway nodes, a PostgreSQL lease 
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-- **Gateway 1**: `http://localhost:3000` (Node: `gateway-node-1`)
-- **Gateway 2**: `http://localhost:3001` (Node: `gateway-node-2`)
+- **Gateway 1**: `http://localhost:3030` (Node: `gateway-node-1`)
+- **Gateway 2**: `http://localhost:3031` (Node: `gateway-node-2`)
 - **PostgreSQL**: `localhost:5432`
 - **SSH Target**: `localhost:2222` (`developer` / `hunter2`)
 
-Open `http://localhost:3000`, enter token `dev-secret-token-12345`, and spawn your session.
+Open `http://localhost:3030`, enter token `dev-secret-token-12345`, and spawn your session.
 
 See [docs/runbooks/demo.md](docs/runbooks/demo.md) for the Golden Demo step-by-step walkthrough.
 
@@ -109,7 +109,7 @@ cd ..
 ```bash
 cargo run --bin oxidited
 ```
-The server will print a generated access token and listen on `http://127.0.0.1:3000`.
+The server will print a generated access token and listen on `http://127.0.0.1:3030`.
 
 ---
 

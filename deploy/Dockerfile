@@ -27,6 +27,6 @@ COPY --from=rust-builder /app/target/release/oxidited /usr/local/bin/oxidited
 COPY --from=web-builder /app/web/dist /app/web/dist
 
 ENV OXIDITE_WEB_DIR=/app/web/dist
-EXPOSE 3000
+EXPOSE 3030
 
 ENTRYPOINT ["oxidited"]

@@ -29,15 +29,15 @@ cargo test -p oxidite-server --test benchmark_evidence
 
 ### Live PowerShell Worker
 
-Run against a local running server (`http://127.0.0.1:3000`):
+Run against a local running server (`http://127.0.0.1:3030`):
 
 ```powershell
-.\tests\benchmarks\run.ps1 -Url "http://127.0.0.1:3000" -Token "<admin-token>"
+.\tests\benchmarks\run.ps1 -Url "http://127.0.0.1:3030" -Token "<admin-token>"
 ```
 
 ### Parameters
 
-- `-Url`: Target gateway HTTP address (default `http://127.0.0.1:3000`).
+- `-Url`: Target gateway HTTP address (default `http://127.0.0.1:3030`).
 - `-Token`: Optional bootstrap access token for testing authenticated API routes.
 - `-OutputDir`: Directory for evidence output (default `tests/benchmarks/evidence/`).
 - `-MaxRecords`: Maximum number of records to retain (default `100`).

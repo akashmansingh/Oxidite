@@ -69,7 +69,7 @@ Verify that rapid client request sequences (cold/warm static assets, traversal a
    ```
 2. Or run the live PowerShell benchmark worker against an active gateway:
    ```powershell
-   .\tests\benchmarks\run.ps1 -Url "http://127.0.0.1:3000" -Token "<admin-token>"
+   .\tests\benchmarks\run.ps1 -Url "http://127.0.0.1:3030" -Token "<admin-token>"
    ```
 3. Verify postconditions:
    - Output file is strictly capped under the 512 KiB and 100 records limit.

@@ -17,8 +17,8 @@ Verify services are running and healthy:
 docker compose -f deploy/docker-compose.yml ps
 ```
 
-- **Gateway 1**: `http://localhost:3000` (Node: `gateway-node-1`)
-- **Gateway 2**: `http://localhost:3001` (Node: `gateway-node-2`)
+- **Gateway 1**: `http://localhost:3030` (Node: `gateway-node-1`)
+- **Gateway 2**: `http://localhost:3031` (Node: `gateway-node-2`)
 - **Directory**: PostgreSQL on `localhost:5432`
 - **Target Host**: OpenSSH + tmux on `localhost:2222` (`developer` / `hunter2`)
 
@@ -26,7 +26,7 @@ docker compose -f deploy/docker-compose.yml ps
 
 ## 2. Interactive Shell Demonstration
 
-1. Open `http://localhost:3000` in Google Chrome or Firefox.
+1. Open `http://localhost:3030` in Google Chrome or Firefox.
 2. Enter the gateway access token: `dev-secret-token-12345`.
 3. Click **New Terminal** and select **SSH**:
    - Host: `test-sshd` (or `localhost`)
@@ -51,7 +51,7 @@ docker compose -f deploy/docker-compose.yml ps
    ```
 2. While numbers are rapidly scrolling, **close the browser tab completely**.
 3. Observe on the server (`docker logs oxidite-gateway-1`) that the session state transitions to `Detached`, but the shell process and tmux session remain running at full speed.
-4. Re-open `http://localhost:3000`.
+4. Re-open `http://localhost:3030`.
 5. Click on the active session in the sidebar.
 6. The client sends `Attach` with `last_offset`. The session actor restores the exact screen via ANSI repaint snapshot and missing replay chunks. Notice:
    - **Zero gaps** in output.
@@ -77,14 +77,14 @@ docker compose -f deploy/docker-compose.yml ps
 
 ## 5. Gateway Node Crash & Transparent Failover
 
-1. While an SSH+tmux session is active on Gateway 1 (`http://localhost:3000`), crash Gateway 1:
+1. While an SSH+tmux session is active on Gateway 1 (`http://localhost:3030`), crash Gateway 1:
    ```bash
    docker stop oxidite-gateway-1
    ```
 2. The browser connection to Gateway 1 drops.
-3. Gateway 2 (`http://localhost:3001`) detects the orphaned session as its TTL lease expires in PostgreSQL.
+3. Gateway 2 (`http://localhost:3031`) detects the orphaned session as its TTL lease expires in PostgreSQL.
 4. Gateway 2 adopts the session with an incremented fencing token (`fencing_token = 2`), reconnects to the containerized sshd, and reattaches to `tmux new-session -A -s oxidite-<id>`.
-5. Open `http://localhost:3001` in your browser. Attach to the session.
+5. Open `http://localhost:3031` in your browser. Attach to the session.
 6. The terminal repaints the live shell state exactly where you left off.
 7. Verify that if Gateway 1 is restarted (`docker start oxidite-gateway-1`), its stale lease and old fencing token (1) are rejected, preventing split-brain writes.
 
@@ -110,7 +110,7 @@ Returns `HTTP/1.1 200 OK` with body `READY`.
 Run the bounded scenario benchmark against a live gateway:
 
 ```powershell
-.\tests\benchmarks\run.ps1 -Url "http://localhost:3000" -Token "dev-secret-token-12345"
+.\tests\benchmarks\run.ps1 -Url "http://localhost:3030" -Token "dev-secret-token-12345"
 ```
 
 Verify that `tests/benchmarks/evidence/benchmark-latest.ndjson` contains size-capped NDJSON records with redacted measurements, explicit cache decisions, and zero leaked credentials.
