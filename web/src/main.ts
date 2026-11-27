@@ -1,4 +1,5 @@
 import "./style.css";
+import "./mobile-kbd-bar.css";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { makeTerminal, THEMES, type ThemeName } from "./terminal";
@@ -8,6 +9,8 @@ import { DeviceVault } from "./device-vault";
 import { createComposer, type Composer, type CompletionResult } from "./composer";
 import { createCommandBlocks, type CommandBlockView } from "./blocks";
 import { icon, type IconName } from "./icons";
+import { installVisualViewportSync } from "./mobile-kbd-bar";
+import { createAgentLogoElement, formatTabLabel } from "./tab-label";
 import {
   buildPairShareUrl,
   buildSshAuthSpec,
@@ -29,7 +32,17 @@ import {
 //   POST /api/git/checkout { session, branch }
 //   POST /api/git/fetch    { session }
 // Missing endpoints show an empty state; nothing is faked.
-type Sess = { id: string; state: SessionState; label?: string; workspace?: string; cwd?: string | null; cwd_id?: string | null };
+type Sess = {
+  id: string;
+  state: SessionState;
+  label?: string;
+  workspace?: string;
+  cwd?: string | null;
+  cwd_id?: string | null;
+  home_dir?: string | null;
+  active_agent?: string | null;
+  agent_label?: string | null;
+};
 type FileChg = { path: string; add: number; del: number; staged: boolean };
 const sessionCwds = new Map<string, string | null>();
 let cwdRefreshTimer: number | undefined;
@@ -52,6 +65,9 @@ interface Tab {
   ws: string | null;
   /** Full working directory path reported for this session. */
   cwd: string | null;
+  homeDir: string | null;
+  activeAgent: string | null;
+  agentLabel: string | null;
 }
 
 /** Git facts for the open session, shared by the changes panel and the input bar chips. */
@@ -117,8 +133,7 @@ function logEvent(tab: Tab, text: string): void {
   renderActivity();
 }
 function renderActivity(): void {
-  const ok = tabs.filter((t) => t.b === "ok").length;
-  $("#actsum").textContent = !tabs.length ? "" : tabs.length > ok ? `${ok} ok, ${tabs.length - ok} flagged` : `${ok} ok`;
+  $("#actsum").textContent = "";
   const list = $("#actlist");
   if (!events.length) {
     note(list, "Connection changes show up here.");
@@ -129,7 +144,7 @@ function renderActivity(): void {
       const b = el("button", "ev"),
         when = e.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       b.dataset.b = e.b;
-      b.append(el("i", "dot"), el("b", "", e.tab.label), el("span", "", `${e.text}, ${when}`));
+      b.append(el("i", "dot"), el("b", "", tabCaption(e.tab, false).text), el("span", "", `${e.text}, ${when}`));
       b.onclick = () => {
         if (tabs.includes(e.tab)) select(e.tab);
       };
@@ -159,7 +174,19 @@ async function api<T>(path: string, body?: unknown, methodOverride?: string): Pr
     if (!authPrompted) void promptUnlock("Your gateway token was rejected or revoked.");
     throw new ApiError(401, "Unauthorized");
   }
-  if (!r.ok) throw new ApiError(r.status, String(r.status));
+  if (!r.ok) {
+    let errMsg = String(r.status);
+    try {
+      const ct = r.headers.get("content-type") ?? "";
+      if (ct.includes("json")) {
+        const parsed = (await r.json()) as { message?: string };
+        if (parsed?.message) errMsg = parsed.message;
+      }
+    } catch {
+      // Keep status code fallback when response has no JSON message
+    }
+    throw new ApiError(r.status, errMsg);
+  }
   if (r.status === 204) return undefined as T;
   return (r.headers.get("content-type")?.includes("json") ? r.json() : r.text()) as Promise<T>;
 }
@@ -174,7 +201,7 @@ function paint(): void {
   const c = $("#chain");
   c.dataset.a = cur?.a ?? "retry";
   c.dataset.b = cur?.b ?? "ok";
-  $("#node-t").textContent = cur?.host ?? "host";
+  $("#node-t").textContent = cur ? tabCaption(cur, false).text : "host";
   $("#msg").textContent = cur?.msg ?? "No session open";
   $("#off").textContent = cur ? `${(cur.conn.offset / 1024).toFixed(0)} KiB` : "";
   for (const t of tabs) if (!t.el.hidden) syncComposer(t);
@@ -194,15 +221,34 @@ function syncComposer(t: Tab): void {
   });
 }
 
+function tabCaption(t: Tab, compact: boolean): { text: string; tooltip: string; agentId: string | null } {
+  if (t.activeAgent || t.cwd) {
+    return formatTabLabel(
+      {
+        cwd: t.cwd,
+        homeDir: t.homeDir,
+        active_agent: t.activeAgent,
+        agent_label: t.agentLabel,
+      },
+      compact,
+    );
+  }
+  const fallback = t.label && t.label !== "local shell" ? t.label : "shell";
+  return { text: fallback, tooltip: t.host && t.host !== "local shell" ? t.host : fallback, agentId: null };
+}
+
 function renderTabs(): void {
+  const compact = typeof matchMedia === "function" && matchMedia("(max-width: 900px)").matches;
   const add = el("button", "ib addtab");
   add.setAttribute("aria-label", "New session");
   add.onclick = () => $("#new").click();
   $("#tabs").replaceChildren(
     ...tabs.map((t) => {
+      const cap = tabCaption(t, compact);
       const b = el("div", "tab"),
-        main = el("button", "tabmain", t.label),
+        main = el("button", "tabmain", cap.text),
         x = el("button", "ib x");
+      main.title = cap.tooltip;
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", String(t === cur || t === cur?.pair));
       b.dataset.b = t.b;
@@ -211,9 +257,10 @@ function renderTabs(): void {
         if (e.button === 1) closeTab(t);
       });
       main.onclick = () => select(t);
-      x.setAttribute("aria-label", `Close ${t.label}. The session keeps running.`);
+      x.setAttribute("aria-label", `Close ${cap.text}. The session keeps running.`);
       x.onclick = () => closeTab(t);
-      b.append(el("i", "dot"), main, x);
+      const logoId = cap.agentId ?? "powershell";
+      b.append(createAgentLogoElement(logoId, cap.text), main, x);
       return b;
     }),
     add,
@@ -238,8 +285,10 @@ function select(t: Tab | null): void {
   if (t)
     requestAnimationFrame(() => {
       fitVisible();
-      if (t.composer.isRaw()) t.term.focus();
-      else t.composer.focus();
+      if (t.composer.isRaw()) {
+        if (matchMedia("(max-width: 900px), (pointer: coarse)").matches) t.composer.focusRaw();
+        else t.term.focus();
+      } else t.composer.focus();
     });
   renderTabs();
   paint();
@@ -248,14 +297,26 @@ function select(t: Tab | null): void {
   void refresh();
 }
 
-function closeTab(t: Tab): void {
-  t.conn.detach();
+function removeTabUi(t: Tab): void {
+  t.composer.destroy();
   t.term.dispose();
   t.el.remove();
   tabs.splice(tabs.indexOf(t), 1);
   for (const x of tabs) if (x.pair === t) x.pair = null;
   renderActivity();
   select(cur === t ? (tabs.at(-1) ?? null) : cur);
+  void refresh();
+}
+
+function closeTab(t: Tab): void {
+  t.conn.kill();
+  t.conn.detach();
+  removeTabUi(t);
+}
+
+function suspendTab(t: Tab): void {
+  t.conn.detach();
+  removeTabUi(t);
 }
 
 function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host: string): void {
@@ -287,6 +348,9 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     msg: "Connecting",
     ws: initialCwd ? (initialCwd.split(/[/\\]/).filter(Boolean).pop() ?? null) : null,
     cwd: initialCwd,
+    homeDir: null,
+    activeAgent: null,
+    agentLabel: null,
     pair: null,
     blocks,
   } as unknown as Tab;
@@ -299,6 +363,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     if (tab.cwd === cleaned) return;
     tab.cwd = cleaned;
     tab.ws = cleaned.split(/[/\\]/).filter(Boolean).pop() ?? cleaned;
+    renderTabs();
     paint();
     clearTimeout(cwdRefreshTimer);
     cwdRefreshTimer = window.setTimeout(() => {
@@ -436,16 +501,29 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       const hidden = small() ? !$("#app").classList.contains("show-diff") : $("#app").classList.contains("nodiff");
       if (hidden) $("#dt").click();
     },
+    onScrollLockChange: (locked) => {
+      pane.dataset.scrollLocked = locked ? "1" : "0";
+      term.options.disableStdin = locked;
+    },
   });
   pane.append(tab.composer.el);
-  // Full-screen programs (vim, htop) switch to the alternate screen: hide the input bar and type straight into the terminal.
+  screen.addEventListener("click", () => {
+    if (!tab.composer.isScrollLocked() && tab.composer.isRaw() && matchMedia("(max-width: 900px), (pointer: coarse)").matches) {
+      tab.composer.focusRaw();
+    }
+  });
+  // Full-screen programs (vim, htop) and detected Agentic CLIs switch to raw terminal input.
   term.buffer.onBufferChange((b) => {
-    const raw = b.type === "alternate";
+    const raw = b.type === "alternate" || !!tab.activeAgent;
     tab.composer.setRaw(raw);
     pane.dataset.mode = raw ? "raw" : "blocks";
     fit.fit();
-    if (raw) term.focus();
-    else tab.composer.focus();
+    if (raw) {
+      if (matchMedia("(max-width: 900px), (pointer: coarse)").matches) tab.composer.focusRaw();
+      else term.focus();
+    } else {
+      tab.composer.focus();
+    }
   });
   term.onBinary((d) => tab.conn.input(Uint8Array.from(d, (c) => c.charCodeAt(0))));
   term.onResize(({ rows, cols }) => tab.conn.resize({ rows, cols }));
@@ -587,11 +665,46 @@ async function refresh(): Promise<void> {
       for (const id of live) seen.add(id);
       primed = true;
       let activeCwdChanged = false;
+      let tabsDirty = false;
       for (const s of list) {
         const open = tabs.find((x) => x.id === s.id);
         if (open) {
-          open.ws = s.workspace ?? null;
-          open.cwd = s.cwd ?? null;
+          const nextWs = s.workspace ?? null;
+          const nextCwd = s.cwd ?? null;
+          const nextHome = s.home_dir ?? null;
+          const nextAgent = s.active_agent ?? null;
+          const nextAgentLabel = s.agent_label ?? null;
+          const agentChanged = open.activeAgent !== nextAgent;
+          if (
+            open.ws !== nextWs ||
+            open.cwd !== nextCwd ||
+            open.homeDir !== nextHome ||
+            agentChanged ||
+            open.agentLabel !== nextAgentLabel
+          ) {
+            open.ws = nextWs;
+            open.cwd = nextCwd;
+            open.homeDir = nextHome;
+            open.activeAgent = nextAgent;
+            open.agentLabel = nextAgentLabel;
+            tabsDirty = true;
+          }
+          if (nextAgent) {
+            if (!open.composer.isRaw() || open.el.dataset.mode !== "raw") {
+              open.composer.setRaw(true);
+              open.el.dataset.mode = "raw";
+              open.fit.fit();
+              if (cur === open) {
+                if (matchMedia("(max-width: 900px), (pointer: coarse)").matches) open.composer.focusRaw();
+                else open.term.focus();
+              }
+            }
+          } else if (agentChanged && open.term.buffer.active.type !== "alternate") {
+            open.composer.setRaw(false);
+            open.el.dataset.mode = "blocks";
+            open.fit.fit();
+            if (cur === open) open.composer.focus();
+          }
         }
         const nextCwd = s.cwd_id ?? null;
         if (!sessionCwds.has(s.id) || sessionCwds.get(s.id) !== nextCwd) {
@@ -609,25 +722,68 @@ async function refresh(): Promise<void> {
           const g = el("section", "wsg");
           g.append(el("h3", "", name));
           for (const s of items) {
+            const row = el("div", "sess-row");
             const b = el("button", "sess"),
               n = stateName(s.state),
-              nm = names[s.id] ?? s.label ?? s.id.slice(0, 8);
+              savedNm = names[s.id],
+              nm =
+                s.active_agent || s.cwd
+                  ? formatTabLabel(
+                      {
+                        cwd: s.cwd,
+                        homeDir: s.home_dir,
+                        active_agent: s.active_agent,
+                        agent_label: s.agent_label,
+                      },
+                      false,
+                    ).text
+                  : (savedNm && savedNm !== "local shell" ? savedNm : s.label && s.label !== "local shell" ? s.label : s.id.slice(0, 8));
             b.dataset.s = n;
             b.setAttribute("aria-current", String(cur !== null && cur.id === s.id));
-            const isOpen = tabs.some((t) => t.id === s.id);
+            const openTabRef = tabs.find((t) => t.id === s.id);
+            const isOpen = !!openTabRef;
             b.dataset.open = isOpen ? "1" : "0";
             b.append(el("i", "dot"), el("b", "", nm), el("span", "", isOpen ? `${n}, open` : n));
             b.onclick = () => {
-              const open = tabs.find((t) => t.id === s.id);
-              if (open) select(open);
+              if (openTabRef) select(openTabRef);
               else openTab({ id: s.id }, nm, nm);
             };
-            g.append(b);
+            const actBtn = el("button", "ib sess-act");
+            actBtn.type = "button";
+            const actImg = document.createElement("img");
+            actImg.width = 14;
+            actImg.height = 14;
+            if (isOpen && openTabRef) {
+              actImg.src = "/icons/pause.svg";
+              actImg.alt = "Suspend";
+              actBtn.title = "Suspend session (keep running in background)";
+              actBtn.setAttribute("aria-label", `Suspend ${nm}`);
+              actBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                suspendTab(openTabRef);
+              };
+            } else {
+              actImg.src = "/icons/play.svg";
+              actImg.alt = "Resume";
+              actBtn.title = "Resume session";
+              actBtn.setAttribute("aria-label", `Resume ${nm}`);
+              actBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                openTab({ id: s.id }, nm, nm);
+              };
+            }
+            actBtn.append(actImg);
+            row.append(b, actBtn);
+            g.append(row);
           }
           return g;
         }),
       );
       $("#empty-ws").hidden = list.length > 0;
+      if (tabsDirty) {
+        renderTabs();
+        renderActivity();
+      }
       paint();
       void probeShellCapabilities();
       if (cur?.id) {
@@ -692,7 +848,14 @@ async function loadChanges(): Promise<void> {
   }
   try {
     const sessionId = cur.id;
-    const r = await api<{ is_repo?: boolean; folder?: string | null; branch: string; files: FileChg[] }>(
+    const r = await api<{
+      is_repo?: boolean;
+      folder?: string | null;
+      branch: string;
+      ahead?: number;
+      behind?: number;
+      files: FileChg[];
+    }>(
       `/api/git/changes?session=${encodeURIComponent(sessionId)}`,
     );
     if (cur?.id !== sessionId) return;
@@ -708,8 +871,11 @@ async function loadChanges(): Promise<void> {
     const add = r.files.reduce((a, f) => a + f.add, 0),
       del = r.files.reduce((a, f) => a + f.del, 0);
     const branchLabel = r.branch && r.branch !== "HEAD (unborn)" ? r.branch : "No branch";
+    const ahead = r.ahead ?? 0;
+    const behind = r.behind ?? 0;
+    const ab = [behind > 0 ? `\u2193${behind}` : "", ahead > 0 ? `\u2191${ahead}` : ""].filter(Boolean).join(" ");
     $("#bname").textContent = branchLabel;
-    $("#sum").textContent = `+${add} \u2212${del}`;
+    $("#sum").textContent = ab ? `${ab}  +${add} \u2212${del}` : `+${add} \u2212${del}`;
     $("#count").textContent = String(r.files.length);
     list.replaceChildren(...(r.files.length ? r.files.map(fileRow) : [el("p", "note", "No changes in this folder.")]));
     gitCtx = { id: sessionId, branch: branchLabel, files: r.files.length, add, del };
@@ -1072,6 +1238,25 @@ for (const b of document.querySelectorAll<HTMLButtonElement>("#fetch-menu [data-
     closeAllMenus();
     if (act === "fetch") {
       $("#fetch").click();
+    } else if (act === "pull" || act === "push") {
+      if (!cur?.id) {
+        $("#msg").textContent = "Open a session in a Git folder first.";
+        return;
+      }
+      const fetchBtn = $<HTMLButtonElement>("#fetch");
+      const lbl = $("#fetch-label");
+      fetchBtn.disabled = true;
+      lbl.textContent = act === "pull" ? "Pulling" : "Pushing";
+      try {
+        const res = await api<{ ok: boolean; message: string }>(`/api/git/${act}`, { session: cur.id });
+        $("#msg").textContent = res.message || (act === "pull" ? "Pulled remote changes." : "Pushed to remote.");
+      } catch (err) {
+        $("#msg").textContent = err instanceof ApiError ? err.message : `${act === "pull" ? "Pull" : "Push"} failed.`;
+      }
+      fetchBtn.disabled = false;
+      lbl.textContent = "Fetch";
+      await loadChanges();
+      if (!$("#hist").hidden) await loadHistory();
     } else if (act === "refresh") {
       await loadChanges();
       if (!$("#hist").hidden) await loadHistory();
@@ -1209,9 +1394,11 @@ $<HTMLDialogElement>("#newdlg").onclose = () => {
       s("host").trim(),
     );
   } else if (s("kind") === "powershell") {
-    openTab({ spec: { LocalPty: { shell: "SystemPowerShell", cwd } } }, "powershell", "powershell");
+    const initLbl = cwd ? (cwd.split(/[/\\]/).filter(Boolean).pop() ?? "powershell") : "powershell";
+    openTab({ spec: { LocalPty: { shell: "SystemPowerShell", cwd } } }, initLbl, "powershell");
   } else {
-    openTab({ spec: { LocalPty: { shell: null, cwd } } }, "local shell", "local shell");
+    const initLbl = cwd ? (cwd.split(/[/\\]/).filter(Boolean).pop() ?? "shell") : "shell";
+    openTab({ spec: { LocalPty: { shell: null, cwd } } }, initLbl, "shell");
   }
 };
 
@@ -1484,9 +1671,9 @@ $("#pair-new-btn").onclick = async () => {
   const devErr = $("#dev-err");
   devErr.hidden = true;
   try {
-    const res = await api<{ grant: string; expires_in_secs: number }>("/api/devices/grant", { ttl_secs: 300 });
+    const res = await api<{ grant: string; expires_in_secs: number; share_url?: string }>("/api/devices/grant", { ttl_secs: 300 });
     $("#pair-ttl").textContent = `${Math.max(1, Math.round(res.expires_in_secs / 60))}m`;
-    $<HTMLInputElement>("#pair-link").value = buildPairShareUrl(location.origin, location.pathname, res.grant);
+    $<HTMLInputElement>("#pair-link").value = res.share_url || buildPairShareUrl(location.origin, location.pathname, res.grant);
     $<HTMLInputElement>("#pair-grant").value = res.grant;
     $("#pair-result").hidden = false;
   } catch {
@@ -1515,6 +1702,16 @@ async function initAuth(): Promise<void> {
   }
   await promptUnlock();
 }
+
+installVisualViewportSync();
+if (typeof matchMedia === "function") {
+  matchMedia("(max-width: 900px)").addEventListener("change", () => renderTabs());
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && token && !gate.open && !vaultDlg.open) {
+    void refresh();
+  }
+});
 
 renderActivity();
 $("#ws-fallback").hidden = true;

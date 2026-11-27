@@ -17,7 +17,7 @@ button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
 
 #app {
-  display: grid; height: 100dvh;
+  display: grid; height: var(--app-h, 100dvh); margin-top: var(--vv-offset-top, 0px);
   grid-template: "side term diff chg" minmax(0, 1fr) "bar bar bar bar" auto / var(--w-side) minmax(18rem, var(--w-term)) minmax(0, 1fr) var(--w-chg);
 }
 #app.nodiff { grid-template-columns: var(--w-side) minmax(0, 1fr) 0 var(--w-chg); }
@@ -212,13 +212,25 @@ dialog:has(#k-ssh:checked) #ssh { display: block; }
 #sb { display: none; }
 @media (max-width: 720px) { #sb { display: inline-grid; } }
 
-/* ribbon: rounded tabs whose bottom edge shows session health, then icon buttons for layout */
-.tabbar { display: flex; align-items: center; gap: .4rem; height: 2.6rem; padding: 0 .5rem 0 .4rem; background: var(--bg2); border-bottom: 1px solid var(--line); }
+/* ribbon: flat joined tabs whose top edge shows session health, then icon buttons for layout */
+.tabbar { display: flex; align-items: stretch; gap: .25rem; height: 2.6rem; padding: 0 .4rem 0 0; background: var(--bg2); border-bottom: 1px solid var(--line); }
 .tabbar > .ib { align-self: center; }
-#tabs { display: flex; flex: 1; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.tab { --tabc: var(--acc); position: relative; flex: 0 1 9.5rem; min-width: 7.5rem; display: flex; align-items: center; gap: .5rem; height: 1.9rem; padding: 0 .3rem 0 .7rem; color: var(--mute); background: transparent; border-radius: 7px; transition: background .15s, color .15s; }
+#tabs { display: flex; flex: 1; align-items: stretch; gap: 0; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tab { --tabc: var(--acc); position: relative; flex: 0 1 12.5rem; min-width: 7.5rem; display: flex; align-items: center; gap: .5rem; height: 100%; padding: 0 .4rem 0 .75rem; color: var(--mute); background: transparent; border-right: 1px solid var(--line); border-radius: 0; transition: background .15s, color .15s; }
+.tab-logo { width: 18px; height: 18px; flex: none; display: block; object-fit: contain; }
+.tab-logo[alt="Codex"] { width: 20px; height: 20px; transform: scale(1.1); }
+.tab-logo-fallback {
+  display: inline-grid; place-items: center; width: 18px; height: 18px; flex: none;
+  border-radius: 4px; background: var(--bg2); border: 1px solid var(--line);
+  color: var(--fg); font: 700 11px/1 var(--mono);
+}
+[data-theme="patina"] .tab-logo[alt="Codex"] { filter: invert(1); }
+.sess-row { display: flex; align-items: center; gap: .2rem; }
+.sess-row .sess { flex: 1; min-width: 0; }
+.sess-act { flex: none; width: 1.75rem; height: 1.75rem; color: var(--mute); border-radius: 5px; }
+.sess-act:hover { color: var(--fg); background: var(--bg3); }
 .tab:hover { color: var(--fg); background: var(--bg3); }
-.tab[aria-selected="true"] { color: var(--fg); background: var(--bg3); box-shadow: inset 0 0 0 1px var(--line), inset 0 -2px 0 var(--tabc); }
+.tab[aria-selected="true"] { color: var(--fg); background: var(--bg); box-shadow: inset 0 2px 0 var(--tabc); }
 .tab[data-b="warn"], .tab[data-b="retry"] { --tabc: var(--warn); }
 .tab[data-b="down"] { --tabc: var(--delbar); }
 .tab[data-pair] { background-image: repeating-linear-gradient(90deg, var(--acc2) 0 4px, transparent 4px 8px); background-size: 100% 2px; background-repeat: no-repeat; background-position: 0 100%; }
@@ -279,7 +291,12 @@ article.blk:first-of-type { border-top: 0; padding-top: 0; }
 .blk-line { min-height: 1.45em; }
 .screen { position: relative; flex: 1; min-height: 0; padding: .5rem 0 0 .6rem; }
 .composer { position: relative; display: grid; gap: .45rem; padding: .55rem .9rem .5rem; background: var(--bg2); border-top: 1px solid var(--line); z-index: 2; }
-.composer[data-raw="1"] { display: none; }
+.composer[data-raw="1"] { padding: 0; border-top: 0; }
+.composer[data-raw="1"] > :not(.kbd-bar) { display: none; }
+.pane[data-scroll-locked="1"] .screen .xterm-screen,
+.pane[data-scroll-locked="1"] .screen textarea { pointer-events: none; }
+.pane[data-scroll-locked="1"] .blocks,
+.pane[data-scroll-locked="1"] .xterm-viewport { touch-action: pan-y; overscroll-behavior: contain; }
 .chips { display: flex; flex-wrap: wrap; gap: .38rem; min-width: 0; }
 .chip { display: inline-flex; align-items: center; gap: .35rem; max-width: 100%; height: 1.45rem; padding: 0 .48rem; color: var(--fg); background: var(--bg3); border: 1px solid var(--line); border-radius: 5px; font: 600 .73rem/1 var(--mono); }
 .chip .ico { flex: none; width: .78rem; height: .78rem; color: var(--mute); }

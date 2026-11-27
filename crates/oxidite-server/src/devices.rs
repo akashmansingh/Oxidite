@@ -96,12 +96,27 @@ impl DeviceStore {
             .await
             .map_err(|e| DeviceAuthError::Storage(e.to_string()))?;
 
+        let _ = sqlx::query("PRAGMA journal_mode=WAL;").execute(&pool).await;
+        let _ = sqlx::query("PRAGMA synchronous=NORMAL;")
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("PRAGMA busy_timeout=5000;")
+            .execute(&pool)
+            .await;
+
         let store = Self {
             pool,
             grants: Arc::new(Mutex::new(HashMap::new())),
         };
         store.ensure_migrated().await?;
         Ok(store)
+    }
+
+    /// Flushes the SQLite WAL cleanly during graceful shutdown.
+    pub async fn checkpoint_wal(&self) {
+        let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(&self.pool)
+            .await;
     }
 
     pub async fn ensure_migrated(&self) -> Result<(), DeviceAuthError> {
@@ -148,6 +163,8 @@ impl DeviceStore {
         let expires_at = Instant::now() + ttl;
 
         let mut grants = self.grants.lock().unwrap();
+        let now = Instant::now();
+        grants.retain(|_, g| g.expires_at.is_none_or(|exp| exp > now));
         grants.insert(
             grant_token.clone(),
             EnrollmentGrant {

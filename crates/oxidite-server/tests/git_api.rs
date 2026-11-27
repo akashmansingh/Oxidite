@@ -299,3 +299,120 @@ async fn test_git_api_enforces_workspace_roots_isolation() {
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+#[tokio::test]
+async fn test_git_pull_push_and_ahead_behind_against_bare_remote() {
+    let temp_root = std::env::temp_dir().join(format!("oxidite-git-net-{}", std::process::id()));
+    let bare_dir = temp_root.join("bare.git");
+    let local_dir = temp_root.join("local");
+    let peer_dir = temp_root.join("peer");
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&bare_dir).unwrap();
+    std::fs::create_dir_all(&local_dir).unwrap();
+
+    let run_git = |cwd: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} in {:?} failed: {}",
+            args,
+            cwd,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run_git(&bare_dir, &["init", "--bare", "-b", "main"]);
+    init_temp_repo(&local_dir);
+    let bare_str = bare_dir.to_string_lossy().to_string();
+    run_git(&local_dir, &["branch", "-M", "main"]);
+    run_git(&local_dir, &["remote", "add", "origin", &bare_str]);
+    run_git(&local_dir, &["push", "-u", "origin", "main"]);
+
+    // Clone peer from bare remote and push a new commit so `local` is behind.
+    let clone_out = Command::new("git")
+        .args(["clone", &bare_str])
+        .arg(&peer_dir)
+        .output()
+        .unwrap();
+    assert!(clone_out.status.success());
+    run_git(&peer_dir, &["config", "user.email", "peer@example.com"]);
+    run_git(&peer_dir, &["config", "user.name", "Peer User"]);
+    std::fs::write(peer_dir.join("remote.txt"), "from peer\n").unwrap();
+    run_git(&peer_dir, &["add", "remote.txt"]);
+    run_git(&peer_dir, &["commit", "-m", "peer commit"]);
+    run_git(&peer_dir, &["push", "origin", "main"]);
+
+    run_git(&local_dir, &["fetch", "origin"]);
+
+    let manager = SessionManager::new();
+    let sid = uuid::Uuid::new_v4();
+    manager.set_cwd(sid, local_dir.clone());
+    let (state, token) = test_state(manager);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(state)).await.unwrap();
+    });
+
+    // 1. /api/git/changes reports behind = 1, ahead = 0
+    let (chg_st, chg_body) =
+        http_get(addr, &format!("/api/git/changes?session={sid}"), &token).await;
+    assert_eq!(chg_st, 200);
+    let chg: serde_json::Value = serde_json::from_str(&chg_body).unwrap();
+    assert_eq!(chg["behind"], 1, "expected behind=1, got {chg}");
+    assert_eq!(chg["ahead"], 0, "expected ahead=0, got {chg}");
+
+    // 2. POST /api/git/pull brings in remote.txt (--ff-only)
+    let mut pull_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let pull_body = serde_json::json!({ "session": sid.to_string() }).to_string();
+    let pull_req = format!(
+        "POST /api/git/pull HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        pull_body.len(),
+        pull_body
+    );
+    pull_stream.write_all(pull_req.as_bytes()).await.unwrap();
+    let mut pull_raw = String::new();
+    pull_stream.read_to_string(&mut pull_raw).await.unwrap();
+    assert!(
+        pull_raw.starts_with("HTTP/1.1 200"),
+        "expected 200 from pull, got {pull_raw}"
+    );
+    assert!(local_dir.join("remote.txt").exists());
+
+    // 3. Create a local commit -> ahead = 1, then POST /api/git/push pushes it
+    std::fs::write(local_dir.join("local.txt"), "from local\n").unwrap();
+    run_git(&local_dir, &["add", "local.txt"]);
+    run_git(&local_dir, &["commit", "-m", "local commit"]);
+
+    let (chg2_st, chg2_body) =
+        http_get(addr, &format!("/api/git/changes?session={sid}"), &token).await;
+    assert_eq!(chg2_st, 200);
+    let chg2: serde_json::Value = serde_json::from_str(&chg2_body).unwrap();
+    assert_eq!(chg2["ahead"], 1, "expected ahead=1, got {chg2}");
+    assert_eq!(chg2["behind"], 0, "expected behind=0, got {chg2}");
+
+    let mut push_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let push_req = format!(
+        "POST /api/git/push HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        pull_body.len(),
+        pull_body
+    );
+    push_stream.write_all(push_req.as_bytes()).await.unwrap();
+    let mut push_raw = String::new();
+    push_stream.read_to_string(&mut push_raw).await.unwrap();
+    assert!(
+        push_raw.starts_with("HTTP/1.1 200"),
+        "expected 200 from push, got {push_raw}"
+    );
+
+    // Verify bare repo now has the pushed commit and peer pulls it cleanly.
+    run_git(&peer_dir, &["pull", "--ff-only"]);
+    assert!(peer_dir.join("local.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}

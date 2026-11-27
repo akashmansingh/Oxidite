@@ -1,0 +1,122 @@
+:root {
+  --app-h: 100dvh;
+  --vv-offset-top: 0px;
+}
+
+.oxidite-raw-kbd-proxy {
+  position: fixed;
+  top: 0;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.kbd-bar {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: #0d0f13;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+@media (max-width: 900px), (pointer: coarse) {
+  .kbd-bar {
+    display: flex;
+  }
+}
+
+.kbd-bar-fixed {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 5px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.kbd-bar-fixed::-webkit-scrollbar,
+.kbd-bar-symbols::-webkit-scrollbar {
+  display: none;
+}
+
+.kbd-bar-symbols {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.kbd-btn {
+  flex: 0 0 auto;
+  min-width: 38px;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #181b22;
+  color: #e4e4e7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.kbd-btn:active {
+  background: #272c38;
+  transform: translateY(1px);
+}
+
+.kbd-btn-modifier.is-active {
+  background: #ea580c;
+  border-color: #fb923c;
+  color: #ffffff;
+}
+
+.kbd-btn-lock.is-active {
+  background: #1d4ed8;
+  border-color: #60a5fa;
+  color: #ffffff;
+}
+
+.kbd-chip {
+  min-width: 34px;
+  height: 28px;
+  font-size: 12px;
+  background: #12151b;
+  color: #a1a1aa;
+}
+
+/* Agentic CLI tab badge + logo */
+.tab-logo {
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.tab-logo-fallback {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: #27272a;
+  color: #f97316;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}

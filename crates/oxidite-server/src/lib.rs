@@ -7,7 +7,9 @@ pub mod complete_api;
 pub mod device_connections;
 pub mod devices;
 pub mod git_api;
+pub mod git_network;
 pub mod metrics;
+pub mod origin_guard;
 pub mod routing;
 pub mod security;
 pub mod share;
@@ -31,8 +33,52 @@ use oxidite_proto::{
 };
 use oxidite_session::{actor::ActorCmd, manager::SessionManager};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+
+fn process_probe_cache() -> &'static Arc<oxidite_pty::agent_detect::ProcessProbeCache> {
+    static PROBE: OnceLock<Arc<oxidite_pty::agent_detect::ProcessProbeCache>> = OnceLock::new();
+    PROBE.get_or_init(|| Arc::new(oxidite_pty::agent_detect::ProcessProbeCache::default()))
+}
+
+fn origin_policy_for(state: &AppState) -> origin_guard::OriginPolicy {
+    origin_guard::OriginPolicy::from_csv(&state.security.allowed_origins.join(","))
+}
+
+fn is_ws_origin_allowed(
+    state: &AppState,
+    peer: Option<std::net::SocketAddr>,
+    headers: &HeaderMap,
+) -> bool {
+    let Some(origin_str) = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok()) else {
+        return true;
+    };
+    let policy = origin_policy_for(state);
+    if policy.is_origin_str_allowed(origin_str) {
+        return true;
+    }
+
+    let is_loopback_peer = peer.is_some_and(|p| p.ip().is_loopback());
+    let host = if is_loopback_peer {
+        headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get(header::HOST))
+    } else {
+        headers.get(header::HOST)
+    }
+    .and_then(|h| h.to_str().ok())
+    .and_then(|raw| raw.split(',').next())
+    .map(str::trim);
+
+    // Block arbitrary *.ts.net Origins unless explicitly listed in OXIDITE_ALLOWED_ORIGINS.
+    if origin_str.to_ascii_lowercase().contains(".ts.net") {
+        return false;
+    }
+    state
+        .security
+        .is_origin_allowed_for_host(Some(origin_str), host)
+}
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::auth::UserStore;
@@ -67,6 +113,12 @@ pub struct SessionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     pub cwd_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
 }
 
 fn short_cwd_hash(path: &std::path::Path) -> String {
@@ -143,6 +195,8 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/git/branches", get(git_api::git_branches_handler))
         .route("/api/git/checkout", post(git_api::git_checkout_handler))
         .route("/api/git/fetch", post(git_api::git_fetch_handler))
+        .route("/api/git/pull", post(git_api::git_pull_handler))
+        .route("/api/git/push", post(git_api::git_push_handler))
         .route("/api/complete", get(complete_api::complete_handler))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
@@ -323,6 +377,8 @@ pub struct DeviceGrantRequest {
 pub struct DeviceGrantResponse {
     pub grant: String,
     pub expires_in_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
 }
 
 async fn enroll_device_handler(
@@ -364,6 +420,7 @@ async fn enroll_device_handler(
 
 async fn issue_device_grant_handler(
     State(state): State<AppState>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(payload): Json<DeviceGrantRequest>,
 ) -> Result<Json<DeviceGrantResponse>, StatusCode> {
@@ -399,10 +456,22 @@ async fn issue_device_grant_handler(
         .issue_enrollment_grant(&user_id, Duration::from_secs(ttl_secs))
         .await
     {
-        Ok(grant) => Ok(Json(DeviceGrantResponse {
-            grant,
-            expires_in_secs: ttl_secs,
-        })),
+        Ok(grant) => {
+            let peer_addr = peer.map(|c| c.0).unwrap_or_else(|| {
+                std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+            });
+            let fallback = state
+                .security
+                .bind_addr
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "127.0.0.1:3030".to_string());
+            let base = origin_policy_for(&state).external_base_url(peer_addr, &headers, &fallback);
+            Ok(Json(DeviceGrantResponse {
+                share_url: Some(format!("{base}/#pair={grant}")),
+                grant,
+                expires_in_secs: ttl_secs,
+            }))
+        }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -538,6 +607,12 @@ async fn list_sessions(
         return Err(StatusCode::UNAUTHORIZED);
     };
 
+    state.auth.prune_expired_tokens();
+    let home_dir = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
     let all_ids = state.manager.list();
     let mut list = Vec::new();
     for id in all_ids {
@@ -554,16 +629,16 @@ async fn list_sessions(
                 .is_ok()
                 && let Ok(sess_state) = rx.await
             {
-                let (cwd_tx, cwd_rx) = oneshot::channel();
-                let live_cwd = if handle
+                let (actx_tx, actx_rx) = oneshot::channel();
+                let (shell_pid, title, live_cwd) = if handle
                     .tx
-                    .send(ActorCmd::GetCwd { resp: cwd_tx })
+                    .send(ActorCmd::GetAgentContext { resp: actx_tx })
                     .await
                     .is_ok()
                 {
-                    cwd_rx.await.ok().flatten()
+                    actx_rx.await.unwrap_or((None, String::new(), None))
                 } else {
-                    None
+                    (None, String::new(), None)
                 };
                 let effective_cwd = match live_cwd {
                     Some(p) if state.security.is_workspace_path_allowed(&p) => {
@@ -587,6 +662,21 @@ async fn list_sessions(
                     }
                     None => (Some("Remote".to_string()), None, None),
                 };
+
+                let probe = process_probe_cache().clone();
+                let agent = tokio::task::spawn_blocking(move || {
+                    let osc = (!title.trim().is_empty()).then_some(title.as_str());
+                    match shell_pid {
+                        Some(pid) => probe.detect_for_shell(pid, osc),
+                        None => oxidite_pty::agent_detect::detect_agent_from_argv_and_title(
+                            None, None, osc,
+                        ),
+                    }
+                })
+                .await
+                .ok()
+                .flatten();
+
                 list.push(SessionInfo {
                     id: id.to_string(),
                     state: sess_state,
@@ -594,6 +684,9 @@ async fn list_sessions(
                     workspace,
                     cwd,
                     cwd_id,
+                    home_dir: home_dir.clone(),
+                    active_agent: agent.map(|a| a.id().to_string()),
+                    agent_label: agent.map(|a| a.label().to_string()),
                 });
             }
         }
@@ -666,6 +759,7 @@ async fn static_handler(State(state): State<AppState>, uri: axum::http::Uri) -> 
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
@@ -682,14 +776,8 @@ async fn ws_handler(
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
 
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|h| h.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(str::trim);
     let origin = headers.get(header::ORIGIN).and_then(|h| h.to_str().ok());
-    if !state.security.is_origin_allowed_for_host(origin, host) {
+    if !is_ws_origin_allowed(&state, peer.map(|c| c.0), &headers) {
         AuditLogger::record(AuditEvent::SecurityViolation {
             reason: "Rejected WebSocket upgrade: unauthorized origin",
             remote_ip: origin.unwrap_or("unknown"),
@@ -810,25 +898,54 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
         std::result::Result<oxidite_ssh::SshBackend, String>,
     )>(4);
     let (server_tx, mut server_rx) = mpsc::channel::<ServerMsg>(256);
+    let (ping_tx, mut ping_rx) = mpsc::channel::<()>(4);
 
-    // Forward messages from server_rx to WebSocket client
+    // Forward messages & protocol pings from server to WebSocket client
     let forward_task = tokio::spawn(async move {
-        while let Some(msg) = server_rx.recv().await {
-            let bytes = pack_server_msg(&msg).unwrap_or_default();
-            if ws_sink.send(Message::Binary(bytes.into())).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                Some(msg) = server_rx.recv() => {
+                    let bytes = pack_server_msg(&msg).unwrap_or_default();
+                    if ws_sink.send(Message::Binary(bytes.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Some(()) = ping_rx.recv() => {
+                    if ws_sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+                else => break,
             }
         }
         let _ = ws_sink.close().await;
     });
 
-    let mut revalidate_interval = tokio::time::interval(Duration::from_secs(5));
+    let mut session_forward_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_ws_pong = Instant::now();
+    let mut ws_heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(15),
+        Duration::from_secs(15),
+    );
+    ws_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut revalidate_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
     revalidate_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let msg = tokio::select! {
             _ = close_rx.recv() => {
                 break;
+            }
+            _ = ws_heartbeat.tick() => {
+                if last_ws_pong.elapsed() >= Duration::from_secs(25) {
+                    break;
+                }
+                let _ = ping_tx.try_send(());
+                continue;
             }
             _ = revalidate_interval.tick() => {
                 if let Some(dev_id) = device_id {
@@ -909,7 +1026,10 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             }
             res = ws_stream.next() => {
                 match res {
-                    Some(Ok(m)) => m,
+                    Some(Ok(m)) => {
+                        last_ws_pong = Instant::now();
+                        m
+                    }
                     _ => break,
                 }
             }
@@ -1284,14 +1404,17 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                                 }
                             }
 
+                            if let Some(prev) = session_forward_task.take() {
+                                prev.abort();
+                            }
                             let stx = server_tx.clone();
-                            tokio::spawn(async move {
+                            session_forward_task = Some(tokio::spawn(async move {
                                 while let Ok(smsg) = attach_res.rx.recv().await {
                                     if stx.send(smsg).await.is_err() {
                                         break;
                                     }
                                 }
-                            });
+                            }));
                         }
                     }
                 } else {
@@ -1381,6 +1504,9 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
     }
 
     state.device_connections.unregister(client_id);
+    if let Some(h) = session_forward_task.take() {
+        h.abort();
+    }
     if let Some(tx) = current_tx {
         let _ = tx
             .send(ActorCmd::Detach {

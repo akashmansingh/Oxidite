@@ -37,6 +37,10 @@ pub trait Backend: Send {
     fn current_cwd(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// Returns the OS child shell process ID, if local PTY.
+    fn shell_pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 pub mod actor;

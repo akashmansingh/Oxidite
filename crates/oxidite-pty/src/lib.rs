@@ -4,6 +4,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
 
+pub mod agent_detect;
+
 /// Desired PTY geometry in character cells and pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
@@ -359,6 +361,12 @@ impl PtyWriter {
     pub fn current_working_directory(&self) -> Option<std::path::PathBuf> {
         let pid = self.child.process_id()?;
         query_process_cwd(pid)
+    }
+
+    /// Returns the OS process ID of the spawned child shell, if known.
+    #[must_use]
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
     }
 }
 

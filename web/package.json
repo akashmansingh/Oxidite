@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/dev.ps1",
     "build": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
     "preview": "vite preview"

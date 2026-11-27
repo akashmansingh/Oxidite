@@ -141,6 +141,14 @@ impl UserStore {
         self.session_owners.write().unwrap().remove(&session_id);
     }
 
+    pub fn prune_expired_tokens(&self) {
+        let now = Instant::now();
+        self.tokens
+            .write()
+            .unwrap()
+            .retain(|_, t| t.expires_at > now);
+    }
+
     /// Lists session IDs owned by a user.
     pub fn user_sessions(&self, user_id: &str) -> Vec<SessionId> {
         let owners = self.session_owners.read().unwrap();

@@ -308,3 +308,113 @@ async fn test_cors_and_security_headers_and_ssh_key_jail() {
     assert!(lower.contains("x-content-type-options: nosniff"));
     assert!(lower.contains("strict-transport-security:"));
 }
+
+#[tokio::test]
+async fn test_tailscale_origin_and_forwarded_host_security() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut sec = SecurityConfig::default();
+    sec.allowed_origins = vec!["https://victus.tail999.ts.net".into()];
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = "ts-origin-token-123".to_string();
+    let state = AppState {
+        manager: SessionManager::new(),
+        token: token.clone(),
+        static_dir: "web/dist".into(),
+        known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: sec,
+        auth: UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
+        rate_limiter: RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
+        node_id: "node-security-ts".into(),
+        directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
+    };
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            create_app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let ws_url = format!("ws://{addr}/ws");
+
+    // 1. Exact configured Tailscale Origin is allowed over loopback forwarder.
+    let mut allowed_req = ws_url.as_str().into_client_request().unwrap();
+    allowed_req
+        .headers_mut()
+        .insert("host", addr.to_string().parse().unwrap());
+    allowed_req
+        .headers_mut()
+        .insert("x-forwarded-host", "victus.tail999.ts.net".parse().unwrap());
+    allowed_req
+        .headers_mut()
+        .insert("origin", "https://victus.tail999.ts.net".parse().unwrap());
+    let (mut ws_ok, _) = tokio_tungstenite::connect_async(allowed_req).await.unwrap();
+    let _ = ws_ok.close(None).await;
+
+    // 2. Arbitrary *.ts.net Origin must be rejected even if X-Forwarded-Host claims to match it.
+    let mut spoof_req = ws_url.as_str().into_client_request().unwrap();
+    spoof_req
+        .headers_mut()
+        .insert("host", addr.to_string().parse().unwrap());
+    spoof_req.headers_mut().insert(
+        "x-forwarded-host",
+        "attacker.tail999.ts.net".parse().unwrap(),
+    );
+    spoof_req
+        .headers_mut()
+        .insert("origin", "https://attacker.tail999.ts.net".parse().unwrap());
+    let err = tokio_tungstenite::connect_async(spoof_req)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("403"),
+        "expected 403 for arbitrary *.ts.net origin, got {err}"
+    );
+
+    // 3. Pairing grant honors trusted X-Forwarded-Host from loopback when in allowlist.
+    let grant_body = serde_json::json!({ "ttl_secs": 300 }).to_string();
+    let mut ok_grant = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let ok_req = format!(
+        "POST /api/devices/grant HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nX-Forwarded-Host: victus.tail999.ts.net\r\nX-Forwarded-Proto: https\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        grant_body.len(),
+        grant_body
+    );
+    ok_grant.write_all(ok_req.as_bytes()).await.unwrap();
+    let mut ok_raw = String::new();
+    ok_grant.read_to_string(&mut ok_raw).await.unwrap();
+    let (_, ok_json) = ok_raw.split_once("\r\n\r\n").unwrap();
+    let ok_val: serde_json::Value = serde_json::from_str(ok_json).unwrap();
+    assert!(
+        ok_val["share_url"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("https://victus.tail999.ts.net/#pair=")),
+        "expected share_url with trusted tailscale host, got {ok_val}"
+    );
+
+    // 4. Spoofed X-Forwarded-Host outside allowlist must be ignored in share_url.
+    let mut bad_grant = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let bad_req = format!(
+        "POST /api/devices/grant HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nX-Forwarded-Host: attacker.tail999.ts.net\r\nX-Forwarded-Proto: https\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        grant_body.len(),
+        grant_body
+    );
+    bad_grant.write_all(bad_req.as_bytes()).await.unwrap();
+    let mut bad_raw = String::new();
+    bad_grant.read_to_string(&mut bad_raw).await.unwrap();
+    let (_, bad_json) = bad_raw.split_once("\r\n\r\n").unwrap();
+    let bad_val: serde_json::Value = serde_json::from_str(bad_json).unwrap();
+    assert!(
+        bad_val["share_url"]
+            .as_str()
+            .is_some_and(|u| !u.contains("attacker.tail999.ts.net")),
+        "spoofed forwarded host must not leak into share_url: {bad_val}"
+    );
+}

@@ -1,4 +1,5 @@
 import { PROTOCOL_VERSION, pack, parse, bytesOf, idBytes, idStr, type BackendSpec, type Msg, type SessionState, type TermSize } from "./protocol";
+import { installWakeProbe, type WakeProbeHandle } from "./wake-probe";
 
 export type Link = "ok" | "retry" | "down";
 export interface Handlers {
@@ -27,8 +28,21 @@ export class Connection {
   private ackT?: number;
   private acked = 0;
   private retryT?: number;
+  private wakeProbe: WakeProbeHandle;
 
-  constructor(private token: string, private h: Handlers, private size: () => TermSize) {}
+  constructor(private token: string, private h: Handlers, private size: () => TermSize) {
+    this.wakeProbe = installWakeProbe({
+      isSocketOpen: () => this.ws?.readyState === WebSocket.OPEN,
+      sendAppPing: () => {
+        if (this.ws?.readyState !== WebSocket.OPEN) {
+          throw new Error("WebSocket is not open");
+        }
+        this.ws.send(pack("Ping", { nonce: Date.now() }));
+      },
+      reconnectNow: () => this.forceReconnect(),
+      deadlineMs: 2000,
+    });
+  }
 
   open(t: { id: string } | { spec: BackendSpec }): void {
     if ("id" in t) this.id = t.id; else this.spec = t.spec;
@@ -41,13 +55,30 @@ export class Connection {
   kill(): void { this.tx(pack("Kill")); }
   setToken(token: string): void { this.token = token; }
   reconnectNow(): void {
+    this.forceReconnect();
+  }
+  private forceReconnect(): void {
     if (this.done) return;
+    clearInterval(this.pingT);
     clearTimeout(this.retryT);
     this.retryT = undefined;
-    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this.connect();
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      const stale = this.ws;
+      stale.onclose = null;
+      stale.onmessage = null;
+      try {
+        stale.close();
+      } catch {
+        // Ignore close failures on stalled half-open sockets
+      }
+      this.ws = undefined;
+    }
+    this.attempt = 0;
+    if (this.id || this.spec) this.connect();
   }
   detach(): void {
     this.done = true;
+    this.wakeProbe.destroy();
     this.tx(pack("Detach"));
     this.ws?.close();
     this.stop();
@@ -112,12 +143,21 @@ export class Connection {
       case "HostKeyPrompt": this.h.prompt("hostkey", m); break;
       case "AuthPrompt": this.h.prompt("auth", m); break;
       case "Title": this.h.title(m.v as string); break;
-      case "Pong": this.lastPong = Date.now(); break;
-      case "Exit": this.done = true; this.stop(); this.h.exit(m.code as number | null); break;
+      case "Pong":
+        this.lastPong = Date.now();
+        this.wakeProbe.notifyPongReceived();
+        break;
+      case "Exit":
+        this.done = true;
+        this.wakeProbe.destroy();
+        this.stop();
+        this.h.exit(m.code as number | null);
+        break;
       case "Error":
         this.h.error(String(m.message));
         if (m.code === "Unauthorized") {
           this.done = true;
+          this.wakeProbe.destroy();
           this.stop();
           this.ws?.close();
           this.h.unauthorized?.();

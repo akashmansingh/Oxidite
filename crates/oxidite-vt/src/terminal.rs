@@ -532,11 +532,15 @@ impl Handler for Terminal {
 
     /// Marks the completion of a command with an optional exit code (`OSC 133 ; D`).
     fn shell_command_finished(&mut self, exit_code: Option<i32>) {
+        const MAX_COMMAND_MARKERS: usize = 512;
         self.command_state = CommandState::None;
         let line = self.current_abs_line();
         if let Some(mut cmd) = self.active_command.take() {
             cmd.end_line = Some(line);
             cmd.exit_code = exit_code;
+            while self.command_markers.len() >= MAX_COMMAND_MARKERS {
+                self.command_markers.remove(0);
+            }
             self.command_markers.push(cmd);
         }
     }

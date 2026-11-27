@@ -71,10 +71,11 @@ function rgbHex(n: number): string {
 }
 
 const PS_PROMPT_RE = /^(?:PS\s+(?:Microsoft\.PowerShell\.Core\\FileSystem::)?[^\r\n>]*>\s*)+$/;
+const PS_PROMPT_PREFIX_RE = /^PS\s+(?:Microsoft\.PowerShell\.Core\\FileSystem::)?[^\r\n>]*>\s*/;
 const UNIX_PROMPT_RE = /^[^\r\n@]+@[^\r\n:]+:[^\r\n]*[$#%]\s*$/;
 
 export function isPromptLine(plainLine: string): boolean {
-  const trimmed = plainLine.trim();
+  const trimmed = plainLine.replace(/[\u200B-\u200D\uFEFF\u2588]/g, "").trim();
   if (!trimmed) return false;
   return PS_PROMPT_RE.test(trimmed) || UNIX_PROMPT_RE.test(trimmed);
 }
@@ -189,6 +190,7 @@ export function filterBlockLines(lines: RenderedLine[], sentCmd: string | null):
   const kept: RenderedLine[] = [];
   for (const line of lines) {
     if (isPromptLine(line.plain)) continue;
+    if (PS_PROMPT_PREFIX_RE.test(line.plain.trim())) continue;
     if (!skippedCmdEcho && isEchoedCommandLine(line.plain, sentCmd)) {
       skippedCmdEcho = true;
       continue;

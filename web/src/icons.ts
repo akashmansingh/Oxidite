@@ -13,7 +13,9 @@ export type IconName =
   | "prompt"
   | "refresh"
   | "chevronDown"
-  | "resizeDiag";
+  | "resizeDiag"
+  | "play"
+  | "pause";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -28,7 +30,7 @@ const SHAPES: Record<IconName, [string, Record<string, string>][]> = {
     ["rect", { x: "2", y: "3", width: "12", height: "10", rx: "2" }],
     ["path", { d: "M10 3v10" }],
   ],
-  expand: [["path", { d: "M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" }]],
+  expand: [["path", { d: "M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9" }]],
   devices: [
     ["rect", { x: "2", y: "3", width: "12", height: "8", rx: "1.5" }],
     ["path", { d: "M5.5 14h5M8 11v3" }],
@@ -56,6 +58,8 @@ const SHAPES: Record<IconName, [string, Record<string, string>][]> = {
   ],
   chevronDown: [["path", { d: "M4 6l4 4 4-4" }]],
   resizeDiag: [["path", { d: "M9.5 3.5h3v3M6.5 12.5h-3v-3M12.5 3.5L9 7M3.5 12.5L7 9" }]],
+  play: [["path", { d: "M5 3.5l8 4.5-8 4.5z" }]],
+  pause: [["path", { d: "M5 3.5v9M11 3.5v9" }]],
 };
 
 export function icon(name: IconName): SVGSVGElement {

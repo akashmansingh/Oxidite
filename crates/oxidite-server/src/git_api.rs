@@ -11,10 +11,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-use crate::{AppState, security};
+use crate::{AppState, git_network, security};
+
+fn repo_op_locks() -> &'static git_network::RepoOpLocks {
+    static LOCKS: OnceLock<git_network::RepoOpLocks> = OnceLock::new();
+    LOCKS.get_or_init(git_network::RepoOpLocks::new)
+}
 
 const MAX_SYNTHETIC_DIFF_BYTES: u64 = 256 * 1024;
 
@@ -37,7 +43,17 @@ pub struct GitChangesResponse {
     pub is_repo: bool,
     pub folder: Option<String>,
     pub branch: String,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
     pub files: Vec<GitFileChange>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GitOpResponse {
+    pub ok: bool,
+    pub message: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -268,6 +284,8 @@ pub async fn git_changes_handler(
             is_repo: false,
             folder: None,
             branch: String::new(),
+            ahead: 0,
+            behind: 0,
             files: Vec::new(),
         }));
     };
@@ -278,6 +296,8 @@ pub async fn git_changes_handler(
             is_repo: false,
             folder,
             branch: String::new(),
+            ahead: 0,
+            behind: 0,
             files: Vec::new(),
         }));
     };
@@ -363,10 +383,32 @@ pub async fn git_changes_handler(
         });
     }
 
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    if let Ok(out) = run_git_output(
+        repo_root.clone(),
+        vec![
+            "rev-list".into(),
+            "--left-right".into(),
+            "--count".into(),
+            "HEAD...@{u}".into(),
+        ],
+    )
+    .await
+        && out.status.success()
+    {
+        let counts = String::from_utf8_lossy(&out.stdout);
+        let mut parts = counts.split_whitespace();
+        ahead = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        behind = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    }
+
     Ok(Json(GitChangesResponse {
         is_repo: true,
         folder: folder_display_name(&repo_root).or(folder),
         branch,
+        ahead,
+        behind,
         files,
     }))
 }
@@ -681,4 +723,129 @@ pub async fn git_fetch_handler(
     } else {
         Err(StatusCode::BAD_GATEWAY)
     }
+}
+
+fn map_git_network_err(err: git_network::GitNetworkError) -> (StatusCode, Json<GitOpResponse>) {
+    let status = match err {
+        git_network::GitNetworkError::Busy => StatusCode::CONFLICT,
+        git_network::GitNetworkError::TimedOut { .. } => StatusCode::GATEWAY_TIMEOUT,
+        git_network::GitNetworkError::AuthFailed { .. } => StatusCode::BAD_GATEWAY,
+        git_network::GitNetworkError::CommandFailed { .. } => StatusCode::BAD_REQUEST,
+        git_network::GitNetworkError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(GitOpResponse {
+            ok: false,
+            message: err.to_string(),
+        }),
+    )
+}
+
+async fn resolve_verified_repo_root(
+    state: &AppState,
+    user_id: &str,
+    session: Option<&str>,
+) -> Result<PathBuf, (StatusCode, Json<GitOpResponse>)> {
+    let cwd = resolve_session_cwd(state, user_id, session)
+        .await
+        .map_err(|st| {
+            (
+                st,
+                Json(GitOpResponse {
+                    ok: false,
+                    message: "Session directory is unavailable or outside workspace roots".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(GitOpResponse {
+                    ok: false,
+                    message: "Active session has no local filesystem path".into(),
+                }),
+            )
+        })?;
+    let repo_root = resolve_git_toplevel(state, cwd)
+        .await
+        .map_err(|st| {
+            (
+                st,
+                Json(GitOpResponse {
+                    ok: false,
+                    message: "Failed to resolve Git repository root".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(GitOpResponse {
+                    ok: false,
+                    message: "Not inside an allowed Git repository".into(),
+                }),
+            )
+        })?;
+    let canon = security::canonical_clean_path(&repo_root).unwrap_or(repo_root);
+    if !state.security.is_workspace_path_allowed(&canon) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(GitOpResponse {
+                ok: false,
+                message: "Repository is outside permitted workspace roots".into(),
+            }),
+        ));
+    }
+    Ok(canon)
+}
+
+pub async fn git_pull_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<GitFetchRequest>,
+) -> Result<Json<GitOpResponse>, (StatusCode, Json<GitOpResponse>)> {
+    let user_id = check_auth(&state, &headers).await.map_err(|st| {
+        (
+            st,
+            Json(GitOpResponse {
+                ok: false,
+                message: "Unauthorized or rate-limited".into(),
+            }),
+        )
+    })?;
+    let repo_root =
+        resolve_verified_repo_root(&state, &user_id, payload.session.as_deref()).await?;
+    let out = git_network::git_pull_ff_only(repo_op_locks(), &repo_root)
+        .await
+        .map_err(map_git_network_err)?;
+    Ok(Json(GitOpResponse {
+        ok: out.ok,
+        message: out.message,
+    }))
+}
+
+pub async fn git_push_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<GitFetchRequest>,
+) -> Result<Json<GitOpResponse>, (StatusCode, Json<GitOpResponse>)> {
+    let user_id = check_auth(&state, &headers).await.map_err(|st| {
+        (
+            st,
+            Json(GitOpResponse {
+                ok: false,
+                message: "Unauthorized or rate-limited".into(),
+            }),
+        )
+    })?;
+    let repo_root =
+        resolve_verified_repo_root(&state, &user_id, payload.session.as_deref()).await?;
+    let out = git_network::git_push(repo_op_locks(), &repo_root)
+        .await
+        .map_err(map_git_network_err)?;
+    Ok(Json(GitOpResponse {
+        ok: out.ok,
+        message: out.message,
+    }))
 }

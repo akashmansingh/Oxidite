@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, mpsc};
 pub struct LocalPtyBackend {
     writer: Arc<Mutex<PtyWriter>>,
     reader_rx: Option<mpsc::Receiver<BackendEvent>>,
+    child_pid: Option<u32>,
 }
 
 impl LocalPtyBackend {
@@ -49,9 +50,11 @@ impl LocalPtyBackend {
             })
             .map_err(SessionError::Io)?;
 
+        let child_pid = writer.process_id();
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             reader_rx: Some(rx),
+            child_pid,
         })
     }
 }
@@ -96,5 +99,9 @@ impl Backend for LocalPtyBackend {
             .try_lock()
             .ok()
             .and_then(|writer| writer.current_working_directory())
+    }
+
+    fn shell_pid(&self) -> Option<u32> {
+        self.child_pid
     }
 }

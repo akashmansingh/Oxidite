@@ -11,7 +11,7 @@ export type KeyAction =
   | "clear-screen"
   | "history-prev"
   | "history-next"
-  | "to-terminal"
+  | "dismiss"
   | "none";
 
 export interface KeyInfo {
@@ -39,7 +39,7 @@ export function keyAction(k: KeyInfo, s: EditorState): KeyAction {
 
   if (k.key === "Enter" && !k.ctrlKey && !k.altKey && !k.metaKey) return k.shiftKey ? "newline" : "send";
   if (k.key === "Tab" && !k.ctrlKey && !k.altKey && !k.metaKey) return k.shiftKey ? "tab-prev" : "tab-complete";
-  if (k.key === "Escape" && bare) return "to-terminal";
+  if (k.key === "Escape" && bare) return "dismiss";
   if (bareCtrl && letter === "c") return hasSelection ? "none" : s.text === "" ? "interrupt" : "clear";
   if (bareCtrl && letter === "d" && s.text === "") return "eof";
   if (bareCtrl && letter === "l") return "clear-screen";

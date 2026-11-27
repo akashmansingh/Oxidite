@@ -32,8 +32,8 @@ describe("keyAction", () => {
     expect(keyAction(key("d", { ctrlKey: true }), at("x"))).toBe("none");
   });
 
-  test("Escape hands typing to the terminal", () => {
-    expect(keyAction(key("Escape"), at("ls"))).toBe("to-terminal");
+  test("Escape dismisses suggestions without leaving the composer", () => {
+    expect(keyAction(key("Escape"), at("ls"))).toBe("dismiss");
   });
 
   test("arrows browse history only at the first and last line", () => {

@@ -1,5 +1,6 @@
 import { icon, type IconName } from "./icons";
 import { CommandHistory, changeParts, keyAction, longestCommonPrefix, toPtyInput } from "./composer-model";
+import { createMobileKbdBar, type MobileKbdBarHandle } from "./mobile-kbd-bar";
 
 export interface CompletionItem {
   value: string;
@@ -34,6 +35,8 @@ export interface ComposerOptions {
   focusTerminal(): void;
   /** Shows the diff pane. */
   openChanges(): void;
+  /** Called when the mobile Scroll-Lock / Read-Only mode toggles. */
+  onScrollLockChange?(locked: boolean): void;
 }
 
 export interface Composer {
@@ -46,6 +49,10 @@ export interface Composer {
   /** Turns typing off with a reason shown as the placeholder (a finished session, say). */
   setEnabled(on: boolean, reason?: string): void;
   focus(): void;
+  /** Focuses the raw-mode keyboard proxy (phone) or composer when active. */
+  focusRaw(): void;
+  isScrollLocked(): boolean;
+  destroy(): void;
   hasFocus(): boolean;
   isRaw(): boolean;
 }
@@ -99,7 +106,7 @@ export function createComposer(opts: ComposerOptions): Composer {
   acMenu.setAttribute("aria-label", "Completions");
   acMenu.hidden = true;
 
-  const hint = h("div", "hint", "tab autocomplete  ·  enter run  ·  shift+enter new line  ·  esc raw terminal");
+  const hint = h("div", "hint", "tab autocomplete  ·  enter run  ·  shift+enter new line");
 
   root.append(acMenu, chips, editor, hint);
 
@@ -464,14 +471,12 @@ export function createComposer(opts: ComposerOptions): Composer {
         }
         break;
       }
-      case "to-terminal":
-        e.preventDefault();
+      case "dismiss":
         window.clearTimeout(liveTimer);
         if (acState) {
+          e.preventDefault();
           closeAc();
           updateGhost();
-        } else {
-          opts.focusTerminal();
         }
         break;
       default:
@@ -480,6 +485,38 @@ export function createComposer(opts: ComposerOptions): Composer {
   });
 
   let last = "";
+  const kbd: MobileKbdBarHandle = createMobileKbdBar({
+    textarea: ta,
+    sendRaw: opts.send,
+    insertText: (text: string) => {
+      if (root.dataset.raw === "1") {
+        opts.send(text);
+        return;
+      }
+      const start = ta.selectionStart ?? ta.value.length;
+      const end = ta.selectionEnd ?? start;
+      const next = ta.value.slice(0, start) + text + ta.value.slice(end);
+      setText(next, start + text.length);
+      closeAc();
+      scheduleLiveComplete(20);
+    },
+    onShiftEnter: () => {
+      const start = ta.selectionStart ?? ta.value.length;
+      const end = ta.selectionEnd ?? start;
+      const next = ta.value.slice(0, start) + "\n" + ta.value.slice(end);
+      setText(next, start + 1);
+    },
+    onScrollLockChange: (locked: boolean) => {
+      root.dataset.locked = locked ? "1" : "0";
+      opts.onScrollLockChange?.(locked);
+    },
+    isRawMode: () => root.dataset.raw === "1",
+  });
+  hint.before(kbd.element);
+  if (typeof document !== "undefined" && document.body) {
+    document.body.append(kbd.rawProxy);
+  }
+
   return {
     el: root,
     setContext(c) {
@@ -512,10 +549,19 @@ export function createComposer(opts: ComposerOptions): Composer {
       root.dataset.off = on ? "0" : "1";
     },
     focus() {
-      ta.focus();
+      if (!kbd.isScrollLocked()) ta.focus();
+    },
+    focusRaw() {
+      kbd.focusActiveInput();
+    },
+    isScrollLocked() {
+      return kbd.isScrollLocked();
+    },
+    destroy() {
+      kbd.destroy();
     },
     hasFocus() {
-      return root.contains(document.activeElement);
+      return root.contains(document.activeElement) || document.activeElement === kbd.rawProxy;
     },
     isRaw() {
       return root.dataset.raw === "1";

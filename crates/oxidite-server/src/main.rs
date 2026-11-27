@@ -9,11 +9,36 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let default_log_dir = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(|h| format!("{h}\\.oxidite\\logs"))
+        .unwrap_or_else(|_| "logs".to_string());
+    let log_dir = std::env::var("OXIDITE_LOG_DIR").unwrap_or(default_log_dir);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let (file_layer, _log_guard) = match tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("oxidited.log")
+        .build(&log_dir)
+    {
+        Ok(appender) => {
+            let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+            let layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(non_blocking);
+            (Some(layer), Some(guard))
+        }
+        Err(err) => {
+            eprintln!("Warning: file logging disabled for {log_dir}: {err}");
+            (None, None)
+        }
+    };
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(file_layer)
         .init();
 
     let token = std::env::var("OXIDITE_TOKEN").unwrap_or_else(|_| {
@@ -115,8 +140,15 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    let idle_suspend_secs = std::env::var("OXIDITE_IDLE_SUSPEND_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(6 * 3600);
+    let manager =
+        SessionManager::new().with_idle_timeout(std::time::Duration::from_secs(idle_suspend_secs));
+
     let state = AppState {
-        manager: SessionManager::new(),
+        manager,
         token,
         static_dir,
         known_hosts,
@@ -127,7 +159,7 @@ async fn main() -> Result<()> {
         metrics: oxidite_server::metrics::MetricsCollector::new(),
         node_id: "node-gateway-1".into(),
         directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
-        devices,
+        devices: devices.clone(),
         device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
     };
 
@@ -139,9 +171,17 @@ async fn main() -> Result<()> {
         serve_tls(listener, cfg, app).await?;
     } else {
         tracing::info!("Oxidite session gateway listening on http://{addr}");
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     }
 
+    devices.checkpoint_wal().await;
     Ok(())
 }
 
@@ -157,26 +197,39 @@ async fn serve_tls(
     use tower::ServiceExt;
 
     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+
     loop {
-        let (tcp_stream, _) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let app = app.clone();
-        tokio::spawn(async move {
-            let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
-                return;
-            };
-            let io = TokioIo::new(tls_stream);
-            let service = service_fn(move |req: hyper::Request<Incoming>| {
-                let svc = app.clone();
-                async move { svc.oneshot(req.map(axum::body::Body::new)).await }
-            });
-            if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service)
-                .with_upgrades()
-                .await
-            {
-                tracing::debug!(error = %err, "HTTPS connection closed");
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accept_res = listener.accept() => {
+                let (tcp_stream, peer_addr) = accept_res?;
+                let acceptor = acceptor.clone();
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                        return;
+                    };
+                    let io = TokioIo::new(tls_stream);
+                    let service = service_fn(move |req: hyper::Request<Incoming>| {
+                        let svc = app.clone();
+                        let mut mapped = req.map(axum::body::Body::new);
+                        mapped
+                            .extensions_mut()
+                            .insert(axum::extract::ConnectInfo(peer_addr));
+                        async move { svc.oneshot(mapped).await }
+                    });
+                    if let Err(err) = http1::Builder::new()
+                        .serve_connection(io, service)
+                        .with_upgrades()
+                        .await
+                    {
+                        tracing::debug!(error = %err, "HTTPS connection closed");
+                    }
+                });
             }
-        });
+        }
     }
+    Ok(())
 }

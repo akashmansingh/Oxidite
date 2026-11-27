@@ -9,6 +9,7 @@ use oxidite_proto::{BackendSpec, SessionId, TermSize};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -17,10 +18,17 @@ pub struct SessionHandle {
     pub tx: mpsc::Sender<ActorCmd>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<SessionId, SessionHandle>>>,
     cwds: Arc<RwLock<HashMap<SessionId, std::path::PathBuf>>>,
+    idle_timeout: Duration,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionManager {
@@ -28,7 +36,23 @@ impl SessionManager {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             cwds: Arc::new(RwLock::new(HashMap::new())),
+            idle_timeout: super::actor::DEFAULT_IDLE_TIMEOUT,
         }
+    }
+
+    #[must_use]
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
+    fn make_exit_hook(&self) -> super::actor::ExitHook {
+        let sessions = self.sessions.clone();
+        let cwds = self.cwds.clone();
+        Arc::new(move |id| {
+            sessions.write().remove(&id);
+            cwds.write().remove(&id);
+        })
     }
 
     pub fn set_cwd(&self, id: SessionId, cwd: std::path::PathBuf) {
@@ -63,7 +87,10 @@ impl SessionManager {
 
         let (tx, rx) = mpsc::channel(128);
         let (actor, _) = SessionActor::new(id, size, backend, rx);
-        let actor = actor.with_initial_cwd(initial_cwd.clone());
+        let actor = actor
+            .with_initial_cwd(initial_cwd.clone())
+            .with_idle_timeout(self.idle_timeout)
+            .with_on_exit(self.make_exit_hook());
 
         tokio::spawn(actor.run());
 
@@ -82,6 +109,9 @@ impl SessionManager {
     ) -> SessionId {
         let (tx, rx) = mpsc::channel(128);
         let (actor, _) = SessionActor::new(id, size, backend, rx);
+        let actor = actor
+            .with_idle_timeout(self.idle_timeout)
+            .with_on_exit(self.make_exit_hook());
 
         tokio::spawn(actor.run());
 

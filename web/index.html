@@ -2,9 +2,13 @@
 <html lang="en" data-theme="onyx">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Oxidite</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,200..800&family=Sometype+Mono:wght@400..700&display=swap">
@@ -54,6 +58,8 @@
       <div class="split-btn" id="fetch-wrap">
         <button id="fetch" class="split-main" type="button"><span data-icon="refresh"></span><span id="fetch-label">Fetch</span></button><button id="fetch-menu-btn" class="split-caret" type="button" aria-label="Fetch options" aria-haspopup="menu" aria-expanded="false"><span data-icon="chevronDown"></span></button>
         <div id="fetch-menu" class="split-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-fetch-act="pull">Pull (--ff-only)</button>
+          <button type="button" role="menuitem" data-fetch-act="push">Push</button>
           <button type="button" role="menuitem" data-fetch-act="fetch">Fetch remote</button>
           <button type="button" role="menuitem" data-fetch-act="refresh">Refresh status</button>
         </div>
