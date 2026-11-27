@@ -3,6 +3,8 @@
 export type KeyAction =
   | "send"
   | "newline"
+  | "tab-complete"
+  | "tab-prev"
   | "interrupt"
   | "clear"
   | "eof"
@@ -36,6 +38,7 @@ export function keyAction(k: KeyInfo, s: EditorState): KeyAction {
   const letter = k.key.toLowerCase();
 
   if (k.key === "Enter" && !k.ctrlKey && !k.altKey && !k.metaKey) return k.shiftKey ? "newline" : "send";
+  if (k.key === "Tab" && !k.ctrlKey && !k.altKey && !k.metaKey) return k.shiftKey ? "tab-prev" : "tab-complete";
   if (k.key === "Escape" && bare) return "to-terminal";
   if (bareCtrl && letter === "c") return hasSelection ? "none" : s.text === "" ? "interrupt" : "clear";
   if (bareCtrl && letter === "d" && s.text === "") return "eof";
@@ -98,9 +101,42 @@ export class CommandHistory {
     this.pos = -1;
     this.draft = "";
   }
+
+  isBrowsing(): boolean {
+    return this.pos !== -1;
+  }
+
+  /** Most recent command starting with `prefix` (case-insensitive), or null. */
+  suggest(prefix: string): string | null {
+    const clean = prefix.trimStart().toLowerCase();
+    if (!clean) return null;
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i] ?? "";
+      if (item.toLowerCase().startsWith(clean) && item.length > prefix.length) return item;
+    }
+    return null;
+  }
 }
 
 /** Text for the three parts of the changes chip: file count, added lines, removed lines. */
 export function changeParts(files: number, add: number, del: number): [string, string, string] {
   return [String(files), `+${add}`, `−${del}`];
+}
+
+/** Finds the longest case-insensitive common prefix among candidate strings, returning the casing of the first candidate. */
+export function longestCommonPrefix(items: string[]): string {
+  if (items.length === 0) return "";
+  const first = items[0] ?? "";
+  let len = first.length;
+  for (let i = 1; i < items.length; i++) {
+    const cur = items[i] ?? "";
+    len = Math.min(len, cur.length);
+    for (let j = 0; j < len; j++) {
+      if ((first[j] ?? "").toLowerCase() !== (cur[j] ?? "").toLowerCase()) {
+        len = j;
+        break;
+      }
+    }
+  }
+  return first.slice(0, len);
 }

@@ -10,7 +10,10 @@ export type IconName =
   | "folder"
   | "branch"
   | "file"
-  | "prompt";
+  | "prompt"
+  | "refresh"
+  | "chevronDown"
+  | "resizeDiag";
 
 const NS = "http://www.w3.org/2000/svg";
 
@@ -47,6 +50,12 @@ const SHAPES: Record<IconName, [string, Record<string, string>][]> = {
     ["path", { d: "M9 2v3h3" }],
   ],
   prompt: [["path", { d: "M4 4.5 8.5 8 4 11.5M9.5 12h3" }]],
+  refresh: [
+    ["path", { d: "M13.5 8a5.5 5.5 0 1 1-1.4-3.7" }],
+    ["path", { d: "M13.5 2.5v3h-3" }],
+  ],
+  chevronDown: [["path", { d: "M4 6l4 4 4-4" }]],
+  resizeDiag: [["path", { d: "M9.5 3.5h3v3M6.5 12.5h-3v-3M12.5 3.5L9 7M3.5 12.5L7 9" }]],
 };
 
 export function icon(name: IconName): SVGSVGElement {

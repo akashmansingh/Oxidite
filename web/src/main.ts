@@ -5,7 +5,8 @@ import { makeTerminal, THEMES, type ThemeName } from "./terminal";
 import { Connection, type Handlers } from "./connection";
 import { stateName, type BackendSpec, type Msg, type SessionState, type ShellCapability } from "./protocol";
 import { DeviceVault } from "./device-vault";
-import { createComposer, type Composer } from "./composer";
+import { createComposer, type Composer, type CompletionResult } from "./composer";
+import { createCommandBlocks, type CommandBlockView } from "./blocks";
 import { icon, type IconName } from "./icons";
 import {
   buildPairShareUrl,
@@ -28,7 +29,7 @@ import {
 //   POST /api/git/checkout { session, branch }
 //   POST /api/git/fetch    { session }
 // Missing endpoints show an empty state; nothing is faked.
-type Sess = { id: string; state: SessionState; label?: string; workspace?: string; cwd_id?: string | null };
+type Sess = { id: string; state: SessionState; label?: string; workspace?: string; cwd?: string | null; cwd_id?: string | null };
 type FileChg = { path: string; add: number; del: number; staged: boolean };
 const sessionCwds = new Map<string, string | null>();
 let cwdRefreshTimer: number | undefined;
@@ -46,8 +47,11 @@ interface Tab {
   msg: string;
   pair: Tab | null;
   composer: Composer;
+  blocks: CommandBlockView;
   /** Folder name the gateway reports for this session; null until the first refresh. */
   ws: string | null;
+  /** Full working directory path reported for this session. */
+  cwd: string | null;
 }
 
 /** Git facts for the open session, shared by the changes panel and the input bar chips. */
@@ -179,7 +183,7 @@ function paint(): void {
 function syncComposer(t: Tab): void {
   t.composer.setHealth(t.b);
   t.composer.setEnabled(t.b !== "down", t.msg);
-  const folder = t.ws === "Remote" ? t.host : t.ws;
+  const folder = t.ws === "Remote" ? t.host : (t.cwd ?? (t.ws && t.ws !== "local shell" ? t.ws : null));
   const git = gitCtx !== null && gitCtx.id === t.id ? gitCtx : null;
   t.composer.setContext({
     folder,
@@ -257,14 +261,20 @@ function closeTab(t: Tab): void {
 function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host: string): void {
   if ("spec" in t) label = uniqueLabel(label);
   const pane = el("div", "pane"),
-    screen = el("div", "screen");
-  pane.append(screen);
+    screen = el("div", "screen"),
+    blocks = createCommandBlocks();
+  pane.dataset.mode = "blocks";
+  pane.append(blocks.el, screen);
   $("#panes").append(pane);
   const { term, fit } = makeTerminal(screen, theme);
   // The input bar grows with its text, so the terminal above it refits whenever its own box changes.
   new ResizeObserver(() => {
     if (!pane.hidden) fit.fit();
   }).observe(screen);
+  const initialCwd =
+    "spec" in t && "LocalPty" in t.spec && typeof t.spec.LocalPty.cwd === "string" && t.spec.LocalPty.cwd.trim()
+      ? t.spec.LocalPty.cwd.trim()
+      : null;
   const tab = {
     id: "id" in t ? t.id : null,
     label,
@@ -275,19 +285,59 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     a: "retry",
     b: "ok",
     msg: "Connecting",
-    ws: null,
+    ws: initialCwd ? (initialCwd.split(/[/\\]/).filter(Boolean).pop() ?? null) : null,
+    cwd: initialCwd,
     pair: null,
+    blocks,
   } as unknown as Tab;
+  const updateLiveCwd = (rawPath: string): void => {
+    const cleaned = rawPath
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .replace(/^\\\\\?\\/, "");
+    if (!/^([a-zA-Z]:[\\/]|\/)/.test(cleaned)) return;
+    if (tab.cwd === cleaned) return;
+    tab.cwd = cleaned;
+    tab.ws = cleaned.split(/[/\\]/).filter(Boolean).pop() ?? cleaned;
+    paint();
+    clearTimeout(cwdRefreshTimer);
+    cwdRefreshTimer = window.setTimeout(() => {
+      if (token && !gate.open && !vaultDlg.open && cur?.id === tab.id) void refresh();
+    }, 90);
+  };
+  term.parser.registerOscHandler(9, (data) => {
+    if (data.startsWith("9;")) {
+      updateLiveCwd(data.slice(2));
+      return true;
+    }
+    return false;
+  });
+  term.parser.registerOscHandler(7, (data) => {
+    const m = /^file:\/\/[^/]*(.*)$/i.exec(data.trim());
+    if (m && m[1]) {
+      let decoded = decodeURIComponent(m[1]);
+      if (/^\/[a-zA-Z]:/.test(decoded)) decoded = decoded.slice(1);
+      updateLiveCwd(decoded);
+      return true;
+    }
+    return false;
+  });
   const h: Handlers = {
     output: (b, done) => {
-      term.write(b, done);
+      term.write(b, () => {
+        blocks.syncFromTerminal(term);
+        done?.();
+      });
       if (!raf)
         raf = requestAnimationFrame(() => {
           raf = 0;
           paint();
         });
     },
-    reset: () => term.reset(),
+    reset: () => {
+      term.reset();
+      blocks.reset();
+    },
     link: (l) => {
       if (l === "retry" && tab.a === "ok") logEvent(tab, "Lost the gateway");
       if (l === "ok" && tab.a === "retry" && tab.msg !== "Connecting") logEvent(tab, "Back on the gateway");
@@ -347,16 +397,41 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       clearTimeout(cwdFollowupTimer);
       cwdRefreshTimer = window.setTimeout(() => {
         if (token && !gate.open && !vaultDlg.open && cur?.id === tab.id) void refresh();
-      }, 350);
+      }, 90);
       cwdFollowupTimer = window.setTimeout(() => {
         if (token && !gate.open && !vaultDlg.open && cur?.id === tab.id) void refresh();
-      }, 1100);
+      }, 450);
     }
   };
   term.onData(sendInput);
   tab.composer = createComposer({
     send: sendInput,
-    focusTerminal: () => term.focus(),
+    onCommand: (cmd) => {
+      const folder = tab.ws === "Remote" ? tab.host : (tab.cwd ?? (tab.ws && tab.ws !== "local shell" ? tab.ws : null));
+      const git = gitCtx !== null && gitCtx.id === tab.id ? gitCtx : null;
+      blocks.startCommand(
+        cmd,
+        {
+          folder,
+          branch: git?.branch ?? null,
+          files: git?.files ?? 0,
+          add: git?.add ?? 0,
+          del: git?.del ?? 0,
+        },
+        term,
+      );
+    },
+    complete: async (line, cursor) => {
+      if (!tab.id || !token) return null;
+      return api<CompletionResult>(
+        `/api/complete?session=${encodeURIComponent(tab.id)}&line=${encodeURIComponent(line)}&cursor=${cursor}`,
+      );
+    },
+    focusTerminal: () => {
+      pane.dataset.mode = "raw";
+      fit.fit();
+      term.focus();
+    },
     openChanges: () => {
       const hidden = small() ? !$("#app").classList.contains("show-diff") : $("#app").classList.contains("nodiff");
       if (hidden) $("#dt").click();
@@ -367,8 +442,10 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
   term.buffer.onBufferChange((b) => {
     const raw = b.type === "alternate";
     tab.composer.setRaw(raw);
+    pane.dataset.mode = raw ? "raw" : "blocks";
+    fit.fit();
     if (raw) term.focus();
-    else if (screen.contains(document.activeElement)) tab.composer.focus();
+    else tab.composer.focus();
   });
   term.onBinary((d) => tab.conn.input(Uint8Array.from(d, (c) => c.charCodeAt(0))));
   term.onResize(({ rows, cols }) => tab.conn.resize({ rows, cols }));
@@ -512,7 +589,10 @@ async function refresh(): Promise<void> {
       let activeCwdChanged = false;
       for (const s of list) {
         const open = tabs.find((x) => x.id === s.id);
-        if (open) open.ws = s.workspace ?? null;
+        if (open) {
+          open.ws = s.workspace ?? null;
+          open.cwd = s.cwd ?? null;
+        }
         const nextCwd = s.cwd_id ?? null;
         if (!sessionCwds.has(s.id) || sessionCwds.get(s.id) !== nextCwd) {
           sessionCwds.set(s.id, nextCwd);
@@ -590,7 +670,7 @@ async function refresh(): Promise<void> {
   return refreshing;
 }
 
-function clearGit(branch = "no branch"): void {
+function clearGit(branch = "No repository"): void {
   $("#bname").textContent = branch;
   $("#sum").textContent = "";
   $("#count").textContent = "0";
@@ -617,22 +697,23 @@ async function loadChanges(): Promise<void> {
     );
     if (cur?.id !== sessionId) return;
     if (r.is_repo === false) {
-      clearGit("no git repo");
-      note(
-        list,
-        r.folder
-          ? `Folder "${r.folder}" is not inside a Git repository. Open or cd into a Git folder to inspect changes.`
-          : "No local Git repository in this session.",
-      );
+      clearGit("No repository");
+      const wrap = el("div", "empty-git");
+      const title = el("strong", "", r.folder ? `"${r.folder}" is not a Git repository.` : "Not inside a Git repository.");
+      const sub = el("p", "", "Initialize a repository to start tracking changes, or open a folder with an existing Git history.");
+      wrap.append(title, sub);
+      list.replaceChildren(wrap);
       return;
     }
     const add = r.files.reduce((a, f) => a + f.add, 0),
       del = r.files.reduce((a, f) => a + f.del, 0);
-    $("#bname").textContent = r.branch || "HEAD";
+    const branchLabel = r.branch && r.branch !== "HEAD (unborn)" ? r.branch : "No branch";
+    $("#bname").textContent = branchLabel;
     $("#sum").textContent = `+${add} \u2212${del}`;
     $("#count").textContent = String(r.files.length);
     list.replaceChildren(...(r.files.length ? r.files.map(fileRow) : [el("p", "note", "No changes in this folder.")]));
-    gitCtx = { id: sessionId, branch: r.branch || "HEAD", files: r.files.length, add, del };
+    gitCtx = { id: sessionId, branch: branchLabel, files: r.files.length, add, del };
+    if (cur.id === sessionId) cur.blocks.updateActiveContext({ folder: cur.cwd ?? cur.ws, branch: branchLabel, files: r.files.length, add, del });
     paint();
   } catch {
     clearGit();
@@ -833,12 +914,19 @@ const syncRibbon = (): void => {
 new MutationObserver(syncRibbon).observe(appEl, { attributes: true, attributeFilter: ["class"] });
 syncRibbon();
 
-// Ctrl+Shift+L moves between the input bar and raw typing in the terminal.
+// Ctrl+Shift+L moves between the input bar (blocks) and raw typing in the terminal.
 document.addEventListener("keydown", (e) => {
   if (!cur || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.key.toLowerCase() !== "l") return;
   e.preventDefault();
-  if (cur.composer.hasFocus()) cur.term.focus();
-  else if (!cur.composer.isRaw()) cur.composer.focus();
+  if (cur.el.dataset.mode !== "raw") {
+    cur.el.dataset.mode = "raw";
+    cur.fit.fit();
+    cur.term.focus();
+  } else if (!cur.composer.isRaw()) {
+    cur.el.dataset.mode = "blocks";
+    cur.fit.fit();
+    cur.composer.focus();
+  }
 });
 
 $("#tab-c").onclick = () => showTab(true);
@@ -881,8 +969,12 @@ async function loadBranches(): Promise<void> {
     const r = await api<{ is_repo?: boolean; current: string; branches: string[] }>(
       `/api/git/branches?session=${encodeURIComponent(cur.id)}`,
     );
-    if (r.is_repo === false || r.branches.length === 0) {
-      note(m, "No local Git branches for this session folder.");
+    if (r.is_repo === false) {
+      note(m, "No Git repository detected in this directory.");
+      return;
+    }
+    if (r.branches.length === 0) {
+      note(m, "No branches yet. Create an initial commit to establish a branch.");
       return;
     }
     m.replaceChildren(
@@ -907,19 +999,95 @@ async function loadBranches(): Promise<void> {
     note(m, "Branches are unavailable for this session.");
   }
 }
+type CommitMode = "tracked" | "staged" | "all";
+const COMMIT_LABELS: Record<CommitMode, string> = {
+  tracked: "Commit Tracked",
+  staged: "Commit Staged",
+  all: "Commit All",
+};
+const savedCommitMode = localStorage.getItem("oxidite.commitMode");
+let commitMode: CommitMode =
+  savedCommitMode && savedCommitMode in COMMIT_LABELS
+    ? (savedCommitMode as CommitMode)
+    : "tracked";
+
+function syncCommitModeUi(): void {
+  $("#commit").textContent = COMMIT_LABELS[commitMode];
+  for (const b of document.querySelectorAll<HTMLButtonElement>("#commit-mode-menu [data-mode]")) {
+    b.setAttribute("aria-checked", String(b.dataset.mode === commitMode));
+  }
+}
+syncCommitModeUi();
+
+const closeAllMenus = (): void => {
+  $("#branches").hidden = true;
+  $("#branch").setAttribute("aria-expanded", "false");
+  $("#fetch-menu").hidden = true;
+  $("#fetch-menu-btn").setAttribute("aria-expanded", "false");
+  $("#commit-mode-menu").hidden = true;
+  $("#commit-mode-btn").setAttribute("aria-expanded", "false");
+};
+
 $("#branch").onclick = (e) => {
   e.stopPropagation();
   const m = $("#branches");
-  m.hidden = !m.hidden;
-  $("#branch").setAttribute("aria-expanded", String(!m.hidden));
-  if (!m.hidden) void loadBranches();
+  const nextHidden = !m.hidden;
+  closeAllMenus();
+  m.hidden = nextHidden;
+  $("#branch").setAttribute("aria-expanded", String(!nextHidden));
+  if (!nextHidden) void loadBranches();
 };
-document.addEventListener("click", () => {
-  $("#branches").hidden = true;
-  $("#branch").setAttribute("aria-expanded", "false");
-});
+$("#fetch-menu-btn").onclick = (e) => {
+  e.stopPropagation();
+  const m = $("#fetch-menu");
+  const nextHidden = !m.hidden;
+  closeAllMenus();
+  m.hidden = nextHidden;
+  $("#fetch-menu-btn").setAttribute("aria-expanded", String(!nextHidden));
+};
+$("#commit-mode-btn").onclick = (e) => {
+  e.stopPropagation();
+  const m = $("#commit-mode-menu");
+  const nextHidden = !m.hidden;
+  closeAllMenus();
+  m.hidden = nextHidden;
+  $("#commit-mode-btn").setAttribute("aria-expanded", String(!nextHidden));
+};
+for (const b of document.querySelectorAll<HTMLButtonElement>("#commit-mode-menu [data-mode]")) {
+  b.onclick = (e) => {
+    e.stopPropagation();
+    const mode = b.dataset.mode as CommitMode;
+    if (mode in COMMIT_LABELS) {
+      commitMode = mode;
+      localStorage.setItem("oxidite.commitMode", mode);
+      syncCommitModeUi();
+    }
+    closeAllMenus();
+  };
+}
+for (const b of document.querySelectorAll<HTMLButtonElement>("#fetch-menu [data-fetch-act]")) {
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    const act = b.dataset.fetchAct;
+    closeAllMenus();
+    if (act === "fetch") {
+      $("#fetch").click();
+    } else if (act === "refresh") {
+      await loadChanges();
+      if (!$("#hist").hidden) await loadHistory();
+    }
+  };
+}
+$("#cmsg-expand").onclick = () => {
+  const ta = $<HTMLTextAreaElement>("#cmsg");
+  const expanded = !ta.classList.contains("expanded");
+  ta.classList.toggle("expanded", expanded);
+  ta.rows = expanded ? 7 : 3;
+  $("#cmsg-expand").setAttribute("aria-expanded", String(expanded));
+};
+document.addEventListener("click", closeAllMenus);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") $("#branches").hidden = true;
+  if (e.key === "Escape") closeAllMenus();
 });
 $("#fetch").onclick = async () => {
   if (!cur?.id) {
@@ -927,8 +1095,9 @@ $("#fetch").onclick = async () => {
     return;
   }
   const b = $<HTMLButtonElement>("#fetch");
+  const lbl = $("#fetch-label");
   b.disabled = true;
-  b.textContent = "Fetching";
+  lbl.textContent = "Fetching";
   try {
     await api("/api/git/fetch", { session: cur.id });
     $("#msg").textContent = "Fetched from the remote.";
@@ -936,7 +1105,7 @@ $("#fetch").onclick = async () => {
     $("#msg").textContent = "Fetch failed. Check the remote and its credentials on the gateway.";
   }
   b.disabled = false;
-  b.textContent = "Fetch";
+  lbl.textContent = "Fetch";
   await loadChanges();
 };
 $("#commit").onclick = async () => {
@@ -950,10 +1119,14 @@ $("#commit").onclick = async () => {
     return;
   }
   try {
-    await api("/api/git/commit", { session: cur.id, message: m.value });
+    await api("/api/git/commit", { session: cur.id, message: m.value, mode: commitMode });
     m.value = "";
+    $("#msg").textContent = "Commit created.";
   } catch {
-    $("#msg").textContent = "Commit failed. Stage at least one file first.";
+    $("#msg").textContent =
+      commitMode === "staged"
+        ? "Commit failed. Stage at least one file first."
+        : "Commit failed. Check that there are changes to commit.";
   }
   await loadChanges();
 };

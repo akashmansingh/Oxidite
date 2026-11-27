@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CommandHistory, changeParts, keyAction, toPtyInput, type KeyInfo } from "./composer-model";
+import { CommandHistory, changeParts, keyAction, longestCommonPrefix, toPtyInput, type KeyInfo } from "./composer-model";
 
 const key = (k: string, mods: Partial<KeyInfo> = {}): KeyInfo => ({
   key: k,
@@ -42,6 +42,13 @@ describe("keyAction", () => {
     expect(keyAction(key("ArrowDown"), at("one\ntwo", 6))).toBe("history-next");
     expect(keyAction(key("ArrowDown"), at("one\ntwo", 1))).toBe("none");
   });
+
+  test("Tab triggers forward and backward completion without leaving editor", () => {
+    expect(keyAction(key("Tab"), at("cd O"))).toBe("tab-complete");
+    expect(keyAction(key("Tab", { shiftKey: true }), at("cd O"))).toBe("tab-prev");
+    expect(longestCommonPrefix(["OrderFlow\\", "Oxidite\\"])).toBe("O");
+    expect(longestCommonPrefix(["src\\main.ts", "src\\blocks.ts"])).toBe("src\\");
+  });
 });
 
 describe("toPtyInput", () => {
@@ -64,10 +71,12 @@ describe("CommandHistory", () => {
     h.push("ls");
     h.push("pwd");
     expect(h.prev("git st")).toBe("pwd");
+    expect(h.isBrowsing()).toBe(true);
     expect(h.prev("git st")).toBe("ls");
     expect(h.prev("git st")).toBeNull();
     expect(h.next()).toBe("pwd");
     expect(h.next()).toBe("git st");
+    expect(h.isBrowsing()).toBe(false);
     expect(h.next()).toBeNull();
   });
 

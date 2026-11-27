@@ -49,14 +49,35 @@
       <button id="tab-c" role="tab" aria-selected="true">Changes <small id="count">0</small></button>
       <button id="tab-h" role="tab" aria-selected="false">History</button>
     </div>
-    <div class="sumrow"><button id="branch" class="branch" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="bname">no branch</span></button><button id="fetch" class="ib txt" type="button">Fetch</button></div>
+    <div class="sumrow branchbar">
+      <button id="branch" class="branch" type="button" aria-haspopup="listbox" aria-expanded="false"><span data-icon="branch"></span><span id="bname">No repository</span></button>
+      <div class="split-btn" id="fetch-wrap">
+        <button id="fetch" class="split-main" type="button"><span data-icon="refresh"></span><span id="fetch-label">Fetch</span></button><button id="fetch-menu-btn" class="split-caret" type="button" aria-label="Fetch options" aria-haspopup="menu" aria-expanded="false"><span data-icon="chevronDown"></span></button>
+        <div id="fetch-menu" class="split-menu" role="menu" hidden>
+          <button type="button" role="menuitem" data-fetch-act="fetch">Fetch remote</button>
+          <button type="button" role="menuitem" data-fetch-act="refresh">Refresh status</button>
+        </div>
+      </div>
+    </div>
     <div id="branches" class="menu" role="listbox" aria-label="Branches" hidden></div>
     <div class="sumrow"><span id="sum"></span><button id="all" class="ib txt" type="button">Stage all</button></div>
     <div id="files"></div>
     <div id="hist" hidden></div>
     <div id="commitbox">
-      <textarea id="cmsg" rows="3" placeholder="Commit message" aria-label="Commit message"></textarea>
-      <button id="commit" class="btn" type="button">Commit staged changes</button>
+      <div class="cmsg-wrap">
+        <textarea id="cmsg" rows="3" placeholder="Enter commit message" aria-label="Commit message"></textarea>
+        <button id="cmsg-expand" class="cmsg-expand" type="button" data-icon="resizeDiag" title="Expand commit message" aria-label="Expand commit message" aria-expanded="false"></button>
+      </div>
+      <div class="commit-bar">
+        <div class="split-btn" id="commit-wrap">
+          <button id="commit" class="split-main" type="button">Commit Tracked</button><button id="commit-mode-btn" class="split-caret" type="button" aria-label="Commit mode" aria-haspopup="menu" aria-expanded="false"><span data-icon="chevronDown"></span></button>
+          <div id="commit-mode-menu" class="split-menu" role="menu" hidden>
+            <button type="button" role="menuitemradio" data-mode="tracked" aria-checked="true">Commit Tracked <small>commit -a</small></button>
+            <button type="button" role="menuitemradio" data-mode="staged" aria-checked="false">Commit Staged <small>staged only</small></button>
+            <button type="button" role="menuitemradio" data-mode="all" aria-checked="false">Commit All <small>stage all &amp; commit</small></button>
+          </div>
+        </div>
+      </div>
     </div>
   </aside>
 
