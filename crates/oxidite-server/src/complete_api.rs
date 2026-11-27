@@ -12,11 +12,14 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::AppState;
-use crate::git_api::{check_auth, resolve_git_toplevel, resolve_session_cwd, run_git_output};
+use crate::git_api::{
+    check_auth_with_limit, resolve_git_toplevel, resolve_session_cwd, run_git_output,
+};
 use crate::security;
 
 const MAX_CANDIDATES: usize = 40;
 const PATH_CACHE_TTL: Duration = Duration::from_secs(30);
+const COMPLETE_RATE_LIMIT_MIN: u32 = 600;
 
 const POWERSHELL_BUILTINS: &[&str] = &[
     "cd",
@@ -518,7 +521,12 @@ pub async fn complete_handler(
     headers: HeaderMap,
     Query(q): Query<CompleteQuery>,
 ) -> Result<Json<CompleteResponse>, StatusCode> {
-    let user_id = check_auth(&state, &headers).await?;
+    let complete_limit = state
+        .security
+        .rate_limit_per_minute
+        .saturating_mul(5)
+        .max(COMPLETE_RATE_LIMIT_MIN);
+    let user_id = check_auth_with_limit(&state, &headers, "complete", complete_limit).await?;
     let Some(cwd) = resolve_session_cwd(&state, &user_id, q.session.as_deref()).await? else {
         return Ok(Json(CompleteResponse {
             replace_start: 0,
@@ -640,4 +648,90 @@ pub async fn complete_handler(
         replace_end: parsed.replace_end,
         candidates,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security::SecurityConfig;
+
+    #[test]
+    fn parse_line_handles_quotes_spaces_and_trailing_ws() {
+        let p = parse_line_at_cursor("cat 'my fi", 10);
+        assert_eq!(p.prev_tokens, vec!["cat"]);
+        assert_eq!(p.replace_start, 4);
+        assert_eq!(p.replace_end, 10);
+        assert_eq!(p.active_raw, "my fi");
+        assert_eq!(p.quote_char, Some('\''));
+
+        let trailing = parse_line_at_cursor("git switch ", 11);
+        assert_eq!(trailing.prev_tokens, vec!["git", "switch"]);
+        assert_eq!(trailing.replace_start, 11);
+        assert_eq!(trailing.replace_end, 11);
+        assert_eq!(trailing.active_raw, "");
+        assert_eq!(trailing.quote_char, None);
+
+        let dbl = parse_line_at_cursor("cd \"C:\\Program Fi", 17);
+        assert_eq!(dbl.prev_tokens, vec!["cd"]);
+        assert_eq!(dbl.quote_char, Some('"'));
+        assert_eq!(dbl.active_raw, "C:\\Program Fi");
+    }
+
+    #[test]
+    fn parse_line_handles_multibyte_utf8_and_midline_cursor() {
+        let line = "echo café naïve bar";
+        let chars_len = line.chars().count();
+        assert_eq!(chars_len, 19);
+
+        // Cursor right after "echo café naï" (char index 13)
+        let mid = parse_line_at_cursor(line, 13);
+        assert_eq!(mid.prev_tokens, vec!["echo", "café"]);
+        assert_eq!(mid.replace_start, 10);
+        assert_eq!(mid.replace_end, 13);
+        assert_eq!(mid.active_raw, "naï");
+
+        // Cursor past end clamps safely even with multi-byte chars
+        let clamped = parse_line_at_cursor("cd 日本", 99);
+        assert_eq!(clamped.prev_tokens, vec!["cd"]);
+        assert_eq!(clamped.replace_start, 3);
+        assert_eq!(clamped.replace_end, 5);
+        assert_eq!(clamped.active_raw, "日本");
+    }
+
+    #[test]
+    fn format_path_quotes_spaces_and_preserves_clean_paths() {
+        assert_eq!(format_path_value("crates\\", None), "crates\\");
+        assert_eq!(
+            format_path_value("Program Files\\", None),
+            "'Program Files\\'"
+        );
+        assert_eq!(
+            format_path_value("Program Files\\", Some('"')),
+            "\"Program Files\\\""
+        );
+    }
+
+    #[test]
+    fn complete_filesystem_paths_respects_workspace_roots_and_parent_nav() {
+        let base = std::env::temp_dir().join(format!("oxidite-comp-unit-{}", std::process::id()));
+        let child = base.join("inside");
+        let sub = child.join("target_sub");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let sec_open = SecurityConfig::default();
+        let up_items = complete_filesystem_paths(&sub, &sec_open, "..", None, true);
+        assert!(up_items.iter().any(|c| c.value.starts_with("..")));
+        assert!(up_items.iter().any(|c| c.value.contains("target_sub")));
+
+        let sec_jailed = SecurityConfig {
+            workspace_roots: vec![sub.clone()],
+            ..Default::default()
+        };
+        // `..` resolves to `child` outside workspace_roots -> only the literal `..\` token remains, parent contents are NOT leaked
+        let jailed_up = complete_filesystem_paths(&sub, &sec_jailed, "..", None, true);
+        assert!(!jailed_up.iter().any(|c| c.display.contains("target_sub")));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

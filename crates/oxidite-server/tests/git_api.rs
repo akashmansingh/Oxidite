@@ -239,6 +239,31 @@ async fn test_git_api_session_cwd_spaces_and_path_traversal_protection() {
         "expected 200 from tracked commit, got: {commit_raw}"
     );
 
+    // 11. Hammering /api/complete (>120 git rate limit) does not return 429 or lock out /api/git/*
+    for idx in 0..135 {
+        let (st, _) = http_get(
+            addr,
+            &format!("/api/complete?session={repo_sid}&line=git%20s&cursor=5&n={idx}"),
+            &token,
+        )
+        .await;
+        assert_eq!(st, 200, "unexpected /api/complete status at request {idx}");
+    }
+    let (changes_after, _) = http_get(
+        addr,
+        &format!("/api/git/changes?session={repo_sid}"),
+        &token,
+    )
+    .await;
+    assert_eq!(changes_after, 200);
+    let (branches_after, _) = http_get(
+        addr,
+        &format!("/api/git/branches?session={repo_sid}"),
+        &token,
+    )
+    .await;
+    assert_eq!(branches_after, 200);
+
     let _ = std::fs::remove_dir_all(&temp_root);
 }
 

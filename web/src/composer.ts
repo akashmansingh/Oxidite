@@ -115,6 +115,7 @@ export function createComposer(opts: ComposerOptions): Composer {
   } | null = null;
   let acSeq = 0;
   let liveTimer: number | undefined;
+  let lastLiveKey = "";
 
   const updateGhost = (): void => {
     const val = ta.value;
@@ -205,10 +206,11 @@ export function createComposer(opts: ComposerOptions): Composer {
     }
   };
 
-  const scheduleLiveComplete = (delayMs = 70): void => {
+  const scheduleLiveComplete = (delayMs = 150): void => {
     window.clearTimeout(liveTimer);
     if (!opts.complete || ta.disabled || ta.value.includes("\n")) return;
     if (ta.value.trim().length === 0) {
+      lastLiveKey = "";
       closeAc();
       updateGhost();
       return;
@@ -223,13 +225,17 @@ export function createComposer(opts: ComposerOptions): Composer {
     const snapText = ta.value;
     const snapCursor = ta.selectionStart ?? snapText.length;
     if (snapText.trim().length === 0) {
+      lastLiveKey = "";
       closeAc();
       updateGhost();
       return;
     }
+    const cacheKey = `${snapText}\0${snapCursor}`;
+    if (cacheKey === lastLiveKey && acState) return;
     const seq = ++acSeq;
     const res = await opts.complete(snapText, snapCursor).catch(() => null);
     if (seq !== acSeq || ta.value !== snapText || document.activeElement !== ta) return;
+    lastLiveKey = cacheKey;
     if (!res || res.candidates.length === 0) {
       closeAc();
       updateGhost();
@@ -341,6 +347,7 @@ export function createComposer(opts: ComposerOptions): Composer {
   });
   ta.addEventListener("blur", () => {
     window.clearTimeout(liveTimer);
+    lastLiveKey = "";
     closeAc();
   });
   ta.addEventListener("keydown", (e) => {
@@ -380,6 +387,7 @@ export function createComposer(opts: ComposerOptions): Composer {
           }
         }
         closeAc();
+        lastLiveKey = "";
         const text = ta.value;
         opts.onCommand?.(text);
         opts.send(toPtyInput(text));

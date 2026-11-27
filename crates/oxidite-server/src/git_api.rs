@@ -83,12 +83,20 @@ pub(crate) async fn check_auth(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<String, StatusCode> {
-    let rl_key = security::rate_limit_key(headers, "git");
-    if !state.rate_limiter.check_limit(
-        &rl_key,
-        state.security.rate_limit_per_minute,
-        Duration::from_secs(60),
-    ) {
+    check_auth_with_limit(state, headers, "git", state.security.rate_limit_per_minute).await
+}
+
+pub(crate) async fn check_auth_with_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    bucket: &str,
+    max_per_minute: u32,
+) -> Result<String, StatusCode> {
+    let rl_key = security::rate_limit_key(headers, bucket);
+    if !state
+        .rate_limiter
+        .check_limit(&rl_key, max_per_minute, Duration::from_secs(60))
+    {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
