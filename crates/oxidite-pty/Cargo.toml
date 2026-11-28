@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 portable-pty = "0.9"
 thiserror = "2.0"
+zeroize = "1.8"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

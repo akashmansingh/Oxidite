@@ -41,6 +41,10 @@ pub trait Backend: Send {
     fn shell_pid(&self) -> Option<u32> {
         None
     }
+    /// Returns the shell family identifier (`"powershell"`, `"bash"`, etc.) when known.
+    fn shell_kind(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 pub mod actor;

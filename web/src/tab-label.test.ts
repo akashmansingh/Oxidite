@@ -1,27 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { abbreviateHome, formatTabLabel } from "./tab-label";
-
-describe("abbreviateHome", () => {
-  test("replaces matching Windows and POSIX home directories with ~", () => {
-    expect(abbreviateHome("C:\\Users\\akash", "C:\\Users\\akash")).toBe("~");
-    expect(abbreviateHome("C:\\Users\\akash\\Projects\\Oxidite", "C:\\Users\\akash")).toBe("~\\Projects\\Oxidite");
-    expect(abbreviateHome("/home/akash/code", "/home/akash")).toBe("~/code");
-  });
-
-  test("falls back cleanly when homeDir is absent", () => {
-    expect(abbreviateHome("C:\\Users\\akash\\Desktop")).toBe("~\\Desktop");
-    expect(abbreviateHome("C:\\Work\\Projects\\Oxidite")).toBe("C:\\Work\\Projects\\Oxidite");
-  });
-});
+import { formatTabLabel } from "./tab-label";
 
 describe("formatTabLabel", () => {
-  test("prefers active Agentic CLI label and sets full cwd tooltip", () => {
+  test("prefers active Agentic CLI label and sets full cwd tooltip and agent logo", () => {
     const out = formatTabLabel(
       {
         cwd: "C:\\Work\\Projects\\Oxidite",
         homeDir: "C:\\Users\\akash",
         active_agent: "claude",
         agent_label: "Claude Code",
+        shell_kind: "powershell",
       },
       true,
     );
@@ -29,6 +17,7 @@ describe("formatTabLabel", () => {
       text: "Claude Code",
       tooltip: "Claude Code — C:\\Work\\Projects\\Oxidite",
       agentId: "claude",
+      logoId: "claude",
     });
   });
 
@@ -37,20 +26,35 @@ describe("formatTabLabel", () => {
       {
         cwd: "C:\\Users\\akash",
         homeDir: "C:\\Users\\akash",
+        shell_kind: "powershell",
       },
       false,
     );
     expect(desktop.text).toBe("C:\\Users\\akash");
+    expect(desktop.logoId).toBe("powershell");
 
     const out = formatTabLabel(
       {
         cwd: "C:\\Work\\Projects\\Oxidite",
         homeDir: "C:\\Users\\akash",
+        shell_kind: "bash",
       },
       true,
     );
     expect(out.text).toBe("Projects/Oxidite");
     expect(out.tooltip).toBe("C:\\Work\\Projects\\Oxidite");
     expect(out.agentId).toBeNull();
+    expect(out.logoId).toBeNull();
+  });
+
+  test("omits PowerShell logo on generic shell and SSH tabs", () => {
+    const sshTab = formatTabLabel({ cwd: null, shell_kind: "ssh" }, false);
+    expect(sshTab.logoId).toBeNull();
+
+    const bashTab = formatTabLabel({ cwd: "/home/user/repo", shell_kind: "bash" }, false);
+    expect(bashTab.logoId).toBeNull();
+
+    const unknownTab = formatTabLabel({ cwd: "/tmp" }, false);
+    expect(unknownTab.logoId).toBeNull();
   });
 });

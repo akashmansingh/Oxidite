@@ -1,9 +1,10 @@
 //! Foreground Agentic CLI detection combining:
-//! 1. Cached single-snapshot Windows descendant tree + PEB `argv[0]/argv[1]` inspection
-//!    (strictly limited to verified descendants of the shell PID, with immediate zeroing
-//!    of command-line buffers and graceful fallback to `szExeFile` on `WoW64`/`ACCESS_DENIED`).
-//! 2. OSC 0 / OSC 2 window title matching (zero-syscall fallback that also works inside
-//!    WSL and SSH sessions).
+//! 1. Cached single-snapshot descendant tree + bounded PEB/`/proc/pid/cmdline`
+//!    `argv[0]/argv[1]` inspection (verified against shell start time to prevent PID reuse,
+//!    with `zeroize` scrubbing of raw buffers/decoded strings and graceful fallback to `szExeFile`).
+//! 2. OSC 0 / OSC 2 window title matching (only when an opaque child like `ssh`/`wsl` is active
+//!    locally, or for remote sessions where `shell_pid` is unavailable, so exited local agents
+//!    do not leave stale badges behind).
 //!
 //! Prioritizes known agent CLIs over ephemeral leaf utilities (`rg.exe`, `git.exe`,
 //! `conhost.exe`, `OpenConsole.exe`) so tab badges never flicker mid-tool-call.
@@ -11,6 +12,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+const MAX_CMDLINE_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentKind {
@@ -151,28 +155,87 @@ fn match_script_path(argv1: &str) -> Option<AgentKind> {
     None
 }
 
+/// Child wrappers/tunnels whose internal processes are opaque to the host OS tree
+/// (`ssh`, `wsl`, containers), making OSC window-title matching legitimate while active.
+const OPAQUE_CONTAINERS: &[&str] = &[
+    "ssh.exe",
+    "ssh",
+    "wsl.exe",
+    "wsl",
+    "wslhost.exe",
+    "ubuntu.exe",
+    "debian.exe",
+    "docker.exe",
+    "docker",
+    "podman.exe",
+    "podman",
+    "tmux",
+];
+
 fn match_title(title: &str) -> Option<AgentKind> {
-    let lower = title.to_ascii_lowercase();
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+
     if lower.contains("claude code")
-        || lower.starts_with("claude ")
         || lower == "claude"
+        || lower.starts_with("claude ")
         || lower.contains("✳ claude")
     {
         return Some(AgentKind::ClaudeCode);
     }
-    if lower.contains("codex") {
+    if title_matches_cli_label(&lower, "codex", &["openai codex", "codex cli"]) {
         return Some(AgentKind::Codex);
     }
-    if lower.contains("antigravity") {
+    if title_matches_cli_label(&lower, "antigravity", &["antigravity cli"]) {
         return Some(AgentKind::Antigravity);
     }
-    if lower.contains("devin") {
+    if title_matches_cli_label(&lower, "devin", &["devin cli"]) {
         return Some(AgentKind::Devin);
     }
     if lower.contains("cursor agent") || lower == "cursor" {
         return Some(AgentKind::Cursor);
     }
     None
+}
+
+/// Matches explicit CLI phrases or standalone/prefixed title tokens while ignoring directory paths
+/// such as `C:\Users\devin\code` or `/home/codex-app`.
+fn title_matches_cli_label(lower: &str, keyword: &str, phrases: &[&str]) -> bool {
+    if phrases.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // Check only the leading title segment before common " — " / " - " / " | " separators
+    // if the title itself is a filesystem path.
+    let looks_like_path =
+        lower.contains(":\\") || lower.starts_with('/') || lower.starts_with("~/");
+    if looks_like_path {
+        return false;
+    }
+    has_standalone_word(lower, keyword)
+}
+
+fn has_standalone_word(haystack: &str, needle: &str) -> bool {
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let idx = start + rel;
+        let before_ok = haystack[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-' && c != '/' && c != '\\');
+        let after_idx = idx + needle.len();
+        let after_ok = haystack[after_idx..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-' && c != '/' && c != '\\');
+        if before_ok && after_ok {
+            return true;
+        }
+        start = after_idx;
+    }
+    false
 }
 
 /// Extracts only the first two command-line tokens (`argv[0]`, `argv[1]`) so API keys
@@ -210,6 +273,8 @@ struct ProcNode {
     pid: u32,
     ppid: u32,
     exe_name: String,
+    #[cfg_attr(not(unix), allow(dead_code))]
+    start_time: Option<u64>,
 }
 
 struct CachedSnapshot {
@@ -245,11 +310,15 @@ impl ProcessProbeCache {
     /// async worker threads.
     pub fn detect_for_shell(&self, shell_pid: u32, osc_title: Option<&str>) -> Option<AgentKind> {
         let descendants = self.descendants_of(shell_pid);
+        let mut has_opaque_child = false;
 
         // Walk the entire descendant subtree and prioritize ANY known agent match over
         // ephemeral leaf utilities like `rg.exe` or `git.exe`.
         for node in descendants {
             let base = node.exe_name.to_ascii_lowercase();
+            if OPAQUE_CONTAINERS.contains(&base.as_str()) {
+                has_opaque_child = true;
+            }
             if IGNORED_UTILITIES.contains(&base.as_str()) {
                 continue;
             }
@@ -280,8 +349,13 @@ impl ProcessProbeCache {
             }
         }
 
-        // Fallback: OSC 0/2 terminal title (covers WSL, SSH, and custom wrappers).
-        detect_agent_from_argv_and_title(None, None, osc_title)
+        // Only consult OSC title when an opaque child (`ssh`, `wsl`, `docker`, `tmux`) is active,
+        // so exited local CLIs never leave stale title badges behind.
+        if has_opaque_child {
+            detect_agent_from_argv_and_title(None, None, osc_title)
+        } else {
+            None
+        }
     }
 
     fn descendants_of(&self, root_pid: u32) -> Vec<ProcNode> {
@@ -303,6 +377,7 @@ impl ProcessProbeCache {
         }
 
         let snap = guard.as_ref().unwrap();
+        let root_start = find_process_start_time(snap, root_pid);
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
@@ -312,6 +387,9 @@ impl ProcessProbeCache {
         while let Some(pid) = queue.pop_front() {
             if let Some(children) = snap.children_by_ppid.get(&pid) {
                 for child in children {
+                    if !is_not_older_than_root(root_start, child) {
+                        continue;
+                    }
                     if visited.insert(child.pid) {
                         result.push(child.clone());
                         queue.push_back(child.pid);
@@ -321,6 +399,37 @@ impl ProcessProbeCache {
         }
         result
     }
+}
+
+fn find_process_start_time(snap: &CachedSnapshot, target_pid: u32) -> Option<u64> {
+    for nodes in snap.children_by_ppid.values() {
+        if let Some(node) = nodes.iter().find(|n| n.pid == target_pid)
+            && let Some(ts) = node.start_time
+        {
+            return Some(ts);
+        }
+    }
+    query_process_start_time(target_pid)
+}
+
+fn is_not_older_than_root(root_start: Option<u64>, child: &ProcNode) -> bool {
+    let Some(root_ts) = root_start else {
+        return true;
+    };
+    let child_ts = child
+        .start_time
+        .or_else(|| query_process_start_time(child.pid));
+    child_ts.is_none_or(|cts| cts >= root_ts)
+}
+
+#[cfg(windows)]
+fn query_process_start_time(pid: u32) -> Option<u64> {
+    win_probe::process_creation_time(pid)
+}
+
+#[cfg(not(windows))]
+fn query_process_start_time(_pid: u32) -> Option<u64> {
+    None
 }
 
 #[cfg(windows)]
@@ -351,10 +460,13 @@ fn take_process_snapshot() -> Vec<ProcNode> {
             let exe_name = stat[l + 1..r].to_string();
             let rest: Vec<&str> = stat[r + 2..].split_whitespace().collect();
             if let Some(ppid) = rest.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                // `/proc/<pid>/stat` field 22 (index 19 after comm/state) is process starttime.
+                let start_time = rest.get(19).and_then(|s| s.parse::<u64>().ok());
                 out.push(ProcNode {
                     pid,
                     ppid,
                     exe_name,
+                    start_time,
                 });
             }
         }
@@ -364,13 +476,21 @@ fn take_process_snapshot() -> Vec<ProcNode> {
 
 #[cfg(unix)]
 fn read_process_argv01(pid: u32) -> Option<(Option<String>, Option<String>)> {
-    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    use std::io::Read;
+    use zeroize::Zeroize;
+    let file = std::fs::File::open(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut bytes = Vec::with_capacity(256);
+    file.take(MAX_CMDLINE_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
     let mut parts = bytes
         .split(|&b| b == 0)
         .filter(|s| !s.is_empty())
         .take(2)
         .map(|s| String::from_utf8_lossy(s).into_owned());
-    Some((parts.next(), parts.next()))
+    let pair = (parts.next(), parts.next());
+    bytes.zeroize();
+    Some(pair)
 }
 
 #[cfg(windows)]
@@ -379,6 +499,7 @@ mod win_probe {
     use std::ffi::c_void;
     use std::mem::{size_of, zeroed};
     use std::ptr::null_mut;
+    use zeroize::Zeroize;
 
     type Handle = *mut c_void;
     type Bool = i32;
@@ -421,6 +542,12 @@ mod win_probe {
         buffer: *const u16,
     }
 
+    #[repr(C)]
+    struct FileTime {
+        dw_low_date_time: u32,
+        dw_high_date_time: u32,
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CreateToolhelp32Snapshot(dw_flags: u32, th32_process_id: u32) -> Handle;
@@ -431,6 +558,13 @@ mod win_probe {
             b_inherit_handle: Bool,
             dw_process_id: u32,
         ) -> Handle;
+        fn GetProcessTimes(
+            h_process: Handle,
+            lp_creation_time: *mut FileTime,
+            lp_exit_time: *mut FileTime,
+            lp_kernel_time: *mut FileTime,
+            lp_user_time: *mut FileTime,
+        ) -> Bool;
         fn IsWow64Process(h_process: Handle, wow64_process: *mut Bool) -> Bool;
         fn ReadProcessMemory(
             h_process: Handle,
@@ -488,6 +622,7 @@ mod win_probe {
                         pid: entry.th32_process_id,
                         ppid: entry.th32_parent_process_id,
                         exe_name,
+                        start_time: None,
                     });
                     if Process32NextW(snap, &raw mut entry) == 0 {
                         break;
@@ -496,6 +631,34 @@ mod win_probe {
             }
         }
         nodes
+    }
+
+    pub fn process_creation_time(pid: u32) -> Option<u64> {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let _guard = HandleGuard(h);
+            let mut creation: FileTime = zeroed();
+            let mut exit: FileTime = zeroed();
+            let mut kernel: FileTime = zeroed();
+            let mut user: FileTime = zeroed();
+            if GetProcessTimes(
+                h,
+                &raw mut creation,
+                &raw mut exit,
+                &raw mut kernel,
+                &raw mut user,
+            ) == 0
+            {
+                return None;
+            }
+            Some(
+                (u64::from(creation.dw_high_date_time) << 32)
+                    | u64::from(creation.dw_low_date_time),
+            )
+        }
     }
 
     /// Reads ONLY `argv[0]` and `argv[1]` from a 64-bit child process PEB.
@@ -559,17 +722,17 @@ mod win_probe {
                 &raw mut bytes_read,
             );
             if ok == 0 || bytes_read < 2 {
-                buf.fill(0);
+                buf.zeroize();
                 return None;
             }
 
             let valid_u16s = (bytes_read / 2).min(buf.len());
-            let decoded = String::from_utf16_lossy(&buf[..valid_u16s]);
+            let mut decoded = String::from_utf16_lossy(&buf[..valid_u16s]);
             let pair = extract_first_two_args(&decoded);
 
-            // Scrub raw command-line buffer immediately so flags/keys never linger in memory.
-            buf.fill(0);
-            drop(decoded);
+            // Scrub raw and decoded command-line buffers with volatile zeroize so secrets cannot linger.
+            buf.zeroize();
+            decoded.zeroize();
 
             Some(pair)
         }
@@ -655,6 +818,41 @@ mod tests {
         assert_eq!(
             detect_agent_from_argv_and_title(None, None, Some("Antigravity CLI")),
             Some(AgentKind::Antigravity)
+        );
+    }
+
+    #[test]
+    fn ignores_filesystem_paths_containing_agent_words_in_title() {
+        assert_eq!(
+            detect_agent_from_argv_and_title(None, None, Some(r"C:\Users\devin\Projects\app")),
+            None
+        );
+        assert_eq!(
+            detect_agent_from_argv_and_title(None, None, Some("/home/user/codex-clone")),
+            None
+        );
+        assert_eq!(
+            detect_agent_from_argv_and_title(None, None, Some("~/cursor/workspace")),
+            None
+        );
+        assert_eq!(
+            detect_agent_from_argv_and_title(None, None, Some("OpenAI Codex")),
+            Some(AgentKind::Codex)
+        );
+        assert_eq!(
+            detect_agent_from_argv_and_title(None, None, Some("Devin CLI")),
+            Some(AgentKind::Devin)
+        );
+    }
+
+    #[test]
+    fn stale_osc_title_ignored_when_local_shell_has_no_opaque_children() {
+        let cache = ProcessProbeCache::new(Duration::from_secs(60));
+        let self_pid = std::process::id();
+        // Current test process has no ssh/wsl child; a lingering "Antigravity CLI" title must not report active.
+        assert_eq!(
+            cache.detect_for_shell(self_pid, Some("Antigravity CLI")),
+            None
         );
     }
 

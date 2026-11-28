@@ -254,7 +254,14 @@ async fn test_same_origin_websocket_allowed_and_cross_origin_rejected() {
     let err = tokio_tungstenite::connect_async(evil_req)
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("403"), "expected 403, got {err}");
+    assert!(
+        matches!(
+            err,
+            tokio_tungstenite::tungstenite::Error::Http(ref resp)
+                if resp.status() == axum::http::StatusCode::FORBIDDEN
+        ),
+        "expected HTTP 403 Forbidden, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -375,8 +382,12 @@ async fn test_tailscale_origin_and_forwarded_host_security() {
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("403"),
-        "expected 403 for arbitrary *.ts.net origin, got {err}"
+        matches!(
+            err,
+            tokio_tungstenite::tungstenite::Error::Http(ref resp)
+                if resp.status() == axum::http::StatusCode::FORBIDDEN
+        ),
+        "expected HTTP 403 Forbidden for arbitrary *.ts.net origin, got {err:?}"
     );
 
     // 3. Pairing grant honors trusted X-Forwarded-Host from loopback when in allowlist.

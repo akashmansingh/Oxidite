@@ -31,7 +31,10 @@ use oxidite_proto::{
     AttachMode, ClientMsg, ErrorCode, PROTOCOL_VERSION, ServerMsg, SessionId, SessionState,
     pack_server_msg, unpack_client_msg,
 };
-use oxidite_session::{actor::ActorCmd, manager::SessionManager};
+use oxidite_session::{
+    actor::{ActorCmd, AgentContext},
+    manager::SessionManager,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -119,6 +122,8 @@ pub struct SessionInfo {
     pub active_agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_kind: Option<String>,
 }
 
 fn short_cwd_hash(path: &std::path::Path) -> String {
@@ -630,15 +635,30 @@ async fn list_sessions(
                 && let Ok(sess_state) = rx.await
             {
                 let (actx_tx, actx_rx) = oneshot::channel();
-                let (shell_pid, title, live_cwd) = if handle
+                let AgentContext {
+                    shell_pid,
+                    title,
+                    cwd: live_cwd,
+                    shell_kind,
+                } = if handle
                     .tx
                     .send(ActorCmd::GetAgentContext { resp: actx_tx })
                     .await
                     .is_ok()
                 {
-                    actx_rx.await.unwrap_or((None, String::new(), None))
+                    actx_rx.await.unwrap_or(AgentContext {
+                        shell_pid: None,
+                        title: String::new(),
+                        cwd: None,
+                        shell_kind: None,
+                    })
                 } else {
-                    (None, String::new(), None)
+                    AgentContext {
+                        shell_pid: None,
+                        title: String::new(),
+                        cwd: None,
+                        shell_kind: None,
+                    }
                 };
                 let effective_cwd = match live_cwd {
                     Some(p) if state.security.is_workspace_path_allowed(&p) => {
@@ -687,6 +707,7 @@ async fn list_sessions(
                     home_dir: home_dir.clone(),
                     active_agent: agent.map(|a| a.id().to_string()),
                     agent_label: agent.map(|a| a.label().to_string()),
+                    shell_kind: shell_kind.map(String::from),
                 });
             }
         }
@@ -941,7 +962,7 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                 break;
             }
             _ = ws_heartbeat.tick() => {
-                if last_ws_pong.elapsed() >= Duration::from_secs(25) {
+                if last_ws_pong.elapsed() >= Duration::from_secs(45) {
                     break;
                 }
                 let _ = ping_tx.try_send(());
@@ -1417,6 +1438,32 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                             }));
                         }
                     }
+                } else if let Some(exit_state) = state.manager.get_exit_state(session) {
+                    let message = match &exit_state {
+                        SessionState::Exited { code: Some(c) } => {
+                            format!("Session {session} exited with code {c}")
+                        }
+                        SessionState::Exited { code: None } => {
+                            format!("Session {session} exited")
+                        }
+                        SessionState::Failed { reason } => reason.clone(),
+                        _ => format!("Session {session} already ended"),
+                    };
+                    let _ = server_tx
+                        .send(ServerMsg::State {
+                            session,
+                            state: exit_state.clone(),
+                        })
+                        .await;
+                    if let SessionState::Exited { code } = exit_state {
+                        let _ = server_tx.send(ServerMsg::Exit { code }).await;
+                    }
+                    let _ = server_tx
+                        .send(ServerMsg::Error {
+                            code: ErrorCode::SessionExited,
+                            message,
+                        })
+                        .await;
                 } else {
                     let _ = server_tx
                         .send(ServerMsg::Error {
@@ -1492,7 +1539,11 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
                         user: &user_id,
                     });
                     state.auth.remove_session_owner(sid);
-                    state.manager.remove_cwd(sid);
+                    if let Some(ref tx) = current_tx {
+                        let _ = tx.send(ActorCmd::Kill).await;
+                    }
+                    state.manager.remove(sid);
+                    current_tx = None;
                 }
                 if let Some(tx) = &current_tx {
                     let _ = tx.send(ActorCmd::Kill).await;

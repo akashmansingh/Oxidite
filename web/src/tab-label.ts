@@ -3,22 +3,25 @@ export interface TabSessionMeta {
   homeDir?: string | null;
   active_agent?: string | null;
   agent_label?: string | null;
+  shell_kind?: string | null;
 }
 
 export interface FormattedTabLabel {
   text: string;
   tooltip: string;
   agentId: string | null;
+  logoId: string | null;
 }
 
 /**
  * Formats a session tab label:
  * - Prefers active Agentic CLI label (`Codex`, `Claude Code`, `Devin`, `Cursor`, `Antigravity`).
- * - Otherwise replaces user home prefix with `~` and compacts deep paths on narrow screens.
- * - Never leaves "local shell" once a CWD is known.
+ * - Otherwise displays the full working directory path on wide screens and compacts deep paths on narrow screens.
+ * - Resolves `logoId` from active agent or reported shell (`powershell`), returning `null` for generic shells/SSH.
  */
 export function formatTabLabel(meta: TabSessionMeta, isCompact: boolean): FormattedTabLabel {
   const fullPath = meta.cwd?.trim() || "";
+  const shellLogo = meta.shell_kind === "powershell" ? "powershell" : null;
 
   if (meta.active_agent) {
     const label = meta.agent_label?.trim() || meta.active_agent;
@@ -26,42 +29,29 @@ export function formatTabLabel(meta: TabSessionMeta, isCompact: boolean): Format
       text: label,
       tooltip: fullPath ? `${label} — ${fullPath}` : label,
       agentId: meta.active_agent,
+      logoId: meta.active_agent,
     };
   }
 
   if (!fullPath) {
-    return { text: "shell", tooltip: "Local shell", agentId: null };
+    return {
+      text: meta.shell_kind === "powershell" ? "powershell" : "shell",
+      tooltip: meta.shell_kind === "powershell" ? "PowerShell" : "Local shell",
+      agentId: null,
+      logoId: shellLogo,
+    };
   }
 
   if (!isCompact) {
-    return { text: fullPath, tooltip: fullPath, agentId: null };
+    return { text: fullPath, tooltip: fullPath, agentId: null, logoId: shellLogo };
   }
 
   const segments = fullPath.split(/[\\/]/).filter(Boolean);
   if (segments.length <= 2) {
-    return { text: fullPath, tooltip: fullPath, agentId: null };
+    return { text: fullPath, tooltip: fullPath, agentId: null, logoId: shellLogo };
   }
   const tail = segments.slice(-2).join("/");
-  return { text: tail, tooltip: fullPath, agentId: null };
-}
-
-export function abbreviateHome(path: string, homeDir?: string): string {
-  if (homeDir) {
-    const normHome = homeDir.replace(/[\\/]+$/, "");
-    if (path.toLowerCase() === normHome.toLowerCase()) return "~";
-    if (
-      path.toLowerCase().startsWith(normHome.toLowerCase() + "\\") ||
-      path.toLowerCase().startsWith(normHome.toLowerCase() + "/")
-    ) {
-      return "~" + path.slice(normHome.length);
-    }
-  }
-  // Heuristic fallback for Windows C:\Users\<name>
-  const winMatch = path.match(/^[A-Za-z]:\\Users\\[^\\]+(.*)$/i);
-  if (winMatch) {
-    return "~" + (winMatch[1] || "");
-  }
-  return path;
+  return { text: tail, tooltip: fullPath, agentId: null, logoId: shellLogo };
 }
 
 /**

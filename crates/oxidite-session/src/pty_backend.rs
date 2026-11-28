@@ -11,12 +11,14 @@ pub struct LocalPtyBackend {
     writer: Arc<Mutex<PtyWriter>>,
     reader_rx: Option<mpsc::Receiver<BackendEvent>>,
     child_pid: Option<u32>,
+    shell_kind: Option<&'static str>,
 }
 
 impl LocalPtyBackend {
     pub fn spawn(shell: Option<String>, cwd: Option<String>, size: TermSize) -> Result<Self> {
         let cmd = oxidite_pty::resolve_safe_shell(shell.as_deref())
             .map_err(|e| SessionError::Backend(e.to_string()))?;
+        let shell_kind = oxidite_pty::shell_kind_from_program(&cmd.program);
 
         let pty_size = PtySize {
             rows: size.rows,
@@ -55,6 +57,7 @@ impl LocalPtyBackend {
             writer: Arc::new(Mutex::new(writer)),
             reader_rx: Some(rx),
             child_pid,
+            shell_kind,
         })
     }
 }
@@ -103,5 +106,9 @@ impl Backend for LocalPtyBackend {
 
     fn shell_pid(&self) -> Option<u32> {
         self.child_pid
+    }
+
+    fn shell_kind(&self) -> Option<&'static str> {
+        self.shell_kind
     }
 }

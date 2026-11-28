@@ -756,6 +756,24 @@ fn is_powershell_binary(program: &str) -> bool {
     )
 }
 
+/// Identifies a known shell brand from its executable name (`"powershell"` or `"bash"`),
+/// or returns `None` for other generic shells.
+#[must_use]
+pub fn shell_kind_from_program(program: &str) -> Option<&'static str> {
+    if is_powershell_binary(program) {
+        return Some("powershell");
+    }
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "bash" | "bash.exe" => Some("bash"),
+        _ => None,
+    }
+}
+
 /// Spawns a shell on a PTY with the given size.
 pub fn spawn(cmd: ShellCommand, size: PtySize) -> Result<(PtyWriter, PtyReader), PtyError> {
     spawn_in_directory(cmd, size, None)

@@ -17,7 +17,7 @@ button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
 
 #app {
-  display: grid; height: var(--app-h, 100dvh); margin-top: var(--vv-offset-top, 0px);
+  display: grid; height: var(--app-h, 100dvh); transform: translateY(var(--vv-offset-top, 0px));
   grid-template: "side term diff chg" minmax(0, 1fr) "bar bar bar bar" auto / var(--w-side) minmax(18rem, var(--w-term)) minmax(0, 1fr) var(--w-chg);
 }
 #app.nodiff { grid-template-columns: var(--w-side) minmax(0, 1fr) 0 var(--w-chg); }
@@ -63,6 +63,7 @@ h2 { margin: 0; font-size: 1.05rem; font-weight: 650; letter-spacing: -.005em; }
 .xterm-viewport { background: transparent !important; }
 .empty { position: absolute; inset: 0; margin: 0; display: grid; align-content: center; gap: .4rem; padding: 2rem; color: var(--mute); background: radial-gradient(var(--line) 1px, transparent 1px) 0 0 / 18px 18px; }
 .empty b { color: var(--fg); font-size: 1.7rem; font-weight: 600; letter-spacing: -.02em; line-height: 1; }
+.empty-narrow { display: none; }
 #panes.has .empty { display: none; }
 
 #diff { height: calc(100% - 2.6rem); overflow: auto; font: 400 12.5px/1.5 var(--mono); }
@@ -206,6 +207,8 @@ dialog:has(#k-ssh:checked) #ssh { display: block; }
   #side { position: fixed; top: 0; bottom: 0; left: 0; z-index: 20; width: min(20rem, 88vw); background: var(--bg); border-right: 1px solid var(--mute); box-shadow: 10px 0 30px #000a; transform: translateX(-105%); transition: transform .25s cubic-bezier(.3, .9, .3, 1); }
   #app.show-side #side { transform: none; }
   #sp, #fs, #off { display: none; }
+  .empty-wide { display: none; }
+  .empty-narrow { display: inline; }
   #bar { gap: .6rem; } .link { width: 1.2rem; } .node { max-width: 4.5rem; }
 }
 /* the Sessions button only matters when the sidebar itself is a drawer */

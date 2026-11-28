@@ -51,6 +51,8 @@ export interface Composer {
   focus(): void;
   /** Focuses the raw-mode keyboard proxy (phone) or composer when active. */
   focusRaw(): void;
+  /** Clears any latched sticky modifier keys (e.g. sticky Ctrl across tab switches). */
+  clearStickyModifiers(): void;
   isScrollLocked(): boolean;
   destroy(): void;
   hasFocus(): boolean;
@@ -501,6 +503,10 @@ export function createComposer(opts: ComposerOptions): Composer {
       scheduleLiveComplete(20);
     },
     onShiftEnter: () => {
+      if (root.dataset.raw === "1") {
+        opts.send("\n");
+        return;
+      }
       const start = ta.selectionStart ?? ta.value.length;
       const end = ta.selectionEnd ?? start;
       const next = ta.value.slice(0, start) + "\n" + ta.value.slice(end);
@@ -553,6 +559,9 @@ export function createComposer(opts: ComposerOptions): Composer {
     },
     focusRaw() {
       kbd.focusActiveInput();
+    },
+    clearStickyModifiers() {
+      kbd.clearCtrl();
     },
     isScrollLocked() {
       return kbd.isScrollLocked();

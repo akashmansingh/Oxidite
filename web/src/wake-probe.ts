@@ -15,11 +15,12 @@ export interface WakeProbeOptions {
 
 export interface WakeProbeHandle {
   notifyPongReceived: () => void;
+  notifyTrafficReceived: () => void;
   destroy: () => void;
 }
 
 export function installWakeProbe(opts: WakeProbeOptions): WakeProbeHandle {
-  const deadlineMs = opts.deadlineMs ?? 2000;
+  const deadlineMs = opts.deadlineMs ?? 4000;
   let pendingTimer: number | null = null;
 
   const clearPending = () => {
@@ -31,6 +32,9 @@ export function installWakeProbe(opts: WakeProbeOptions): WakeProbeHandle {
 
   const probe = () => {
     clearPending();
+    if (document.visibilityState !== "visible") {
+      return;
+    }
     if (!opts.isSocketOpen()) {
       opts.reconnectNow();
       return;
@@ -51,6 +55,8 @@ export function installWakeProbe(opts: WakeProbeOptions): WakeProbeHandle {
   const onVisibility = () => {
     if (document.visibilityState === "visible") {
       probe();
+    } else {
+      clearPending();
     }
   };
 
@@ -59,6 +65,7 @@ export function installWakeProbe(opts: WakeProbeOptions): WakeProbeHandle {
 
   return {
     notifyPongReceived: clearPending,
+    notifyTrafficReceived: clearPending,
     destroy: () => {
       clearPending();
       window.removeEventListener("online", onOnline);

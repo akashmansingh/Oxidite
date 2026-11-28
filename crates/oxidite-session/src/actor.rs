@@ -7,8 +7,9 @@ use oxidite_proto::{
 use oxidite_vt::terminal::Terminal;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 
 pub const HIGH_WATERMARK: usize = 1024 * 1024; // 1 MiB
 pub const LOW_WATERMARK: usize = 256 * 1024; // 256 KiB
@@ -17,7 +18,7 @@ pub const LOW_WATERMARK: usize = 256 * 1024; // 256 KiB
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 pub const WRITER_ACK_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(25);
 
-pub type ExitHook = Arc<dyn Fn(SessionId) + Send + Sync>;
+pub type ExitHook = Arc<dyn Fn(SessionId, SessionState) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
@@ -52,6 +53,14 @@ pub struct SessionActor {
     pub active_cwd: Option<std::path::PathBuf>,
     last_os_cwd: Option<std::path::PathBuf>,
     last_osc_cwd: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentContext {
+    pub shell_pid: Option<u32>,
+    pub title: String,
+    pub cwd: Option<std::path::PathBuf>,
+    pub shell_kind: Option<&'static str>,
 }
 
 pub enum ActorCmd {
@@ -93,7 +102,7 @@ pub enum ActorCmd {
         resp: oneshot::Sender<Option<std::path::PathBuf>>,
     },
     GetAgentContext {
-        resp: oneshot::Sender<(Option<u32>, String, Option<std::path::PathBuf>)>,
+        resp: oneshot::Sender<AgentContext>,
     },
 }
 
@@ -212,9 +221,17 @@ impl SessionActor {
             state: self.state.clone(),
         });
 
-        let mut watchdog_tick = tokio::time::interval(Duration::from_secs(5));
+        let watchdog_period = self
+            .ack_watchdog_timeout
+            .min(Duration::from_secs(5))
+            .max(Duration::from_millis(10));
+        let mut watchdog_tick = tokio::time::interval(watchdog_period);
         watchdog_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut idle_tick = tokio::time::interval(Duration::from_secs(60));
+        let idle_period = self
+            .idle_timeout
+            .min(Duration::from_secs(60))
+            .max(Duration::from_millis(10));
+        let mut idle_tick = tokio::time::interval(idle_period);
         idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -237,12 +254,26 @@ impl SessionActor {
                 _ = idle_tick.tick() => {
                     if self.clients.is_empty() && self.last_activity_at.elapsed() >= self.idle_timeout {
                         let _ = self.backend.kill().await;
-                        self.state = SessionState::Exited { code: None };
+                        self.state = SessionState::Failed {
+                            reason: "Idle timeout exceeded".into(),
+                        };
+                        let _ = self.client_tx.send(ServerMsg::State {
+                            session: self.id,
+                            state: self.state.clone(),
+                        });
                         let _ = self.client_tx.send(ServerMsg::Exit { code: None });
                         break;
                     }
                 }
-                Some(cmd) = self.receiver.recv() => {
+                cmd_opt = self.receiver.recv() => {
+                    let Some(cmd) = cmd_opt else {
+                        let _ = self.backend.kill().await;
+                        if !self.state.is_terminal() {
+                            self.state = SessionState::Exited { code: None };
+                            let _ = self.client_tx.send(ServerMsg::Exit { code: None });
+                        }
+                        break;
+                    };
                     match cmd {
                         ActorCmd::Attach { mode, last_offset, client_id, resp } => {
                             self.detached_at = None;
@@ -255,11 +286,18 @@ impl SessionActor {
                                     state: self.state.clone(),
                                 });
                             }
-                            let cid = client_id.unwrap_or_else(|| {
-                                let id = self.next_client_id;
-                                self.next_client_id += 1;
-                                id
-                            });
+                            let cid = match client_id {
+                                Some(id) => {
+                                    self.next_client_id =
+                                        self.next_client_id.max(id.saturating_add(1));
+                                    id
+                                }
+                                None => {
+                                    let id = self.next_client_id;
+                                    self.next_client_id = self.next_client_id.saturating_add(1);
+                                    id
+                                }
+                            };
 
                             let actual_mode = match mode {
                                 AttachMode::Writer => {
@@ -431,17 +469,25 @@ impl SessionActor {
                         }
                         ActorCmd::GetAgentContext { resp } => {
                             let cwd = self.sync_cwd();
-                            let _ = resp.send((
-                                self.backend.shell_pid(),
-                                self.terminal.title.clone(),
+                            let _ = resp.send(AgentContext {
+                                shell_pid: self.backend.shell_pid(),
+                                title: self.terminal.title.clone(),
                                 cwd,
-                            ));
+                                shell_kind: self.backend.shell_kind(),
+                            });
                         }
                     }
                 }
                 // Invariant: Flow control throttles ONLY when an active writer exceeds high_watermark.
                 // Detached or viewer-only sessions drain freely without deadlocking background shells.
-                Some(event) = backend_events.recv(), if self.active_writer.is_none() || self.writer_unacked_bytes < self.high_watermark => {
+                event_opt = backend_events.recv(), if self.active_writer.is_none() || self.writer_unacked_bytes < self.high_watermark => {
+                    let Some(event) = event_opt else {
+                        if !self.state.is_terminal() {
+                            self.state = SessionState::Exited { code: None };
+                            let _ = self.client_tx.send(ServerMsg::Exit { code: None });
+                        }
+                        break;
+                    };
                     match event {
                         BackendEvent::Output(bytes) => {
                             self.last_activity_at = Instant::now();
@@ -490,11 +536,10 @@ impl SessionActor {
                         }
                     }
                 }
-                else => break,
             }
         }
         if let Some(hook) = self.on_exit.take() {
-            hook(self.id);
+            hook(self.id, self.state);
         }
     }
 }
@@ -509,6 +554,7 @@ mod tests {
         _tx: mpsc::Sender<BackendEvent>,
         rx: Option<mpsc::Receiver<BackendEvent>>,
         killed: Arc<std::sync::atomic::AtomicBool>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
     }
 
     impl DummyBackend {
@@ -524,6 +570,7 @@ mod tests {
                     _tx: tx.clone(),
                     rx: Some(rx),
                     killed: killed.clone(),
+                    written: Arc::new(std::sync::Mutex::new(Vec::new())),
                 },
                 tx,
                 killed,
@@ -533,7 +580,8 @@ mod tests {
 
     #[async_trait]
     impl Backend for DummyBackend {
-        async fn write(&mut self, _bytes: &[u8]) -> Result<()> {
+        async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+            self.written.lock().unwrap().extend_from_slice(bytes);
             Ok(())
         }
         async fn resize(&mut self, _size: TermSize) -> Result<()> {
@@ -548,9 +596,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn writer_handoff_and_detach_reset_backpressure() {
         let (backend, btx, _) = DummyBackend::new();
+        let written = backend.written.clone();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let sid = SessionId::new_v4();
         let (mut actor, _) = SessionActor::new(
@@ -562,13 +611,13 @@ mod tests {
         actor.high_watermark = 64;
         tokio::spawn(actor.run());
 
-        // 1. Writer attaches and hits high watermark
+        // 1. Writer 101 attaches and exceeds high watermark -> backend reads pause
         let (rtx, rrx) = oneshot::channel();
         cmd_tx
             .send(ActorCmd::Attach {
                 mode: AttachMode::Writer,
                 last_offset: None,
-                client_id: Some(1),
+                client_id: Some(101),
                 resp: rtx,
             })
             .await
@@ -578,62 +627,110 @@ mod tests {
         btx.send(BackendEvent::Output(vec![b'a'; 128]))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::task::yield_now().await;
+        btx.send(BackendEvent::Output(b"blocked_while_stalled".to_vec()))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
 
-        // 2. Detach active writer -> backpressure resets immediately and output drains
+        // While Writer 101 is still stalled, Viewer 102 snapshot must NOT contain "blocked_while_stalled"
+        let (vtx, vrx) = oneshot::channel();
         cmd_tx
-            .send(ActorCmd::Detach { client_id: Some(1) })
+            .send(ActorCmd::Attach {
+                mode: AttachMode::Viewer,
+                last_offset: None,
+                client_id: Some(102),
+                resp: vtx,
+            })
             .await
             .unwrap();
-        btx.send(BackendEvent::Output(b"after_detach".to_vec()))
-            .await
-            .unwrap();
+        let viewer = vrx.await.unwrap();
+        let viewer_snap = String::from_utf8_lossy(&viewer.snapshot.unwrap()).into_owned();
+        assert!(
+            !viewer_snap.contains("blocked_while_stalled"),
+            "backend should stay throttled while Writer 101 is stalled"
+        );
 
-        let mut drained = false;
-        let mut last_snap = String::new();
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(15)).await;
-            let (vtx, vrx) = oneshot::channel();
-            cmd_tx
-                .send(ActorCmd::Attach {
-                    mode: AttachMode::Viewer,
-                    last_offset: None,
-                    client_id: None,
-                    resp: vtx,
-                })
-                .await
-                .unwrap();
-            let attached_v = vrx.await.unwrap();
-            let snap = String::from_utf8_lossy(&attached_v.snapshot.unwrap()).into_owned();
-            if snap.contains("after_detach") {
-                drained = true;
-                break;
-            }
-            last_snap = snap;
-        }
-        assert!(drained, "expected drained output, got {last_snap:?}");
-
+        // 2. Direct Writer handoff to client 103 WITHOUT detaching 101 resets backpressure immediately
         let (rtx2, rrx2) = oneshot::channel();
         cmd_tx
             .send(ActorCmd::Attach {
                 mode: AttachMode::Writer,
                 last_offset: None,
-                client_id: Some(2),
+                client_id: Some(103),
                 resp: rtx2,
             })
             .await
             .unwrap();
-        let attached2 = rrx2.await.unwrap();
-        let snap2 = String::from_utf8_lossy(&attached2.snapshot.unwrap()).into_owned();
+        let mut attached2 = rrx2.await.unwrap();
+        tokio::task::yield_now().await;
+        let drained_msg =
+            tokio::time::timeout(Duration::from_millis(50), attached2.rx.recv()).await;
+        assert!(
+            matches!(
+                drained_msg,
+                Ok(Ok(ServerMsg::Output { ref bytes, .. })) if String::from_utf8_lossy(bytes).contains("blocked_while_stalled")
+            ),
+            "expected blocked output to drain immediately on direct writer handoff, got {drained_msg:?}"
+        );
+
+        // Demoted Writer 101 input is rejected while Writer 103 input succeeds
+        cmd_tx
+            .send(ActorCmd::Input {
+                client_id: Some(101),
+                bytes: b"stale".to_vec(),
+            })
+            .await
+            .unwrap();
+        cmd_tx
+            .send(ActorCmd::Input {
+                client_id: Some(103),
+                bytes: b"fresh".to_vec(),
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(&*written.lock().unwrap(), b"fresh");
+
+        // 3. Stall Writer 103 and then Detach -> backpressure resets immediately
+        btx.send(BackendEvent::Output(vec![b'b'; 128]))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        cmd_tx
+            .send(ActorCmd::Detach {
+                client_id: Some(103),
+            })
+            .await
+            .unwrap();
+        btx.send(BackendEvent::Output(b"after_detach".to_vec()))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(20)).await;
+        tokio::task::yield_now().await;
+
+        let (vtx2, vrx2) = oneshot::channel();
+        cmd_tx
+            .send(ActorCmd::Attach {
+                mode: AttachMode::Viewer,
+                last_offset: None,
+                client_id: Some(104),
+                resp: vtx2,
+            })
+            .await
+            .unwrap();
+        let viewer2 = vrx2.await.unwrap();
+        let snap2 = String::from_utf8_lossy(&viewer2.snapshot.unwrap()).into_owned();
         assert!(
             snap2.contains("after_detach"),
-            "expected writer attach snapshot to preserve drained output, got {snap2:?}"
+            "expected output to drain after writer detach, got {snap2:?}"
         );
 
         cmd_tx.send(ActorCmd::Kill).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn writer_ack_watchdog_demotes_stalled_writer() {
         let (backend, btx, _) = DummyBackend::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
@@ -645,7 +742,6 @@ mod tests {
             cmd_rx,
         );
         actor.high_watermark = 16;
-        actor.ack_watchdog_timeout = Duration::from_millis(50);
         tokio::spawn(actor.run());
 
         let (rtx, rrx) = oneshot::channel();
@@ -663,43 +759,150 @@ mod tests {
         btx.send(BackendEvent::Output(vec![b'x'; 32]))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        // Let the actor ingest the output and arm `stalled_since` at t=0 before advancing virtual time.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
 
         let (wtx, wrx) = oneshot::channel();
         cmd_tx
             .send(ActorCmd::GetActiveWriter { resp: wtx })
             .await
             .unwrap();
-        assert_eq!(wrx.await.unwrap(), None);
+        assert_eq!(wrx.await.unwrap(), Some(9));
+
+        // Advancing past WRITER_ACK_WATCHDOG_TIMEOUT (25s) triggers demotion
+        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::task::yield_now().await;
+
+        let (wtx2, wrx2) = oneshot::channel();
+        cmd_tx
+            .send(ActorCmd::GetActiveWriter { resp: wtx2 })
+            .await
+            .unwrap();
+        assert_eq!(wrx2.await.unwrap(), None);
 
         cmd_tx.send(ActorCmd::Kill).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn idle_suspension_triggers_only_after_inactivity_when_detached() {
         let (backend, _btx, killed) = DummyBackend::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let sid = SessionId::new_v4();
-        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let exited_hook = exited.clone();
+        let exit_state = Arc::new(std::sync::Mutex::new(None));
+        let exit_hook_state = exit_state.clone();
         let (mut actor, _) = SessionActor::new(
             sid,
             TermSize { rows: 24, cols: 80 },
             Box::new(backend),
             cmd_rx,
         );
-        actor.idle_timeout = Duration::from_secs(3600);
-        let actor = actor.with_on_exit(Arc::new(move |_| {
-            exited_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+        actor.idle_timeout = Duration::from_secs(120);
+        let actor = actor.with_on_exit(Arc::new(move |_, st| {
+            *exit_hook_state.lock().unwrap() = Some(st);
         }));
         tokio::spawn(actor.run());
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(!killed.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(!exited.load(std::sync::atomic::Ordering::SeqCst));
+        // 1. With an attached client, advancing past idle_timeout MUST NOT kill the session
+        let (rtx, rrx) = oneshot::channel();
+        cmd_tx
+            .send(ActorCmd::Attach {
+                mode: AttachMode::Writer,
+                last_offset: None,
+                client_id: Some(1),
+                resp: rtx,
+            })
+            .await
+            .unwrap();
+        let mut rx = rrx.await.unwrap().rx;
 
-        cmd_tx.send(ActorCmd::Kill).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::advance(Duration::from_secs(180)).await;
+        tokio::task::yield_now().await;
+        assert!(!killed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(exit_state.lock().unwrap().is_none());
+
+        // 2. Detach client; before idle_timeout elapses, session stays alive
+        cmd_tx
+            .send(ActorCmd::Detach { client_id: Some(1) })
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
+        assert!(!killed.load(std::sync::atomic::Ordering::SeqCst));
+
+        // 3. Advance past remaining idle_timeout -> real idle suspension kills & sets distinct Failed reason
+        tokio::time::advance(Duration::from_secs(120)).await;
+        tokio::task::yield_now().await;
+        assert!(killed.load(std::sync::atomic::Ordering::SeqCst));
+        let recorded = exit_state.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            Some(SessionState::Failed {
+                reason: "Idle timeout exceeded".into(),
+            })
+        );
+
+        let mut saw_idle_reason = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::State {
+                state: SessionState::Failed { reason },
+                ..
+            } = msg
+                && reason.contains("Idle timeout")
+            {
+                saw_idle_reason = true;
+            }
+        }
+        assert!(saw_idle_reason);
+    }
+
+    #[tokio::test]
+    async fn actor_exits_when_backend_channel_closes_with_attached_client() {
+        let (mut backend, btx, _) = DummyBackend::new();
+        // Drop the internal copy kept on DummyBackend so dropping `btx` actually closes the channel!
+        let (_dummy_tx, fresh_rx) = mpsc::channel(8);
+        backend._tx = _dummy_tx;
+        drop(fresh_rx);
+        let (tx2, rx2) = mpsc::channel(8);
+        backend.rx = Some(rx2);
+        drop(btx);
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+        let sid = SessionId::new_v4();
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exited_hook = exited.clone();
+        let (actor, _) = SessionActor::new(
+            sid,
+            TermSize { rows: 24, cols: 80 },
+            Box::new(backend),
+            cmd_rx,
+        );
+        let actor = actor.with_on_exit(Arc::new(move |_, _| {
+            exited_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let handle = tokio::spawn(actor.run());
+
+        // Attach a client so `self.clients` is NOT empty
+        let (rtx, rrx) = oneshot::channel();
+        cmd_tx
+            .send(ActorCmd::Attach {
+                mode: AttachMode::Writer,
+                last_offset: None,
+                client_id: Some(1),
+                resp: rtx,
+            })
+            .await
+            .unwrap();
+        let _ = rrx.await.unwrap();
+
+        // Close backend channel
+        drop(tx2);
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("actor should terminate cleanly when backend channel closes")
+            .unwrap();
         assert!(exited.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

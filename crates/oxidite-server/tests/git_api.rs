@@ -46,6 +46,32 @@ async fn http_get(addr: std::net::SocketAddr, path: &str, token: &str) -> (u16, 
     (status, body.to_string())
 }
 
+async fn http_post(
+    addr: std::net::SocketAddr,
+    path: &str,
+    token: &str,
+    body_json: serde_json::Value,
+) -> (u16, String) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let payload = body_json.to_string();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        payload.len(),
+        payload
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
+    (status, body.to_string())
+}
+
 fn init_temp_repo(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     let run = |args: &[&str]| {
@@ -73,7 +99,7 @@ fn init_temp_repo(dir: &Path) {
 
 #[tokio::test]
 async fn test_git_api_session_cwd_spaces_and_path_traversal_protection() {
-    let temp_root = std::env::temp_dir().join(format!("oxidite-git-test-{}", std::process::id()));
+    let temp_root = std::env::temp_dir().join(format!("oxidite-git-test-{}", uuid::Uuid::new_v4()));
     let repo_dir = temp_root.join("repo");
     let non_repo_dir = temp_root.join("plain");
     let _ = std::fs::remove_dir_all(&temp_root);
@@ -269,16 +295,21 @@ async fn test_git_api_session_cwd_spaces_and_path_traversal_protection() {
 
 #[tokio::test]
 async fn test_git_api_enforces_workspace_roots_isolation() {
-    let temp_root = std::env::temp_dir().join(format!("oxidite-git-jail-{}", std::process::id()));
+    let temp_root = std::env::temp_dir().join(format!("oxidite-git-jail-{}", uuid::Uuid::new_v4()));
     let allowed_dir = temp_root.join("allowed");
+    let sibling_prefix_repo = temp_root.join("allowed_evil");
     let outside_repo = temp_root.join("outside_repo");
     let _ = std::fs::remove_dir_all(&temp_root);
     std::fs::create_dir_all(&allowed_dir).unwrap();
+    init_temp_repo(&sibling_prefix_repo);
     init_temp_repo(&outside_repo);
 
     let manager = SessionManager::new();
     let outside_sid = uuid::Uuid::new_v4();
+    let prefix_sid = uuid::Uuid::new_v4();
+    let missing_sid = uuid::Uuid::new_v4();
     manager.set_cwd(outside_sid, outside_repo.clone());
+    manager.set_cwd(prefix_sid, sibling_prefix_repo.clone());
 
     let (mut state, token) = test_state(manager);
     state.security.workspace_roots = vec![allowed_dir.clone()];
@@ -289,20 +320,65 @@ async fn test_git_api_enforces_workspace_roots_isolation() {
         axum::serve(listener, create_app(state)).await.unwrap();
     });
 
-    let (status, _) = http_get(
+    for sid in [outside_sid, prefix_sid] {
+        let (status, _) = http_get(addr, &format!("/api/git/changes?session={sid}"), &token).await;
+        assert_eq!(status, 403);
+
+        let (diff_st, _) = http_get(
+            addr,
+            &format!("/api/git/diff?session={sid}&path=file%20with%20spaces.txt"),
+            &token,
+        )
+        .await;
+        assert_eq!(diff_st, 403);
+
+        let (pull_st, _) = http_post(
+            addr,
+            "/api/git/pull",
+            &token,
+            serde_json::json!({ "session": sid.to_string() }),
+        )
+        .await;
+        assert_eq!(pull_st, 403);
+
+        let (push_st, _) = http_post(
+            addr,
+            "/api/git/push",
+            &token,
+            serde_json::json!({ "session": sid.to_string() }),
+        )
+        .await;
+        assert_eq!(push_st, 403);
+
+        let (commit_st, _) = http_post(
+            addr,
+            "/api/git/commit",
+            &token,
+            serde_json::json!({ "session": sid.to_string(), "message": "blocked", "mode": "tracked" }),
+        )
+        .await;
+        assert_eq!(commit_st, 403);
+    }
+
+    // Missing/unknown session returns 404 on pull/push as well
+    let (missing_pull_st, _) = http_post(
         addr,
-        &format!("/api/git/changes?session={outside_sid}"),
+        "/api/git/pull",
         &token,
+        serde_json::json!({ "session": missing_sid.to_string() }),
     )
     .await;
-    assert_eq!(status, 403);
+    assert_eq!(missing_pull_st, 404);
+
+    let (empty_pull_st, _) = http_post(addr, "/api/git/pull", &token, serde_json::json!({})).await;
+    assert_eq!(empty_pull_st, 400);
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
 
 #[tokio::test]
 async fn test_git_pull_push_and_ahead_behind_against_bare_remote() {
-    let temp_root = std::env::temp_dir().join(format!("oxidite-git-net-{}", std::process::id()));
+    let temp_root = std::env::temp_dir().join(format!("oxidite-git-net-{}", uuid::Uuid::new_v4()));
     let bare_dir = temp_root.join("bare.git");
     let local_dir = temp_root.join("local");
     let peer_dir = temp_root.join("peer");
@@ -413,6 +489,38 @@ async fn test_git_pull_push_and_ahead_behind_against_bare_remote() {
     // Verify bare repo now has the pushed commit and peer pulls it cleanly.
     run_git(&peer_dir, &["pull", "--ff-only"]);
     assert!(peer_dir.join("local.txt").exists());
+
+    // 4. Diverged branch: peer pushes a commit and local makes a different unpushed commit.
+    // `--ff-only` pull MUST fail cleanly with 400 and leave no partial merge state.
+    std::fs::write(peer_dir.join("peer_diverge.txt"), "peer branch\n").unwrap();
+    run_git(&peer_dir, &["add", "peer_diverge.txt"]);
+    run_git(&peer_dir, &["commit", "-m", "peer diverges"]);
+    run_git(&peer_dir, &["push", "origin", "main"]);
+
+    std::fs::write(local_dir.join("local_diverge.txt"), "local branch\n").unwrap();
+    run_git(&local_dir, &["add", "local_diverge.txt"]);
+    run_git(&local_dir, &["commit", "-m", "local diverges"]);
+    run_git(&local_dir, &["fetch", "origin"]);
+
+    let (div_chg_st, div_chg_body) =
+        http_get(addr, &format!("/api/git/changes?session={sid}"), &token).await;
+    assert_eq!(div_chg_st, 200);
+    let div_chg: serde_json::Value = serde_json::from_str(&div_chg_body).unwrap();
+    assert_eq!(div_chg["ahead"], 1, "expected ahead=1, got {div_chg}");
+    assert_eq!(div_chg["behind"], 1, "expected behind=1, got {div_chg}");
+
+    let (div_pull_st, div_pull_body) = http_post(
+        addr,
+        "/api/git/pull",
+        &token,
+        serde_json::json!({ "session": sid.to_string() }),
+    )
+    .await;
+    assert_eq!(
+        div_pull_st, 400,
+        "diverged --ff-only pull must fail cleanly with 400, got {div_pull_st}: {div_pull_body}"
+    );
+    assert!(!local_dir.join(".git").join("MERGE_HEAD").exists());
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }

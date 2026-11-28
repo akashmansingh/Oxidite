@@ -97,26 +97,3 @@
   background: #12151b;
   color: #a1a1aa;
 }
-
-/* Agentic CLI tab badge + logo */
-.tab-logo {
-  width: 15px;
-  height: 15px;
-  object-fit: contain;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-
-.tab-logo-fallback {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  background: #27272a;
-  color: #f97316;
-  font-size: 10px;
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}

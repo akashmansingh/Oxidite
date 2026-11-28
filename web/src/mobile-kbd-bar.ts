@@ -19,6 +19,7 @@ export interface MobileKbdBarHandle {
   element: HTMLElement;
   rawProxy: HTMLTextAreaElement;
   isCtrlLatched: () => boolean;
+  clearCtrl: () => void;
   isScrollLocked: () => boolean;
   setScrollLocked: (locked: boolean) => void;
   focusActiveInput: () => void;
@@ -101,7 +102,9 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
     btn.className = "kbd-btn";
     btn.textContent = label;
     btn.title = title;
-    btn.tabIndex = -1;
+    btn.setAttribute("aria-label", title);
+
+    let pointerHandled = false;
 
     const stopRepeat = () => {
       if (repeatTimer !== null) {
@@ -117,6 +120,7 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
     // Prevent soft-keyboard blur on touch/mouse press
     btn.addEventListener("pointerdown", (e) => {
       e.preventDefault();
+      pointerHandled = true;
       if (scrollLocked && btn !== lockBtn) return;
       onTrigger();
       if (repeatable) {
@@ -133,6 +137,17 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
       }
     });
 
+    // Keyboard activation (Enter/Space) and screen-reader clicks fire `click` without `pointerdown`
+    btn.addEventListener("click", (e) => {
+      if (pointerHandled) {
+        pointerHandled = false;
+        return;
+      }
+      e.preventDefault();
+      if (scrollLocked && btn !== lockBtn) return;
+      onTrigger();
+    });
+
     btn.addEventListener("pointerup", stopRepeat);
     btn.addEventListener("pointercancel", stopRepeat);
     btn.addEventListener("pointerleave", stopRepeat);
@@ -140,26 +155,32 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
     return btn;
   }
 
+  const runUnlatchingAction = (fn: () => void) => () => {
+    if (ctrlLatched) setCtrlLatched(false);
+    fn();
+  };
+
   // Fixed action buttons
   fixedRow.append(
-    makeFixedButton("Tab", "Send Tab", () => opts.sendRaw("\t")),
+    makeFixedButton("Tab", "Send Tab", runUnlatchingAction(() => opts.sendRaw("\t"))),
     ctrlBtn,
-    makeFixedButton("^C", "Send Ctrl+C (SIGINT)", () => {
-      setCtrlLatched(false);
-      opts.sendRaw("\x03");
-    }),
-    makeFixedButton("Esc", "Send Escape", () => opts.sendRaw("\x1b")),
-    makeFixedButton("⇧↵", "Shift+Enter (newline)", () => {
-      if (opts.onShiftEnter) {
-        opts.onShiftEnter();
-      } else {
-        opts.insertText("\n");
-      }
-    }),
-    makeFixedButton("↑", "Arrow Up", () => opts.sendRaw("\x1b[A"), true),
-    makeFixedButton("↓", "Arrow Down", () => opts.sendRaw("\x1b[B"), true),
-    makeFixedButton("←", "Arrow Left", () => opts.sendRaw("\x1b[D"), true),
-    makeFixedButton("→", "Arrow Right", () => opts.sendRaw("\x1b[C"), true)
+    makeFixedButton("^C", "Send Ctrl+C (SIGINT)", runUnlatchingAction(() => opts.sendRaw("\x03"))),
+    makeFixedButton("Esc", "Send Escape", runUnlatchingAction(() => opts.sendRaw("\x1b"))),
+    makeFixedButton(
+      "⇧↵",
+      "Shift+Enter (newline)",
+      runUnlatchingAction(() => {
+        if (opts.onShiftEnter) {
+          opts.onShiftEnter();
+        } else {
+          opts.insertText("\n");
+        }
+      }),
+    ),
+    makeFixedButton("↑", "Arrow Up", runUnlatchingAction(() => opts.sendRaw("\x1b[A")), true),
+    makeFixedButton("↓", "Arrow Down", runUnlatchingAction(() => opts.sendRaw("\x1b[B")), true),
+    makeFixedButton("←", "Arrow Left", runUnlatchingAction(() => opts.sendRaw("\x1b[D")), true),
+    makeFixedButton("→", "Arrow Right", runUnlatchingAction(() => opts.sendRaw("\x1b[C")), true)
   );
 
   // Paste button: invokes navigator.clipboard.readText() synchronously in click/pointerup
@@ -169,10 +190,11 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
   pasteBtn.className = "kbd-btn";
   pasteBtn.textContent = "Paste";
   pasteBtn.title = "Paste from clipboard";
-  pasteBtn.tabIndex = -1;
+  pasteBtn.setAttribute("aria-label", "Paste from clipboard");
   pasteBtn.addEventListener("mousedown", (e) => e.preventDefault());
   pasteBtn.addEventListener("click", (e) => {
     e.preventDefault();
+    if (ctrlLatched) setCtrlLatched(false);
     if (scrollLocked || !navigator.clipboard?.readText) return;
     navigator.clipboard
       .readText()
@@ -198,34 +220,53 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
     chip.type = "button";
     chip.className = "kbd-btn kbd-chip";
     chip.textContent = sym;
-    chip.tabIndex = -1;
+    chip.title = `Insert ${sym}`;
+    chip.setAttribute("aria-label", `Insert ${sym}`);
 
     let startX = 0;
     let startY = 0;
     let activePointerId: number | null = null;
+    let suppressNextClick = false;
+
+    const triggerChip = () => {
+      if (scrollLocked) return;
+      if (ctrlLatched) setCtrlLatched(false);
+      if (opts.isRawMode?.()) {
+        opts.sendRaw(sym);
+      } else {
+        opts.insertText(sym);
+      }
+      focusActiveInput();
+    };
 
     chip.addEventListener("mousedown", (e) => e.preventDefault());
     chip.addEventListener("pointerdown", (e) => {
       activePointerId = e.pointerId;
       startX = e.clientX;
       startY = e.clientY;
+      suppressNextClick = false;
     });
     chip.addEventListener("pointerup", (e) => {
       if (activePointerId !== e.pointerId) return;
       activePointerId = null;
+      suppressNextClick = true;
       const dx = Math.abs(e.clientX - startX);
       const dy = Math.abs(e.clientY - startY);
-      if (dx < 8 && dy < 8 && !scrollLocked) {
-        if (opts.isRawMode?.()) {
-          opts.sendRaw(sym);
-        } else {
-          opts.insertText(sym);
-        }
-        focusActiveInput();
+      if (dx < 8 && dy < 8) {
+        triggerChip();
       }
     });
     chip.addEventListener("pointercancel", () => {
       activePointerId = null;
+      suppressNextClick = false;
+    });
+    chip.addEventListener("click", (e) => {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
+      e.preventDefault();
+      triggerChip();
     });
 
     symbolStrip.append(chip);
@@ -237,39 +278,52 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
   // composition where beforeinput.preventDefault() is ignored).
   const attachCtrlInterceptor = (el: HTMLTextAreaElement, isProxy: boolean) => {
     let handledInBeforeInput = false;
+    let isComposing = false;
+
+    const processCommittedCtrlOrFlush = (inserted: string): boolean => {
+      if (!ctrlLatched) return false;
+      setCtrlLatched(false);
+      const ctrlByte = applyStickyCtrl(inserted);
+      if (!ctrlByte) return false;
+      if (isProxy) {
+        el.value = "";
+      } else {
+        const pos = el.selectionStart ?? el.value.length;
+        if (pos > 0) {
+          el.value = el.value.slice(0, pos - 1) + el.value.slice(pos);
+          el.setSelectionRange(pos - 1, pos - 1);
+        }
+      }
+      opts.sendRaw(ctrlByte);
+      return true;
+    };
 
     const onBeforeInput = (e: InputEvent) => {
       handledInBeforeInput = false;
       if (!ctrlLatched || !e.data || e.data.length === 0) return;
 
-      const ctrlByte = applyStickyCtrl(e.data);
-      if (!ctrlByte) return;
+      if (e.isComposing || isComposing) return;
 
-      if (!e.isComposing && e.cancelable) {
+      const ctrlByte = applyStickyCtrl(e.data);
+      if (e.cancelable && ctrlByte) {
         e.preventDefault();
         handledInBeforeInput = true;
         setCtrlLatched(false);
         opts.sendRaw(ctrlByte);
+      } else {
+        setCtrlLatched(false);
       }
     };
 
     const onInput = (e: Event) => {
       const ie = e as InputEvent;
+      if (ie.isComposing || isComposing) {
+        // Wait for compositionend so Android Gboard / IME composition is never garbled
+        return;
+      }
       if (ctrlLatched && !handledInBeforeInput) {
         const inserted = ie.data ?? el.value.slice(-1);
-        const ctrlByte = applyStickyCtrl(inserted);
-        if (ctrlByte) {
-          if (isProxy) {
-            el.value = "";
-          } else {
-            const pos = el.selectionStart ?? el.value.length;
-            if (pos > 0) {
-              el.value = el.value.slice(0, pos - 1) + el.value.slice(pos);
-              el.setSelectionRange(pos - 1, pos - 1);
-            }
-          }
-          setCtrlLatched(false);
-          opts.sendRaw(ctrlByte);
+        if (processCommittedCtrlOrFlush(inserted)) {
           return;
         }
       }
@@ -285,8 +339,33 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
       }
     };
 
+    const onCompositionStart = () => {
+      isComposing = true;
+    };
+
+    const onCompositionEnd = (e: CompositionEvent) => {
+      isComposing = false;
+      const committed = e.data || el.value;
+      if (ctrlLatched && committed && processCommittedCtrlOrFlush(committed)) {
+        return;
+      }
+      if (isProxy && el.value.length > 0) {
+        const payload = el.value;
+        el.value = "";
+        if (!scrollLocked) {
+          opts.sendRaw(payload);
+        }
+      }
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isProxy && !scrollLocked) {
+      if (
+        ctrlLatched &&
+        ["Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)
+      ) {
+        setCtrlLatched(false);
+      }
+      if (isProxy && !scrollLocked && !isComposing && !e.isComposing) {
         if (e.key === "Enter") {
           e.preventDefault();
           opts.sendRaw("\r");
@@ -299,11 +378,15 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
 
     el.addEventListener("beforeinput", onBeforeInput);
     el.addEventListener("input", onInput);
+    el.addEventListener("compositionstart", onCompositionStart);
+    el.addEventListener("compositionend", onCompositionEnd);
     el.addEventListener("keydown", onKeyDown);
 
     return () => {
       el.removeEventListener("beforeinput", onBeforeInput);
       el.removeEventListener("input", onInput);
+      el.removeEventListener("compositionstart", onCompositionStart);
+      el.removeEventListener("compositionend", onCompositionEnd);
       el.removeEventListener("keydown", onKeyDown);
     };
   };
@@ -315,6 +398,7 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
     element: bar,
     rawProxy,
     isCtrlLatched: () => ctrlLatched,
+    clearCtrl: () => setCtrlLatched(false),
     isScrollLocked: () => scrollLocked,
     setScrollLocked,
     focusActiveInput,
@@ -337,30 +421,51 @@ function configureMobileInputAttrs(el: HTMLTextAreaElement) {
 
 /**
  * Syncs `--app-h` and `--vv-offset-top` CSS variables with `window.visualViewport`
- * on BOTH `resize` and `scroll` so iOS Safari and Android Chrome keep `.composer`
- * and `.kbd-bar` pinned cleanly above the virtual keyboard.
+ * using `requestAnimationFrame` coalescing and equality checks to prevent iOS/Android
+ * scroll/animation jitter.
  */
 export function installVisualViewportSync(): () => void {
   const root = document.documentElement;
-  const update = () => {
+  let rafId = 0;
+  let lastH = "";
+  let lastTop = "";
+
+  const apply = () => {
+    rafId = 0;
     const vv = window.visualViewport;
-    if (!vv) {
-      root.style.setProperty("--app-h", `${window.innerHeight}px`);
-      root.style.setProperty("--vv-offset-top", "0px");
-      return;
+    const nextH = `${Math.round(vv ? vv.height : window.innerHeight)}px`;
+    const offset = vv && vv.offsetTop > 1 ? Math.round(vv.offsetTop) : 0;
+    const nextTop = `${offset}px`;
+    if (nextH !== lastH) {
+      lastH = nextH;
+      root.style.setProperty("--app-h", nextH);
     }
-    root.style.setProperty("--app-h", `${Math.round(vv.height)}px`);
-    root.style.setProperty("--vv-offset-top", `${Math.round(vv.offsetTop)}px`);
+    if (nextTop !== lastTop) {
+      lastTop = nextTop;
+      root.style.setProperty("--vv-offset-top", nextTop);
+    }
   };
 
-  update();
-  window.addEventListener("resize", update);
-  window.visualViewport?.addEventListener("resize", update);
-  window.visualViewport?.addEventListener("scroll", update);
+  const schedule = () => {
+    if (rafId) return;
+    if (typeof requestAnimationFrame === "function") {
+      rafId = requestAnimationFrame(apply);
+    } else {
+      apply();
+    }
+  };
+
+  apply();
+  window.addEventListener("resize", schedule);
+  window.visualViewport?.addEventListener("resize", schedule);
+  window.visualViewport?.addEventListener("scroll", schedule);
 
   return () => {
-    window.removeEventListener("resize", update);
-    window.visualViewport?.removeEventListener("resize", update);
-    window.visualViewport?.removeEventListener("scroll", update);
+    if (rafId && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(rafId);
+    }
+    window.removeEventListener("resize", schedule);
+    window.visualViewport?.removeEventListener("resize", schedule);
+    window.visualViewport?.removeEventListener("scroll", schedule);
   };
 }

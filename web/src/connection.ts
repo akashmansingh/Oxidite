@@ -12,6 +12,7 @@ export interface Handlers {
   created(id: string): void;
   error(msg: string): void;
   unauthorized?(): void;
+  presence?(writerId: string | null, viewersCount: number): void;
   exit(code: number | null): void;
 }
 
@@ -24,6 +25,7 @@ export class Connection {
   private attempt = 0;
   private done = false;
   private lastPong = 0;
+  private pendingPingAt: number | null = null;
   private pingT?: number;
   private ackT?: number;
   private acked = 0;
@@ -40,7 +42,7 @@ export class Connection {
         this.ws.send(pack("Ping", { nonce: Date.now() }));
       },
       reconnectNow: () => this.forceReconnect(),
-      deadlineMs: 2000,
+      deadlineMs: 4000,
     });
   }
 
@@ -52,6 +54,7 @@ export class Connection {
   resize(s: TermSize): void { this.tx(pack("Resize", s)); }
   trust(accept: boolean): void { this.tx(pack("HostKeyDecision", { accept })); }
   answer(answers: string[]): void { this.tx(pack("AuthResponse", { answers })); }
+  takeoverWriter(): void { this.tx(pack("TakeoverWriter")); }
   kill(): void { this.tx(pack("Kill")); }
   setToken(token: string): void { this.token = token; }
   reconnectNow(): void {
@@ -117,12 +120,20 @@ export class Connection {
   }
 
   private on(m: Msg): void {
+    this.lastPong = Date.now();
+    this.pendingPingAt = null;
+    this.wakeProbe.notifyTrafficReceived();
     switch (m.t) {
       case "Welcome":
-        this.attempt = 0; this.lastPong = Date.now(); this.h.link("ok"); this.h.error("");
+        this.attempt = 0; this.lastPong = Date.now(); this.pendingPingAt = null; this.h.link("ok"); this.h.error("");
         this.pingT = window.setInterval(() => {
-          if (Date.now() - this.lastPong > 35_000) { this.ws?.close(); return; }
-          this.tx(pack("Ping", { nonce: Date.now() }));
+          const now = Date.now();
+          if (this.pendingPingAt !== null && now - this.pendingPingAt > 20_000 && now - this.lastPong > 35_000) {
+            this.ws?.close();
+            return;
+          }
+          if (this.pendingPingAt === null) this.pendingPingAt = now;
+          this.tx(pack("Ping", { nonce: now }));
         }, 15_000);
         if (this.id) this.attach(); else this.tx(pack("Create", { backend: this.spec, size: this.size() }));
         break;
@@ -145,7 +156,14 @@ export class Connection {
       case "Title": this.h.title(m.v as string); break;
       case "Pong":
         this.lastPong = Date.now();
+        this.pendingPingAt = null;
         this.wakeProbe.notifyPongReceived();
+        break;
+      case "Presence":
+        this.h.presence?.(
+          typeof m.writer_id === "string" ? m.writer_id : null,
+          Number(m.viewers_count ?? 0),
+        );
         break;
       case "Exit":
         this.done = true;

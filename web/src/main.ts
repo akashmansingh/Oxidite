@@ -42,6 +42,7 @@ type Sess = {
   home_dir?: string | null;
   active_agent?: string | null;
   agent_label?: string | null;
+  shell_kind?: string | null;
 };
 type FileChg = { path: string; add: number; del: number; staged: boolean };
 const sessionCwds = new Map<string, string | null>();
@@ -68,6 +69,8 @@ interface Tab {
   homeDir: string | null;
   activeAgent: string | null;
   agentLabel: string | null;
+  shellKind: string | null;
+  hasWriterControl: boolean;
 }
 
 /** Git facts for the open session, shared by the changes panel and the input bar chips. */
@@ -130,7 +133,18 @@ function logEvent(tab: Tab, text: string): void {
   if (events[0]?.tab === tab && events[0].text === text) return;
   events.unshift({ at: new Date(), tab, text, b: tab.b });
   events.length = Math.min(events.length, 20);
-  renderActivity();
+  $("#msg").onclick = () => {
+  if (cur && !cur.hasWriterControl && cur.b !== "down") {
+    cur.conn.takeoverWriter();
+    cur.hasWriterControl = true;
+    cur.b = "ok";
+    cur.msg = "Reclaiming write control...";
+    renderTabs();
+    paint();
+  }
+};
+
+renderActivity();
 }
 function renderActivity(): void {
   $("#actsum").textContent = "";
@@ -221,7 +235,7 @@ function syncComposer(t: Tab): void {
   });
 }
 
-function tabCaption(t: Tab, compact: boolean): { text: string; tooltip: string; agentId: string | null } {
+function tabCaption(t: Tab, compact: boolean): { text: string; tooltip: string; agentId: string | null; logoId: string | null } {
   if (t.activeAgent || t.cwd) {
     return formatTabLabel(
       {
@@ -229,12 +243,18 @@ function tabCaption(t: Tab, compact: boolean): { text: string; tooltip: string; 
         homeDir: t.homeDir,
         active_agent: t.activeAgent,
         agent_label: t.agentLabel,
+        shell_kind: t.shellKind,
       },
       compact,
     );
   }
   const fallback = t.label && t.label !== "local shell" ? t.label : "shell";
-  return { text: fallback, tooltip: t.host && t.host !== "local shell" ? t.host : fallback, agentId: null };
+  return {
+    text: fallback,
+    tooltip: t.host && t.host !== "local shell" ? t.host : fallback,
+    agentId: null,
+    logoId: t.shellKind === "powershell" ? "powershell" : null,
+  };
 }
 
 function renderTabs(): void {
@@ -257,10 +277,11 @@ function renderTabs(): void {
         if (e.button === 1) closeTab(t);
       });
       main.onclick = () => select(t);
-      x.setAttribute("aria-label", `Close ${cap.text}. The session keeps running.`);
+      x.title = "End session (use Pause in Workspaces to suspend)";
+      x.setAttribute("aria-label", `Close and end ${cap.text}`);
       x.onclick = () => closeTab(t);
-      const logoId = cap.agentId ?? "powershell";
-      b.append(createAgentLogoElement(logoId, cap.text), main, x);
+      if (cap.logoId) b.append(createAgentLogoElement(cap.logoId, cap.text));
+      b.append(main, x);
       return b;
     }),
     add,
@@ -269,7 +290,9 @@ function renderTabs(): void {
 }
 
 function select(t: Tab | null): void {
+  if (cur && cur !== t) cur.composer.clearStickyModifiers();
   cur = t;
+  $("#app").classList.remove("show-side");
   for (const x of tabs) x.el.hidden = !(x === t || (t !== null && x === t.pair));
   $("#panes").classList.toggle("has", tabs.length > 0);
   $("#panes").classList.toggle("split", !!t?.pair);
@@ -282,14 +305,15 @@ function select(t: Tab | null): void {
   $("#branch").setAttribute("aria-expanded", "false");
   $("#dtitle").textContent = "";
   note($("#diff"), "Select a changed file on the right to see its diff.");
-  if (t)
+  if (t && !matchMedia("(max-width: 900px), (pointer: coarse)").matches) {
     requestAnimationFrame(() => {
       fitVisible();
-      if (t.composer.isRaw()) {
-        if (matchMedia("(max-width: 900px), (pointer: coarse)").matches) t.composer.focusRaw();
-        else t.term.focus();
-      } else t.composer.focus();
+      if (t.composer.isRaw()) t.term.focus();
+      else t.composer.focus();
     });
+  } else if (t) {
+    requestAnimationFrame(() => fitVisible());
+  }
   renderTabs();
   paint();
   void loadChanges();
@@ -303,7 +327,18 @@ function removeTabUi(t: Tab): void {
   t.el.remove();
   tabs.splice(tabs.indexOf(t), 1);
   for (const x of tabs) if (x.pair === t) x.pair = null;
-  renderActivity();
+  $("#msg").onclick = () => {
+  if (cur && !cur.hasWriterControl && cur.b !== "down") {
+    cur.conn.takeoverWriter();
+    cur.hasWriterControl = true;
+    cur.b = "ok";
+    cur.msg = "Reclaiming write control...";
+    renderTabs();
+    paint();
+  }
+};
+
+renderActivity();
   select(cur === t ? (tabs.at(-1) ?? null) : cur);
   void refresh();
 }
@@ -320,6 +355,7 @@ function suspendTab(t: Tab): void {
 }
 
 function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host: string): void {
+  $("#app").classList.remove("show-side");
   if ("spec" in t) label = uniqueLabel(label);
   const pane = el("div", "pane"),
     screen = el("div", "screen"),
@@ -336,6 +372,14 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     "spec" in t && "LocalPty" in t.spec && typeof t.spec.LocalPty.cwd === "string" && t.spec.LocalPty.cwd.trim()
       ? t.spec.LocalPty.cwd.trim()
       : null;
+  const initialShellKind =
+    "spec" in t
+      ? "Ssh" in t.spec
+        ? "ssh"
+        : t.spec.LocalPty.shell === "SystemPowerShell"
+          ? "powershell"
+          : null
+      : null;
   const tab = {
     id: "id" in t ? t.id : null,
     label,
@@ -351,6 +395,8 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     homeDir: null,
     activeAgent: null,
     agentLabel: null,
+    shellKind: initialShellKind,
+    hasWriterControl: true,
     pair: null,
     blocks,
   } as unknown as Tab;
@@ -451,6 +497,22 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
       paint();
       logEvent(tab, stateText(s));
       void refresh();
+    },
+    presence: (writerId) => {
+      if (writerId === null && tab.b !== "down") {
+        tab.hasWriterControl = false;
+        tab.b = "warn";
+        tab.msg = "Write control paused (slow connection). Click here to reclaim.";
+        renderTabs();
+        paint();
+        logEvent(tab, "Write control paused");
+      } else if (writerId !== null && !tab.hasWriterControl) {
+        tab.hasWriterControl = true;
+        if (tab.b === "warn") tab.b = "ok";
+        if (tab.msg.startsWith("Write control paused")) tab.msg = "Running";
+        renderTabs();
+        paint();
+      }
     },
     prompt: (k, m) => ask(k, m, tab),
   };
@@ -674,19 +736,22 @@ async function refresh(): Promise<void> {
           const nextHome = s.home_dir ?? null;
           const nextAgent = s.active_agent ?? null;
           const nextAgentLabel = s.agent_label ?? null;
+          const nextShellKind = s.shell_kind ?? null;
           const agentChanged = open.activeAgent !== nextAgent;
           if (
             open.ws !== nextWs ||
             open.cwd !== nextCwd ||
             open.homeDir !== nextHome ||
             agentChanged ||
-            open.agentLabel !== nextAgentLabel
+            open.agentLabel !== nextAgentLabel ||
+            open.shellKind !== nextShellKind
           ) {
             open.ws = nextWs;
             open.cwd = nextCwd;
             open.homeDir = nextHome;
             open.activeAgent = nextAgent;
             open.agentLabel = nextAgentLabel;
+            open.shellKind = nextShellKind;
             tabsDirty = true;
           }
           if (nextAgent) {
@@ -734,6 +799,7 @@ async function refresh(): Promise<void> {
                         homeDir: s.home_dir,
                         active_agent: s.active_agent,
                         agent_label: s.agent_label,
+                        shell_kind: s.shell_kind,
                       },
                       false,
                     ).text
@@ -750,29 +816,23 @@ async function refresh(): Promise<void> {
             };
             const actBtn = el("button", "ib sess-act");
             actBtn.type = "button";
-            const actImg = document.createElement("img");
-            actImg.width = 14;
-            actImg.height = 14;
             if (isOpen && openTabRef) {
-              actImg.src = "/icons/pause.svg";
-              actImg.alt = "Suspend";
               actBtn.title = "Suspend session (keep running in background)";
               actBtn.setAttribute("aria-label", `Suspend ${nm}`);
+              actBtn.append(icon("pause"));
               actBtn.onclick = (ev) => {
                 ev.stopPropagation();
                 suspendTab(openTabRef);
               };
             } else {
-              actImg.src = "/icons/play.svg";
-              actImg.alt = "Resume";
               actBtn.title = "Resume session";
               actBtn.setAttribute("aria-label", `Resume ${nm}`);
+              actBtn.append(icon("play"));
               actBtn.onclick = (ev) => {
                 ev.stopPropagation();
                 openTab({ id: s.id }, nm, nm);
               };
             }
-            actBtn.append(actImg);
             row.append(b, actBtn);
             g.append(row);
           }
@@ -782,7 +842,18 @@ async function refresh(): Promise<void> {
       $("#empty-ws").hidden = list.length > 0;
       if (tabsDirty) {
         renderTabs();
-        renderActivity();
+        $("#msg").onclick = () => {
+  if (cur && !cur.hasWriterControl && cur.b !== "down") {
+    cur.conn.takeoverWriter();
+    cur.hasWriterControl = true;
+    cur.b = "ok";
+    cur.msg = "Reclaiming write control...";
+    renderTabs();
+    paint();
+  }
+};
+
+renderActivity();
       }
       paint();
       void probeShellCapabilities();
@@ -1712,6 +1783,17 @@ document.addEventListener("visibilitychange", () => {
     void refresh();
   }
 });
+
+$("#msg").onclick = () => {
+  if (cur && !cur.hasWriterControl && cur.b !== "down") {
+    cur.conn.takeoverWriter();
+    cur.hasWriterControl = true;
+    cur.b = "ok";
+    cur.msg = "Reclaiming write control...";
+    renderTabs();
+    paint();
+  }
+};
 
 renderActivity();
 $("#ws-fallback").hidden = true;

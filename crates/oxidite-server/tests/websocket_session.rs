@@ -386,3 +386,138 @@ async fn test_websocket_ssh_mismatch_and_bad_password_refused() {
         "expected BackendError for bad password, got {err_msg:?}"
     );
 }
+
+struct FastExitMockBackend {
+    rx: Option<tokio::sync::mpsc::Receiver<oxidite_session::BackendEvent>>,
+}
+
+impl oxidite_session::Backend for FastExitMockBackend {
+    fn write<'life0, 'life1, 'async_trait>(
+        &'life0 mut self,
+        _bytes: &'life1 [u8],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = oxidite_session::Result<()>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+    fn resize<'life0, 'async_trait>(
+        &'life0 mut self,
+        _size: TermSize,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = oxidite_session::Result<()>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+    fn events(&mut self) -> tokio::sync::mpsc::Receiver<oxidite_session::BackendEvent> {
+        self.rx.take().unwrap()
+    }
+    fn kill<'life0, 'async_trait>(
+        &'life0 mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = oxidite_session::Result<()>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn test_early_exit_attach_reports_exit_code_not_not_found() {
+    let manager = SessionManager::new();
+    let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(4);
+    ev_tx
+        .send(oxidite_session::BackendEvent::Exited(Some(7)))
+        .await
+        .unwrap();
+    let sid = uuid::Uuid::new_v4();
+    manager.create_with_backend(
+        sid,
+        TermSize { rows: 24, cols: 80 },
+        Box::new(FastExitMockBackend { rx: Some(ev_rx) }),
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let token = "early-exit-token".to_string();
+    let state = AppState {
+        manager,
+        token: token.clone(),
+        static_dir: "web/dist".into(),
+        known_hosts: oxidite_ssh::KnownHostsStore::new(),
+        security: oxidite_server::security::SecurityConfig::default(),
+        auth: oxidite_server::auth::UserStore::new(),
+        shares: oxidite_server::share::ShareStore::new(),
+        rate_limiter: oxidite_server::security::RateLimiter::new(),
+        metrics: oxidite_server::metrics::MetricsCollector::new(),
+        node_id: "node-early-exit".into(),
+        directory: std::sync::Arc::new(oxidite_directory::InMemoryDirectory::new()),
+        devices: oxidite_server::devices::DeviceStore::default(),
+        device_connections: oxidite_server::device_connections::DeviceConnectionRegistry::default(),
+    };
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(state)).await.unwrap();
+    });
+
+    let url = format!("ws://{addr}/ws");
+    let (mut ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_stream
+        .send(Message::Binary(
+            pack_client_msg(&ClientMsg::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                token,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let _welcome = ws_stream.next().await.unwrap().unwrap();
+
+    ws_stream
+        .send(Message::Binary(
+            pack_client_msg(&ClientMsg::Attach {
+                session: sid,
+                last_offset: None,
+                mode: AttachMode::Writer,
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_exit_code = false;
+    let mut saw_session_exited_err = false;
+    for _ in 0..4 {
+        if let Ok(Some(Ok(Message::Binary(data)))) =
+            tokio::time::timeout(Duration::from_secs(2), ws_stream.next()).await
+        {
+            match unpack_server_msg(&data).unwrap() {
+                ServerMsg::Exit { code: Some(7) } => saw_exit_code = true,
+                ServerMsg::Error {
+                    code: oxidite_proto::ErrorCode::SessionExited,
+                    ..
+                } => saw_session_exited_err = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_exit_code, "expected ServerMsg::Exit with code 7");
+    assert!(
+        saw_session_exited_err,
+        "expected ErrorCode::SessionExited instead of SessionNotFound"
+    );
+}
