@@ -6,7 +6,9 @@ export interface ProjectReport {
   path: string;
   git_branch: string | null;
   language: string | null;
+  languages?: string[];
   frameworks: string[];
+  databases?: string[];
   pkg_manager: string | null;
   prod_deps: number | null;
   dev_deps: number | null;
@@ -220,8 +222,13 @@ export function createProjectBanner(opts: ProjectBannerOptions): ProjectBannerHa
     dl.className = "proj-kv";
 
     addRow(dl, "Name:", r.name, true);
-    if (r.language) addRow(dl, "Language:", r.language, true);
-    if (r.frameworks.length > 0) addRow(dl, "Frameworks:", r.frameworks.join(", "), true);
+    const langsText =
+      r.languages && r.languages.length > 0 ? r.languages.join(", ") : r.language;
+    if (langsText) addRow(dl, "Languages:", langsText, true);
+    if (r.frameworks.length > 0) addRow(dl, "Frameworks & Libs:", r.frameworks.join(", "), true);
+    if (r.databases && r.databases.length > 0) {
+      addRow(dl, "Databases:", r.databases.join(", "), true);
+    }
     if (r.pkg_manager) addRow(dl, "Pkg Manager:", r.pkg_manager, true);
 
     if (r.prod_deps !== null || r.dev_deps !== null) {

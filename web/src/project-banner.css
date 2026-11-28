@@ -156,7 +156,7 @@ button.proj-cmd-row:focus-visible .proj-cmd-name {
 
 .proj-kv {
   display: grid;
-  grid-template-columns: 15ch minmax(0, 1fr);
+  grid-template-columns: 19ch minmax(0, 1fr);
   gap: 3px 12px;
   margin: 0;
   padding-left: 14px;
@@ -200,7 +200,7 @@ button.proj-cmd-row:focus-visible .proj-cmd-name {
   }
 
   .proj-kv {
-    grid-template-columns: 13ch minmax(0, 1fr);
+    grid-template-columns: 17ch minmax(0, 1fr);
     padding-left: 8px;
   }
 }
