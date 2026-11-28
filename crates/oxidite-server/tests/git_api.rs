@@ -524,3 +524,63 @@ async fn test_git_pull_push_and_ahead_behind_against_bare_remote() {
 
     let _ = std::fs::remove_dir_all(&temp_root);
 }
+
+#[tokio::test]
+async fn test_fs_worktree_list_and_preview_api() {
+    let temp_root = std::env::temp_dir().join(format!("oxidite-fs-{}", uuid::Uuid::new_v4()));
+    let work_dir = temp_root.join("project");
+    let sub_dir = work_dir.join("src");
+    let outside_dir = temp_root.join("outside");
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&sub_dir).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    std::fs::write(work_dir.join("README.md"), "# Oxidite\n").unwrap();
+    std::fs::write(sub_dir.join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(outside_dir.join("secret.txt"), "top-secret").unwrap();
+
+    let manager = SessionManager::new();
+    let sid = uuid::Uuid::new_v4();
+    manager.set_cwd(sid, work_dir.clone());
+
+    let (mut state, token) = test_state(manager);
+    state.security.workspace_roots = vec![work_dir.clone()];
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, create_app(state)).await.unwrap();
+    });
+
+    // 1. Root worktree listing returns dirs first, then files
+    let (st_list, body_list) = http_get(addr, &format!("/api/fs/list?session={sid}"), &token).await;
+    assert_eq!(st_list, 200);
+    let list_json: serde_json::Value = serde_json::from_str(&body_list).unwrap();
+    let entries = list_json["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["name"], "src");
+    assert_eq!(entries[0]["is_dir"], true);
+    assert_eq!(entries[1]["name"], "README.md");
+    assert_eq!(entries[1]["is_dir"], false);
+
+    // 2. Subfolder navigation and file preview work
+    let (st_read, body_read) = http_get(
+        addr,
+        &format!("/api/fs/read?session={sid}&path=src/main.rs"),
+        &token,
+    )
+    .await;
+    assert_eq!(st_read, 200);
+    let read_json: serde_json::Value = serde_json::from_str(&body_read).unwrap();
+    assert_eq!(read_json["name"], "main.rs");
+    assert_eq!(read_json["content"], "fn main() {}\n");
+
+    // 3. Traversal outside workspace roots is rejected with 403
+    let (st_esc, _) = http_get(
+        addr,
+        &format!("/api/fs/read?session={sid}&path=../outside/secret.txt"),
+        &token,
+    )
+    .await;
+    assert_eq!(st_esc, 403);
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}

@@ -185,6 +185,34 @@ describe("mobile-kbd-bar", () => {
     bar.destroy();
   });
 
+  test("Tab button invokes onTab in composer mode and sendRaw(\\t) in raw mode", () => {
+    let tabCalls = 0;
+    let raw = false;
+    const sentRaw: string[] = [];
+    const ta = new FakeElement("textarea") as unknown as HTMLTextAreaElement;
+    const bar = createMobileKbdBar({
+      textarea: ta,
+      sendRaw: (d) => sentRaw.push(d),
+      insertText: () => {},
+      onTab: () => {
+        tabCalls += 1;
+      },
+      isRawMode: () => raw,
+    });
+    const fixedButtons = (bar.element as unknown as FakeElement).children[0]!.children;
+    const tabBtn = fixedButtons.find((b) => b.textContent === "Tab")!;
+
+    tabBtn.dispatch("click");
+    expect(tabCalls).toBe(1);
+    expect(sentRaw).toEqual([]);
+
+    raw = true;
+    tabBtn.dispatch("click");
+    expect(tabCalls).toBe(1);
+    expect(sentRaw).toEqual(["\t"]);
+    bar.destroy();
+  });
+
   test("IME composition in rawProxy waits until compositionend before flushing", () => {
     const { bar, sentRaw } = setup(true);
     const proxy = bar.rawProxy as unknown as FakeElement;

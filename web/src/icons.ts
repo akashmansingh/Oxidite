@@ -3,6 +3,11 @@ export type IconName =
   | "plus"
   | "split"
   | "diff"
+  | "sidebarLeft"
+  | "sidebarRight"
+  | "gitDiff"
+  | "jumpTop"
+  | "jumpBottom"
   | "expand"
   | "devices"
   | "sessions"
@@ -32,6 +37,22 @@ const SHAPES: Record<IconName, [string, Record<string, string>][]> = {
     ["rect", { x: "2", y: "3", width: "12", height: "10", rx: "2" }],
     ["path", { d: "M10 3v10" }],
   ],
+  sidebarLeft: [
+    ["rect", { x: "2", y: "3", width: "12", height: "10", rx: "2" }],
+    ["path", { d: "M5.5 3v10" }],
+  ],
+  sidebarRight: [
+    ["rect", { x: "2", y: "2.5", width: "12", height: "11", rx: "2" }],
+    ["path", { d: "M2 5.5h12M10.5 5.5v8" }],
+  ],
+  gitDiff: [
+    ["path", { d: "M6.75 5.25L6.75 10.5C6.75 13.312 6.75 14.718 7.466 15.704C7.697 16.023 7.977 16.303 8.296 16.534C9.282 17.25 10.688 17.25 13.5 17.25M11.25 15L13.5 17.25L11.25 19.5" }],
+    ["path", { d: "M17.25 18.75L17.25 13.5C17.25 10.688 17.25 9.282 16.534 8.296C16.303 7.977 16.023 7.697 15.704 7.466C14.718 6.75 13.312 6.75 10.5 6.75M12.75 4.5L10.5 6.75L12.75 9" }],
+    ["circle", { cx: "6.75", cy: "5.25", r: "1.5", fill: "currentColor", stroke: "none" }],
+    ["circle", { cx: "17.25", cy: "18.75", r: "1.5", fill: "currentColor", stroke: "none" }],
+  ],
+  jumpTop: [["path", { d: "M8 11h3v10h2V11h3l-4-4-4 4zM4 3v2h16V3H4z", fill: "currentColor", stroke: "none" }]],
+  jumpBottom: [["path", { d: "M16 13h-3V3h-2v10H8l4 4 4-4zM4 19v2h16v-2H4z", fill: "currentColor", stroke: "none" }]],
   expand: [["path", { d: "M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9" }]],
   devices: [
     ["rect", { x: "2", y: "3", width: "12", height: "8", rx: "1.5" }],
@@ -66,14 +87,17 @@ const SHAPES: Record<IconName, [string, Record<string, string>][]> = {
   pause: [["path", { d: "M5 3.5v9M11 3.5v9" }]],
 };
 
+const VIEWBOX_24 = new Set<IconName>(["gitDiff", "jumpTop", "jumpBottom"]);
+
 export function icon(name: IconName): SVGSVGElement {
   const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("viewBox", "0 0 16 16");
-  svg.setAttribute("width", "16");
-  svg.setAttribute("height", "16");
+  const is24 = VIEWBOX_24.has(name);
+  svg.setAttribute("viewBox", is24 ? "0 0 24 24" : "0 0 16 16");
+  svg.setAttribute("width", is24 ? "24" : "16");
+  svg.setAttribute("height", is24 ? "24" : "16");
   svg.setAttribute("fill", "none");
   svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.5");
+  svg.setAttribute("stroke-width", is24 ? "1.6" : "1.5");
   svg.setAttribute("stroke-linecap", "round");
   svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true");

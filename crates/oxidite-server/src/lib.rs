@@ -193,6 +193,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/devices/:id", delete(revoke_device_handler))
         .route("/api/runtime/shells", get(runtime_shells_handler))
         .route("/api/fs/list", get(fs_list_handler))
+        .route("/api/fs/read", get(fs_read_handler))
         .route("/api/git/changes", get(git_api::git_changes_handler))
         .route("/api/git/diff", get(git_api::git_diff_handler))
         .route("/api/git/log", get(git_api::git_log_handler))
@@ -570,15 +571,29 @@ pub struct FsListResponse {
     pub entries: Vec<FsEntry>,
 }
 
+#[derive(Serialize)]
+pub struct FsReadResponse {
+    pub path: String,
+    pub name: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
 async fn fs_list_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<FsListQuery>,
 ) -> Result<Json<FsListResponse>, StatusCode> {
     let user_id = git_api::check_auth(&state, &headers).await?;
-    let Some(cwd) = git_api::resolve_session_cwd(&state, &user_id, q.session.as_deref()).await?
-    else {
-        return Err(StatusCode::BAD_REQUEST);
+    let cwd = match git_api::resolve_session_cwd(&state, &user_id, q.session.as_deref()).await? {
+        Some(dir) => dir,
+        None => {
+            let sec = state.security.clone();
+            tokio::task::spawn_blocking(move || sec.resolve_default_cwd())
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::BAD_REQUEST)?
+        }
     };
 
     let target = match q.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -622,6 +637,75 @@ async fn fs_list_handler(
         root: root_str,
         entries,
     }))
+}
+
+async fn fs_read_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<FsListQuery>,
+) -> Result<Json<FsReadResponse>, StatusCode> {
+    const MAX_PREVIEW_BYTES: usize = 256 * 1024;
+    let user_id = git_api::check_auth(&state, &headers).await?;
+    let cwd = match git_api::resolve_session_cwd(&state, &user_id, q.session.as_deref()).await? {
+        Some(dir) => dir,
+        None => {
+            let sec = state.security.clone();
+            tokio::task::spawn_blocking(move || sec.resolve_default_cwd())
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::BAD_REQUEST)?
+        }
+    };
+
+    let raw = q
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let p = std::path::PathBuf::from(raw);
+    let candidate = if p.is_absolute() { p } else { cwd.join(p) };
+    let canon = security::canonical_clean_path(&candidate).ok_or(StatusCode::NOT_FOUND)?;
+    if !state.security.is_workspace_path_allowed(&canon) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let sec = state.security.clone();
+    let res = tokio::task::spawn_blocking(move || -> Result<FsReadResponse, StatusCode> {
+        use std::io::Read;
+        if !sec.is_workspace_path_allowed(&canon) || !canon.is_file() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let file = std::fs::File::open(&canon).map_err(|_| StatusCode::FORBIDDEN)?;
+        let mut buf = Vec::new();
+        file.take((MAX_PREVIEW_BYTES + 1) as u64)
+            .read_to_end(&mut buf)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let truncated = buf.len() > MAX_PREVIEW_BYTES;
+        if truncated {
+            buf.truncate(MAX_PREVIEW_BYTES);
+        }
+        if buf.contains(&0) {
+            return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+        let content = String::from_utf8_lossy(&buf).into_owned();
+        let path_str = canon.to_string_lossy().into_owned();
+        let name = canon
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&path_str)
+            .to_string();
+        Ok(FsReadResponse {
+            path: path_str,
+            name,
+            content,
+            truncated,
+        })
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(res))
 }
 
 async fn runtime_shells_handler(

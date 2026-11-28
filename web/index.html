@@ -28,11 +28,13 @@
       </div>
     </header>
     <div id="wsbox">
+      <div class="side-head"><h2>Workspaces</h2></div>
       <div id="ws"></div>
       <div id="ws-fallback" class="ws-fallback" hidden></div>
       <p id="empty-ws" class="note">No sessions yet. Start one and it keeps running after you close this tab.</p>
     </div>
     <div id="fsbox" hidden>
+      <div class="side-head"><h2>Worktree</h2><button id="fs-refresh" class="ib" type="button" data-icon="refresh" title="Refresh worktree" aria-label="Refresh worktree"></button></div>
       <div id="fstree"><p class="note">Open a local session to browse its worktree.</p></div>
     </div>
     <section id="act" aria-label="Connection activity">
@@ -43,12 +45,12 @@
 
   <section id="term-pane">
     <div class="tabbar">
-      <button id="sb" class="ib" type="button" data-icon="sessions" title="Toggle sidebar" aria-label="Toggle sidebar" aria-pressed="true"></button>
+      <button id="sb" class="ib" type="button" data-icon="sidebarLeft" title="Toggle sidebar" aria-label="Toggle sidebar" aria-pressed="true"></button>
       <div id="tabs" role="tablist" aria-label="Open sessions"></div>
       <div class="rib" role="toolbar" aria-label="Terminal layout">
         <button id="sp" class="ib" type="button" data-icon="split" title="Split terminal" aria-label="Split the terminal" aria-pressed="false"></button>
         <button id="dt" class="ib" type="button" data-icon="diff" title="Toggle diff pane" aria-label="Toggle diff pane" aria-pressed="true"></button>
-        <button id="cg" class="ib" type="button" data-icon="changes" title="Toggle changes pane" aria-label="Toggle changes pane" aria-pressed="true"></button>
+        <button id="cg" class="ib" type="button" data-icon="sidebarRight" title="Toggle changes pane" aria-label="Toggle changes pane" aria-pressed="true"></button>
         <i class="rib-sep" aria-hidden="true"></i>
         <button id="fs" class="ib" type="button" data-icon="expand" title="Focus mode" aria-label="Toggle focus mode" aria-pressed="false"></button>
       </div>
@@ -57,7 +59,7 @@
   </section>
 
   <section id="diffpane">
-    <header class="ph"><h2>Uncommitted changes</h2><span id="dtitle" class="path"></span><button id="diff-close" class="ib small-only" type="button" data-icon="close" title="Hide diff" aria-label="Hide diff pane"></button></header>
+    <header class="ph"><span class="ph-ico" data-icon="gitDiff" aria-hidden="true"></span><h2>Uncommitted changes</h2><span id="dtitle" class="path"></span><button id="diff-close" class="ib small-only" type="button" data-icon="close" title="Hide diff" aria-label="Hide diff pane"></button></header>
     <div id="diff"><p class="note">Select a changed file on the right to see its diff.</p></div>
   </section>
 

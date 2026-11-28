@@ -318,6 +318,7 @@ function select(t: Tab | null): void {
   paint();
   void loadChanges();
   if (!$("#hist").hidden) void loadHistory();
+  if (!$("#fsbox").hidden) void loadFilesTree();
   void refresh();
 }
 
@@ -358,10 +359,39 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
   $("#app").classList.remove("show-side");
   if ("spec" in t) label = uniqueLabel(label);
   const pane = el("div", "pane"),
+    stage = el("div", "pane-stage"),
     screen = el("div", "screen"),
-    blocks = createCommandBlocks();
+    blocks = createCommandBlocks(),
+    jumpTop = el("button", "jump-btn jump-top"),
+    jumpBottom = el("button", "jump-btn jump-bottom");
+  jumpTop.type = "button";
+  jumpTop.title = "Jump to top";
+  jumpTop.setAttribute("aria-label", "Jump to top of output");
+  jumpTop.append(icon("jumpTop"));
+  jumpTop.onclick = () => {
+    if (pane.dataset.mode === "raw") {
+      term.scrollToTop();
+      screen.querySelector(".xterm-viewport")?.scrollTo({ top: 0 });
+    } else {
+      blocks.el.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+  jumpBottom.type = "button";
+  jumpBottom.title = "Jump to latest bottom";
+  jumpBottom.setAttribute("aria-label", "Jump to bottom of output");
+  jumpBottom.append(icon("jumpBottom"));
+  jumpBottom.onclick = () => {
+    if (pane.dataset.mode === "raw") {
+      term.scrollToBottom();
+      const vp = screen.querySelector(".xterm-viewport");
+      if (vp) vp.scrollTop = vp.scrollHeight;
+    } else {
+      blocks.el.scrollTo({ top: blocks.el.scrollHeight, behavior: "smooth" });
+    }
+  };
   pane.dataset.mode = "blocks";
-  pane.append(blocks.el, screen);
+  stage.append(blocks.el, screen, jumpTop, jumpBottom);
+  pane.append(stage);
   $("#panes").append(pane);
   const { term, fit } = makeTerminal(screen, theme);
   // The input bar grows with its text, so the terminal above it refits whenever its own box changes.
@@ -861,6 +891,7 @@ renderActivity();
         if (activeCwdChanged) {
           $("#dtitle").textContent = "";
           note($("#diff"), "Select a changed file on the right to see its diff.");
+          if (!$("#fsbox").hidden) void loadFilesTree();
         }
         void loadChanges();
         if (!$("#hist").hidden) void loadHistory();
@@ -1413,6 +1444,38 @@ $("#term-pane").addEventListener("pointerdown", () => $("#app").classList.remove
 $("#ws").addEventListener("click", () => $("#app").classList.remove("show-side"));
 
 type FsEntry = { name: string; path: string; is_dir: boolean };
+
+async function loadFilePreview(sessionId: string, filePath: string, name: string): Promise<void> {
+  $("#dtitle").textContent = name;
+  $("#app").classList.remove("nodiff");
+  if (small()) {
+    $("#app").classList.remove("show-side", "show-chg");
+    $("#app").classList.add("show-diff");
+  }
+  const out = $("#diff");
+  try {
+    const res = await api<{ path: string; name: string; content: string; truncated: boolean }>(
+      `/api/fs/read?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`,
+    );
+    const lines = res.content.split(/\r?\n/);
+    const rows = lines.map((line, idx) => {
+      const r = el("div", "drow preview");
+      const ln = el("span", "n", String(idx + 1));
+      const code = el("span", "c");
+      code.append(hl(line));
+      r.append(ln, code);
+      return r;
+    });
+    if (res.truncated) {
+      rows.push(el("div", "hunk", "Preview truncated at 256 KiB"));
+    }
+    out.replaceChildren(...rows);
+  } catch (err) {
+    const status = err instanceof ApiError ? err.status : null;
+    note(out, status === 415 ? "Binary file preview is not supported." : "Could not load file preview.");
+  }
+}
+
 async function renderFsDir(container: HTMLElement, sessionId: string, dirPath?: string): Promise<void> {
   const q = dirPath
     ? `/api/fs/list?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dirPath)}`
@@ -1425,19 +1488,29 @@ async function renderFsDir(container: HTMLElement, sessionId: string, dirPath?: 
   } else {
     container.replaceChildren(list);
   }
+  if (res.entries.length === 0) {
+    list.append(el("p", "note", "Empty folder"));
+    return;
+  }
   for (const item of res.entries) {
     if (item.is_dir) {
       const wrap = el("div");
       const btn = el("button", "fs-row fs-dir");
       btn.type = "button";
-      const chev = icon("chevronRight");
-      btn.append(chev, icon("folder"), el("span", "fs-name", item.name));
+      let chev = icon("chevronRight");
+      const folderIcon = icon("folder");
+      const nameSpan = el("span", "fs-name", item.name);
+      btn.append(chev, folderIcon, nameSpan);
       const children = el("div", "fs-children");
       children.hidden = true;
       let loaded = false;
       btn.onclick = async () => {
-        children.hidden = !children.hidden;
-        if (!children.hidden && !loaded) {
+        const opening = children.hidden;
+        children.hidden = !opening;
+        const nextChev = icon(opening ? "chevronDown" : "chevronRight");
+        chev.replaceWith(nextChev);
+        chev = nextChev;
+        if (opening && !loaded) {
           loaded = true;
           try {
             await renderFsDir(children, sessionId, item.path);
@@ -1449,8 +1522,16 @@ async function renderFsDir(container: HTMLElement, sessionId: string, dirPath?: 
       wrap.append(btn, children);
       list.append(wrap);
     } else {
-      const row = el("div", "fs-row fs-file");
+      const row = el("button", "fs-row fs-file");
+      row.type = "button";
       row.append(icon("file"), el("span", "fs-name", item.name));
+      row.onclick = () => {
+        for (const prev of $("#fstree").querySelectorAll(".fs-row.is-active")) {
+          prev.classList.remove("is-active");
+        }
+        row.classList.add("is-active");
+        void loadFilePreview(sessionId, item.path, item.name);
+      };
       list.append(row);
     }
   }
@@ -1459,7 +1540,7 @@ async function renderFsDir(container: HTMLElement, sessionId: string, dirPath?: 
 async function loadFilesTree(): Promise<void> {
   const box = $("#fstree");
   if (!token || !cur?.id) {
-    note(box, "Open a local session to browse its worktree.");
+    note(box, "Open a session to browse its worktree.");
     return;
   }
   try {
@@ -1479,6 +1560,7 @@ const switchSidebar = (mode: "ws" | "files"): void => {
 };
 $("#rail-ws").onclick = () => switchSidebar("ws");
 $("#rail-files").onclick = () => switchSidebar("files");
+$("#fs-refresh").onclick = () => void loadFilesTree();
 const root = document.documentElement;
 for (const [sel, v, dir] of [
   ["#side", "--w-side", 1],
