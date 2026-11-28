@@ -7,6 +7,8 @@ export interface MobileKbdBarOptions {
   sendRaw: (data: string) => void;
   /** Inserts text into the composer (or forwards to PTY in raw mode). */
   insertText: (text: string) => void;
+  /** Triggered when Tab is tapped in composer mode. */
+  onTab?: () => void;
   /** Triggered when Shift+Enter is tapped in composer mode. */
   onShiftEnter?: () => void;
   /** Triggered when Scroll-Lock / Read-Only mode toggles. */
@@ -162,7 +164,17 @@ export function createMobileKbdBar(opts: MobileKbdBarOptions): MobileKbdBarHandl
 
   // Fixed action buttons
   fixedRow.append(
-    makeFixedButton("Tab", "Send Tab", runUnlatchingAction(() => opts.sendRaw("\t"))),
+    makeFixedButton(
+      "Tab",
+      "Tab autocomplete",
+      runUnlatchingAction(() => {
+        if (!opts.isRawMode?.() && opts.onTab) {
+          opts.onTab();
+        } else {
+          opts.sendRaw("\t");
+        }
+      }),
+    ),
     ctrlBtn,
     makeFixedButton("^C", "Send Ctrl+C (SIGINT)", runUnlatchingAction(() => opts.sendRaw("\x03"))),
     makeFixedButton("Esc", "Send Escape", runUnlatchingAction(() => opts.sendRaw("\x1b"))),

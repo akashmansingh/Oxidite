@@ -192,6 +192,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/devices", get(list_devices_handler))
         .route("/api/devices/:id", delete(revoke_device_handler))
         .route("/api/runtime/shells", get(runtime_shells_handler))
+        .route("/api/fs/list", get(fs_list_handler))
         .route("/api/git/changes", get(git_api::git_changes_handler))
         .route("/api/git/diff", get(git_api::git_diff_handler))
         .route("/api/git/log", get(git_api::git_log_handler))
@@ -548,6 +549,79 @@ async fn revoke_device_handler(
         Err(devices::DeviceAuthError::Unauthorized) => StatusCode::UNAUTHORIZED,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+#[derive(Deserialize)]
+pub struct FsListQuery {
+    pub session: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Serialize)]
+pub struct FsListResponse {
+    pub root: String,
+    pub entries: Vec<FsEntry>,
+}
+
+async fn fs_list_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<FsListQuery>,
+) -> Result<Json<FsListResponse>, StatusCode> {
+    let user_id = git_api::check_auth(&state, &headers).await?;
+    let Some(cwd) = git_api::resolve_session_cwd(&state, &user_id, q.session.as_deref()).await?
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    let target = match q.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let p = std::path::PathBuf::from(raw);
+            let candidate = if p.is_absolute() { p } else { cwd.join(p) };
+            let canon = security::canonical_clean_path(&candidate).ok_or(StatusCode::NOT_FOUND)?;
+            if !state.security.is_workspace_path_allowed(&canon) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            canon
+        }
+        None => cwd,
+    };
+
+    let root_str = target.to_string_lossy().into_owned();
+    let entries = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&target) else {
+            return out;
+        };
+        for entry in rd.flatten().take(300) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let path = entry.path().to_string_lossy().into_owned();
+            out.push(FsEntry { name, path, is_dir });
+        }
+        out.sort_by(|a, b| {
+            b.is_dir.cmp(&a.is_dir).then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
+        });
+        out
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(FsListResponse {
+        root: root_str,
+        entries,
+    }))
 }
 
 async fn runtime_shells_handler(

@@ -16,11 +16,24 @@
 <body>
 <div id="app">
   <aside id="side">
-    <header class="ph"><h2>Workspaces</h2><div class="ph-acts"><button id="devs" class="ib" type="button" data-icon="devices" title="Paired devices and access tokens" aria-label="Manage devices"></button><button id="new" class="ib" type="button" title="New session" aria-label="New session"></button></div></header>
+    <header class="ph side-rail">
+      <div class="rail-tabs" role="tablist" aria-label="Sidebar view">
+        <button id="rail-ws" class="ib" type="button" data-icon="sessions" title="Workspaces" aria-label="Workspaces" aria-pressed="true"></button>
+        <button id="rail-files" class="ib" type="button" data-icon="folder" title="Files / Worktree" aria-label="Files and worktree" aria-pressed="false"></button>
+        <button id="devs" class="ib" type="button" data-icon="devices" title="Machines &amp; paired devices" aria-label="Manage devices"></button>
+      </div>
+      <div class="ph-acts">
+        <button id="new" class="ib" type="button" title="New session" aria-label="New session"></button>
+        <button id="side-close" class="ib small-only" type="button" data-icon="close" title="Hide sidebar" aria-label="Hide sidebar"></button>
+      </div>
+    </header>
     <div id="wsbox">
       <div id="ws"></div>
       <div id="ws-fallback" class="ws-fallback" hidden></div>
       <p id="empty-ws" class="note">No sessions yet. Start one and it keeps running after you close this tab.</p>
+    </div>
+    <div id="fsbox" hidden>
+      <div id="fstree"><p class="note">Open a local session to browse its worktree.</p></div>
     </div>
     <section id="act" aria-label="Connection activity">
       <header class="ph"><h2>Activity</h2><span id="actsum" class="path"></span></header>
@@ -30,12 +43,12 @@
 
   <section id="term-pane">
     <div class="tabbar">
-      <button id="sb" class="ib small-only" type="button" data-icon="sessions" title="Sessions" aria-label="Show sessions"></button>
+      <button id="sb" class="ib" type="button" data-icon="sessions" title="Toggle sidebar" aria-label="Toggle sidebar" aria-pressed="true"></button>
       <div id="tabs" role="tablist" aria-label="Open sessions"></div>
       <div class="rib" role="toolbar" aria-label="Terminal layout">
         <button id="sp" class="ib" type="button" data-icon="split" title="Split terminal" aria-label="Split the terminal" aria-pressed="false"></button>
-        <button id="dt" class="ib" type="button" data-icon="diff" title="Diff pane" aria-label="Toggle diff pane" aria-pressed="true"></button>
-        <button id="cg" class="ib small-only" type="button" data-icon="changes" title="Changes" aria-label="Show changes"></button>
+        <button id="dt" class="ib" type="button" data-icon="diff" title="Toggle diff pane" aria-label="Toggle diff pane" aria-pressed="true"></button>
+        <button id="cg" class="ib" type="button" data-icon="changes" title="Toggle changes pane" aria-label="Toggle changes pane" aria-pressed="true"></button>
         <i class="rib-sep" aria-hidden="true"></i>
         <button id="fs" class="ib" type="button" data-icon="expand" title="Focus mode" aria-label="Toggle focus mode" aria-pressed="false"></button>
       </div>
@@ -44,7 +57,7 @@
   </section>
 
   <section id="diffpane">
-    <header class="ph"><h2>Uncommitted changes</h2><span id="dtitle" class="path"></span></header>
+    <header class="ph"><h2>Uncommitted changes</h2><span id="dtitle" class="path"></span><button id="diff-close" class="ib small-only" type="button" data-icon="close" title="Hide diff" aria-label="Hide diff pane"></button></header>
     <div id="diff"><p class="note">Select a changed file on the right to see its diff.</p></div>
   </section>
 
@@ -52,6 +65,7 @@
     <div class="ptabs" role="tablist">
       <button id="tab-c" role="tab" aria-selected="true">Changes <small id="count">0</small></button>
       <button id="tab-h" role="tab" aria-selected="false">History</button>
+      <button id="chg-close" class="ib small-only" type="button" data-icon="close" title="Hide changes" aria-label="Hide changes pane"></button>
     </div>
     <div class="sumrow branchbar">
       <button id="branch" class="branch" type="button" aria-haspopup="listbox" aria-expanded="false"><span data-icon="branch"></span><span id="bname">No repository</span></button>

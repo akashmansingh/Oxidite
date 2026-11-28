@@ -1145,7 +1145,10 @@ for (const b of document.querySelectorAll<HTMLElement>("[data-icon]")) b.prepend
 const appEl = $("#app");
 const syncRibbon = (): void => {
   const c = appEl.classList;
+  const mobileSide = matchMedia("(max-width: 720px)").matches;
+  $("#sb").setAttribute("aria-pressed", String(mobileSide ? c.contains("show-side") : !c.contains("noside") && !c.contains("focus")));
   $("#dt").setAttribute("aria-pressed", String(small() ? c.contains("show-diff") : !c.contains("nodiff") && !c.contains("focus")));
+  $("#cg").setAttribute("aria-pressed", String(small() ? c.contains("show-chg") : !c.contains("nochg") && !c.contains("focus")));
   $("#fs").setAttribute("aria-pressed", String(c.contains("focus")));
 };
 new MutationObserver(syncRibbon).observe(appEl, { attributes: true, attributeFilter: ["class"] });
@@ -1388,14 +1391,94 @@ $("#commit").onclick = async () => {
 };
 new ResizeObserver(fitVisible).observe($("#panes"));
 
-// Drawers on small screens, drag handles on wide ones.
-$("#sb").onclick = () => $("#app").classList.toggle("show-side");
-$("#cg").onclick = () => {
-  $("#app").classList.remove("show-diff");
-  $("#app").classList.toggle("show-chg");
+// Drawers on small screens, hideable panes on desktop, drag handles on wide ones.
+$("#sb").onclick = () => {
+  if (matchMedia("(max-width: 720px)").matches) $("#app").classList.toggle("show-side");
+  else $("#app").classList.toggle("noside");
+  fitVisible();
 };
+$("#cg").onclick = () => {
+  if (small()) {
+    $("#app").classList.remove("show-diff");
+    $("#app").classList.toggle("show-chg");
+  } else {
+    $("#app").classList.toggle("nochg");
+    fitVisible();
+  }
+};
+$("#side-close").onclick = () => $("#app").classList.remove("show-side");
+$("#diff-close").onclick = () => $("#app").classList.remove("show-diff");
+$("#chg-close").onclick = () => $("#app").classList.remove("show-chg");
 $("#term-pane").addEventListener("pointerdown", () => $("#app").classList.remove("show-side", "show-diff", "show-chg"));
 $("#ws").addEventListener("click", () => $("#app").classList.remove("show-side"));
+
+type FsEntry = { name: string; path: string; is_dir: boolean };
+async function renderFsDir(container: HTMLElement, sessionId: string, dirPath?: string): Promise<void> {
+  const q = dirPath
+    ? `/api/fs/list?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dirPath)}`
+    : `/api/fs/list?session=${encodeURIComponent(sessionId)}`;
+  const res = await api<{ root: string; entries: FsEntry[] }>(q);
+  const list = el("div", "fs-list");
+  if (!dirPath) {
+    const rootName = res.root.split(/[/\\]/).filter(Boolean).pop() ?? res.root;
+    container.replaceChildren(el("div", "fs-root", rootName), list);
+  } else {
+    container.replaceChildren(list);
+  }
+  for (const item of res.entries) {
+    if (item.is_dir) {
+      const wrap = el("div");
+      const btn = el("button", "fs-row fs-dir");
+      btn.type = "button";
+      const chev = icon("chevronRight");
+      btn.append(chev, icon("folder"), el("span", "fs-name", item.name));
+      const children = el("div", "fs-children");
+      children.hidden = true;
+      let loaded = false;
+      btn.onclick = async () => {
+        children.hidden = !children.hidden;
+        if (!children.hidden && !loaded) {
+          loaded = true;
+          try {
+            await renderFsDir(children, sessionId, item.path);
+          } catch {
+            note(children, "Unavailable");
+          }
+        }
+      };
+      wrap.append(btn, children);
+      list.append(wrap);
+    } else {
+      const row = el("div", "fs-row fs-file");
+      row.append(icon("file"), el("span", "fs-name", item.name));
+      list.append(row);
+    }
+  }
+}
+
+async function loadFilesTree(): Promise<void> {
+  const box = $("#fstree");
+  if (!token || !cur?.id) {
+    note(box, "Open a local session to browse its worktree.");
+    return;
+  }
+  try {
+    await renderFsDir(box, cur.id);
+  } catch {
+    note(box, "Worktree files are unavailable for this session.");
+  }
+}
+
+const switchSidebar = (mode: "ws" | "files"): void => {
+  const isFiles = mode === "files";
+  $("#wsbox").hidden = isFiles;
+  $("#fsbox").hidden = !isFiles;
+  $("#rail-ws").setAttribute("aria-pressed", String(!isFiles));
+  $("#rail-files").setAttribute("aria-pressed", String(isFiles));
+  if (isFiles) void loadFilesTree();
+};
+$("#rail-ws").onclick = () => switchSidebar("ws");
+$("#rail-files").onclick = () => switchSidebar("files");
 const root = document.documentElement;
 for (const [sel, v, dir] of [
   ["#side", "--w-side", 1],

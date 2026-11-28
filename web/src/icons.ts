@@ -13,6 +13,8 @@ export type IconName =
   | "prompt"
   | "refresh"
   | "chevronDown"
+  | "chevronRight"
+  | "close"
   | "resizeDiag"
   | "play"
   | "pause";
@@ -57,6 +59,8 @@ const SHAPES: Record<IconName, [string, Record<string, string>][]> = {
     ["path", { d: "M13.5 2.5v3h-3" }],
   ],
   chevronDown: [["path", { d: "M4 6l4 4 4-4" }]],
+  chevronRight: [["path", { d: "M6 4l4 4-4 4" }]],
+  close: [["path", { d: "M4 4l8 8M12 4l-8 8" }]],
   resizeDiag: [["path", { d: "M9.5 3.5h3v3M6.5 12.5h-3v-3M12.5 3.5L9 7M3.5 12.5L7 9" }]],
   play: [["path", { d: "M5 3.5l8 4.5-8 4.5z" }]],
   pause: [["path", { d: "M5 3.5v9M11 3.5v9" }]],

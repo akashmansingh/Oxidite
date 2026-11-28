@@ -502,6 +502,9 @@ export function createComposer(opts: ComposerOptions): Composer {
       closeAc();
       scheduleLiveComplete(20);
     },
+    onTab: () => {
+      void runTabComplete(false);
+    },
     onShiftEnter: () => {
       if (root.dataset.raw === "1") {
         opts.send("\n");
