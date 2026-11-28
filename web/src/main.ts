@@ -1,5 +1,6 @@
 import "./style.css";
 import "./mobile-kbd-bar.css";
+import "./project-banner.css";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { makeTerminal, THEMES, type ThemeName } from "./terminal";
@@ -8,6 +9,8 @@ import { stateName, type BackendSpec, type Msg, type SessionState, type ShellCap
 import { DeviceVault } from "./device-vault";
 import { createComposer, type Composer, type CompletionResult } from "./composer";
 import { createCommandBlocks, type CommandBlockView } from "./blocks";
+import { createProjectBanner, type ProjectBannerHandle } from "./project-banner";
+import { isMarkdownFileName, renderMarkdownToFragment } from "./markdown";
 import { icon, type IconName } from "./icons";
 import { installVisualViewportSync } from "./mobile-kbd-bar";
 import { createAgentLogoElement, formatTabLabel } from "./tab-label";
@@ -62,6 +65,7 @@ interface Tab {
   pair: Tab | null;
   composer: Composer;
   blocks: CommandBlockView;
+  banner: ProjectBannerHandle;
   /** Folder name the gateway reports for this session; null until the first refresh. */
   ws: string | null;
   /** Full working directory path reported for this session. */
@@ -323,6 +327,7 @@ function select(t: Tab | null): void {
 }
 
 function removeTabUi(t: Tab): void {
+  t.banner.destroy();
   t.composer.destroy();
   t.term.dispose();
   t.el.remove();
@@ -362,6 +367,42 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     stage = el("div", "pane-stage"),
     screen = el("div", "screen"),
     blocks = createCommandBlocks(),
+    banner = createProjectBanner({
+      fetchJson: (url) => api(url),
+      version: "v0.1.0",
+      helpHint: "tab autocomplete · ctrl+shift+l raw terminal",
+      commands: [
+        {
+          name: "new",
+          desc: "start a local or SSH session",
+          onClick: () => $("#new").click(),
+        },
+        {
+          name: "files",
+          desc: "browse worktree files & markdown viewer",
+          onClick: () => {
+            if (matchMedia("(max-width: 720px)").matches) $("#app").classList.add("show-side");
+            else $("#app").classList.remove("noside");
+            switchSidebar("files");
+          },
+        },
+        {
+          name: "pull",
+          desc: "fast-forward current branch from remote",
+          onClick: () => document.querySelector<HTMLButtonElement>('[data-fetch-act="pull"]')?.click(),
+        },
+        {
+          name: "push",
+          desc: "push local commits to remote",
+          onClick: () => document.querySelector<HTMLButtonElement>('[data-fetch-act="push"]')?.click(),
+        },
+        {
+          name: "devices",
+          desc: "manage paired phones & tokens",
+          onClick: () => $("#devs").click(),
+        },
+      ],
+    }),
     jumpTop = el("button", "jump-btn jump-top"),
     jumpBottom = el("button", "jump-btn jump-bottom");
   jumpTop.type = "button";
@@ -390,6 +431,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     }
   };
   pane.dataset.mode = "blocks";
+  blocks.el.prepend(banner.element);
   stage.append(blocks.el, screen, jumpTop, jumpBottom);
   pane.append(stage);
   $("#panes").append(pane);
@@ -429,6 +471,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     hasWriterControl: true,
     pair: null,
     blocks,
+    banner,
   } as unknown as Tab;
   const updateLiveCwd = (rawPath: string): void => {
     const cleaned = rawPath
@@ -439,6 +482,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     if (tab.cwd === cleaned) return;
     tab.cwd = cleaned;
     tab.ws = cleaned.split(/[/\\]/).filter(Boolean).pop() ?? cleaned;
+    if (tab.id && tab.ws !== "Remote") void tab.banner.refreshForSession(tab.id, tab.cwd);
     renderTabs();
     paint();
     clearTimeout(cwdRefreshTimer);
@@ -478,6 +522,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     reset: () => {
       term.reset();
       blocks.reset();
+      blocks.el.prepend(tab.banner.element);
     },
     link: (l) => {
       if (l === "retry" && tab.a === "ok") logEvent(tab, "Lost the gateway");
@@ -508,6 +553,7 @@ function openTab(t: { id: string } | { spec: BackendSpec }, label: string, host:
     created: (id) => {
       tab.id = id;
       rememberName(id, tab.label);
+      if (tab.ws !== "Remote") void tab.banner.refreshForSession(id, tab.cwd);
       void refresh();
       void loadChanges();
     },
@@ -783,6 +829,9 @@ async function refresh(): Promise<void> {
             open.agentLabel = nextAgentLabel;
             open.shellKind = nextShellKind;
             tabsDirty = true;
+          }
+          if (nextCwd && nextWs !== "Remote") {
+            void open.banner.refreshForSession(s.id, nextCwd);
           }
           if (nextAgent) {
             if (!open.composer.isRaw() || open.el.dataset.mode !== "raw") {
@@ -1258,6 +1307,7 @@ async function loadBranches(): Promise<void> {
           try {
             await api("/api/git/checkout", { session: cur.id, branch: n });
             $("#msg").textContent = `Switched to ${n}.`;
+            if (cur.ws !== "Remote") void cur.banner.refreshForSession(cur.id, cur.cwd, true);
           } catch {
             $("#msg").textContent = `Could not switch to ${n}. Commit or stash your changes first.`;
           }
@@ -1361,9 +1411,11 @@ for (const b of document.querySelectorAll<HTMLButtonElement>("#fetch-menu [data-
       fetchBtn.disabled = false;
       lbl.textContent = "Fetch";
       await loadChanges();
+      if (cur.id && cur.ws !== "Remote") void cur.banner.refreshForSession(cur.id, cur.cwd, true);
       if (!$("#hist").hidden) await loadHistory();
     } else if (act === "refresh") {
       await loadChanges();
+      if (cur?.id && cur.ws !== "Remote") void cur.banner.refreshForSession(cur.id, cur.cwd, true);
       if (!$("#hist").hidden) await loadHistory();
     }
   };
@@ -1377,7 +1429,10 @@ $("#cmsg-expand").onclick = () => {
 };
 document.addEventListener("click", closeAllMenus);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeAllMenus();
+  if (e.key === "Escape") {
+    closeAllMenus();
+    if (!$("#filepane").hidden) closeFileViewer();
+  }
 });
 $("#fetch").onclick = async () => {
   if (!cur?.id) {
@@ -1391,6 +1446,7 @@ $("#fetch").onclick = async () => {
   try {
     await api("/api/git/fetch", { session: cur.id });
     $("#msg").textContent = "Fetched from the remote.";
+    if (cur.ws !== "Remote") void cur.banner.refreshForSession(cur.id, cur.cwd, true);
   } catch {
     $("#msg").textContent = "Fetch failed. Check the remote and its credentials on the gateway.";
   }
@@ -1412,6 +1468,7 @@ $("#commit").onclick = async () => {
     await api("/api/git/commit", { session: cur.id, message: m.value, mode: commitMode });
     m.value = "";
     $("#msg").textContent = "Commit created.";
+    if (cur.ws !== "Remote") void cur.banner.refreshForSession(cur.id, cur.cwd, true);
   } catch {
     $("#msg").textContent =
       commitMode === "staged"
@@ -1444,33 +1501,104 @@ $("#term-pane").addEventListener("pointerdown", () => $("#app").classList.remove
 $("#ws").addEventListener("click", () => $("#app").classList.remove("show-side"));
 
 type FsEntry = { name: string; path: string; is_dir: boolean };
+interface FileViewState {
+  name: string;
+  path: string;
+  content: string;
+  truncated: boolean;
+  isMarkdown: boolean;
+  mode: "rendered" | "raw";
+}
+let fileViewState: FileViewState | null = null;
+let fileLoadSeq = 0;
+
+function renderActiveFileView(): void {
+  const out = $("#filebody");
+  if (!fileViewState) {
+    out.replaceChildren();
+    return;
+  }
+  const modeBar = $("#fp-mode");
+  modeBar.hidden = !fileViewState.isMarkdown;
+  $("#fp-rendered").setAttribute("aria-selected", String(fileViewState.mode === "rendered"));
+  $("#fp-raw").setAttribute("aria-selected", String(fileViewState.mode === "raw"));
+
+  if (fileViewState.isMarkdown && fileViewState.mode === "rendered") {
+    const doc = el("article", "md-view");
+    doc.append(renderMarkdownToFragment(fileViewState.content));
+    if (fileViewState.truncated) {
+      doc.append(el("div", "hunk", "Preview truncated at 256 KiB"));
+    }
+    out.replaceChildren(doc);
+    out.scrollTop = 0;
+    return;
+  }
+
+  const lines = fileViewState.content.split(/\r?\n/);
+  const rows = lines.map((line, idx) => {
+    const r = el("div", "drow preview");
+    const ln = el("span", "n", String(idx + 1));
+    const code = el("span", "c");
+    code.append(hl(line));
+    r.append(ln, code);
+    return r;
+  });
+  if (fileViewState.truncated) {
+    rows.push(el("div", "hunk", "Preview truncated at 256 KiB"));
+  }
+  out.replaceChildren(...rows);
+  out.scrollTop = 0;
+}
+
+function closeFileViewer(): void {
+  $("#filepane").hidden = true;
+  fileViewState = null;
+  for (const prev of $("#fstree").querySelectorAll(".fs-row.is-active")) {
+    prev.classList.remove("is-active");
+  }
+}
+
+$("#file-close").onclick = closeFileViewer;
+$("#fp-rendered").onclick = () => {
+  if (!fileViewState || !fileViewState.isMarkdown) return;
+  fileViewState.mode = "rendered";
+  renderActiveFileView();
+};
+$("#fp-raw").onclick = () => {
+  if (!fileViewState || !fileViewState.isMarkdown) return;
+  fileViewState.mode = "raw";
+  renderActiveFileView();
+};
 
 async function loadFilePreview(sessionId: string, filePath: string, name: string): Promise<void> {
-  $("#dtitle").textContent = name;
-  $("#app").classList.remove("nodiff");
-  if (small()) {
-    $("#app").classList.remove("show-side", "show-chg");
-    $("#app").classList.add("show-diff");
-  }
-  const out = $("#diff");
+  const seq = ++fileLoadSeq;
+  $("#fptitle").textContent = name;
+  $("#fppath").textContent = filePath;
+  $("#fp-mode").hidden = true;
+  $("#filepane").hidden = false;
+  if (small()) $("#app").classList.remove("show-side");
+  const out = $("#filebody");
+  note(out, "Loading file...");
   try {
     const res = await api<{ path: string; name: string; content: string; truncated: boolean }>(
       `/api/fs/read?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`,
     );
-    const lines = res.content.split(/\r?\n/);
-    const rows = lines.map((line, idx) => {
-      const r = el("div", "drow preview");
-      const ln = el("span", "n", String(idx + 1));
-      const code = el("span", "c");
-      code.append(hl(line));
-      r.append(ln, code);
-      return r;
-    });
-    if (res.truncated) {
-      rows.push(el("div", "hunk", "Preview truncated at 256 KiB"));
-    }
-    out.replaceChildren(...rows);
+    if (seq !== fileLoadSeq) return;
+    const isMarkdown = isMarkdownFileName(res.name);
+    fileViewState = {
+      name: res.name,
+      path: res.path,
+      content: res.content,
+      truncated: res.truncated,
+      isMarkdown,
+      mode: isMarkdown ? "rendered" : "raw",
+    };
+    $("#fptitle").textContent = res.name;
+    $("#fppath").textContent = res.path;
+    renderActiveFileView();
   } catch (err) {
+    if (seq !== fileLoadSeq) return;
+    fileViewState = null;
     const status = err instanceof ApiError ? err.status : null;
     note(out, status === 415 ? "Binary file preview is not supported." : "Could not load file preview.");
   }

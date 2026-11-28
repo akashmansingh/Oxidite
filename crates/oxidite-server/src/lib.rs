@@ -10,6 +10,7 @@ pub mod git_api;
 pub mod git_network;
 pub mod metrics;
 pub mod origin_guard;
+pub mod project_scan;
 pub mod routing;
 pub mod security;
 pub mod share;
@@ -194,6 +195,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/api/runtime/shells", get(runtime_shells_handler))
         .route("/api/fs/list", get(fs_list_handler))
         .route("/api/fs/read", get(fs_read_handler))
+        .route("/api/project/scan", get(api_project_scan))
         .route("/api/git/changes", get(git_api::git_changes_handler))
         .route("/api/git/diff", get(git_api::git_diff_handler))
         .route("/api/git/log", get(git_api::git_log_handler))
@@ -706,6 +708,27 @@ async fn fs_read_handler(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
     Ok(Json(res))
+}
+
+#[derive(Deserialize)]
+struct ProjectScanQuery {
+    #[serde(alias = "session")]
+    sid: Option<String>,
+}
+
+async fn api_project_scan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<ProjectScanQuery>,
+) -> Result<Json<project_scan::ProjectReport>, StatusCode> {
+    let user_id = git_api::check_auth(&state, &headers).await?;
+    let Some(cwd) = git_api::resolve_session_cwd(&state, &user_id, q.sid.as_deref()).await? else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let report = project_scan::scan_project_dir(cwd)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(report))
 }
 
 async fn runtime_shells_handler(

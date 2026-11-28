@@ -93,6 +93,7 @@ export function createComposer(opts: ComposerOptions): Composer {
   const editor = h("div", "editor");
   const ghost = h("div", "editor-ghost");
   const ta = h("textarea");
+  ta.className = "oxidite-composer-input";
   ta.rows = 1;
   ta.placeholder = PLACEHOLDER;
   ta.spellcheck = false;

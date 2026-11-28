@@ -63,6 +63,22 @@
     <div id="diff"><p class="note">Select a changed file on the right to see its diff.</p></div>
   </section>
 
+  <section id="filepane" aria-label="File viewer" hidden>
+    <header class="ph fp-head">
+      <span class="ph-ico" data-icon="file" aria-hidden="true"></span>
+      <div class="fp-title-wrap">
+        <h2 id="fptitle">File preview</h2>
+        <span id="fppath" class="path"></span>
+      </div>
+      <div id="fp-mode" class="seg" role="tablist" aria-label="Markdown view mode" hidden>
+        <button id="fp-rendered" type="button" role="tab" aria-selected="true">Rendered</button>
+        <button id="fp-raw" type="button" role="tab" aria-selected="false">Raw</button>
+      </div>
+      <button id="file-close" class="ib" type="button" data-icon="close" title="Close file viewer" aria-label="Close file viewer"></button>
+    </header>
+    <div id="filebody"></div>
+  </section>
+
   <aside id="chg">
     <div class="ptabs" role="tablist">
       <button id="tab-c" role="tab" aria-selected="true">Changes <small id="count">0</small></button>
